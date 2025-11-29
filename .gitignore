@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+*.pyc
+*.pyo
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Application Runtime
+config.json
+*.log
+*.log.*
+logs/
+
+# Build Artifacts
+dist/
+build/
+*.spec.bak
+
+# PyInstaller
+*.manifest
+*.spec.bak
+
+# Exclude installer build artifacts but ALLOW final releases
+installer/dist/
+installer/Output/
+*.exe
+*.msi
+# EXCEPT: Allow release installers in releases/ folder
+!releases/*.exe
+!releases/*.msi
+!releases/*.zip
+
+# Local DLLs (user-specific paths)
+# Keep ASICamera2.dll in source for bundling
+# *.dll
+
+# User Data
+output/
+watch_dir_test/
+test_output/
+
+# Temporary Files
+*.tmp
+*.temp
+~*

@@ -1,0 +1,242 @@
+"""
+Image processing module
+Handles image processing, overlays, and preview generation
+"""
+import os
+import random
+from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageTk
+from services.processor import add_overlays
+from services.logger import app_logger
+import traceback
+
+
+class ImageProcessor:
+    """Manages image processing and preview generation"""
+    
+    def __init__(self, app):
+        self.app = app
+    
+    def process_and_save_image(self, img, metadata):
+        """Process image with overlays and save"""
+        try:
+            # Get config
+            overlays = self.app.overlay_manager.get_overlays_config()
+            output_dir = self.app.output_dir_var.get()
+            output_format = self.app.output_format_var.get()
+            jpg_quality = self.app.jpg_quality_var.get()
+            resize_percent = self.app.resize_percent_var.get()
+            auto_brightness = self.app.auto_brightness_var.get()
+            brightness_factor = self.app.brightness_var.get() if auto_brightness else None
+            timestamp_corner = self.app.timestamp_corner_var.get()
+            filename_pattern = self.app.filename_pattern_var.get()
+            
+            if not output_dir:
+                app_logger.error("Output directory not configured")
+                return
+            
+            # Ensure output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Resize if needed
+            if resize_percent < 100:
+                new_width = int(img.width * resize_percent / 100)
+                new_height = int(img.height * resize_percent / 100)
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # Apply auto brightness if enabled
+            if auto_brightness and brightness_factor:
+                enhancer = ImageEnhance.Brightness(img)
+                img = enhancer.enhance(brightness_factor)
+            
+            # Add timestamp corner if enabled
+            if timestamp_corner:
+                draw = ImageDraw.Draw(img)
+                timestamp_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                try:
+                    font = ImageFont.truetype("arial.ttf", 20)
+                except:
+                    font = ImageFont.load_default()
+                # Top-right corner
+                draw.text((img.width - 200, 10), timestamp_text, fill='white', font=font)
+            
+            # Add overlays
+            img = add_overlays(img, overlays, metadata)
+            
+            # Generate output filename
+            session = metadata.get('session', datetime.now().strftime('%Y-%m-%d'))
+            original_filename = metadata.get('FILENAME', 'capture.png')
+            base_filename = os.path.splitext(original_filename)[0]
+            
+            # Replace tokens in filename pattern
+            output_filename = filename_pattern.replace('{filename}', base_filename)
+            output_filename = output_filename.replace('{session}', session)
+            output_filename = output_filename.replace('{timestamp}', datetime.now().strftime('%Y%m%d_%H%M%S'))
+            
+            # Add extension
+            if output_format.lower() == 'png':
+                output_filename += '.png'
+            else:
+                output_filename += '.jpg'
+            
+            output_path = os.path.join(output_dir, output_filename)
+            
+            # Save
+            if output_format.lower() == 'png':
+                img.save(output_path, 'PNG')
+            else:
+                img.save(output_path, 'JPEG', quality=jpg_quality)
+            
+            self.app.last_processed_image = output_path
+            self.app.preview_image = img  # Store for preview
+            app_logger.info(f"Saved: {os.path.basename(output_path)}")
+            
+            # Push to output servers if active
+            self.app._push_to_output_servers(output_path, img)
+            
+            # Auto-refresh preview if enabled
+            if self.app.auto_refresh_var.get():
+                self.app.root.after(0, lambda: self.refresh_preview(auto_fit=True))
+            
+        except Exception as e:
+            app_logger.error(f"Processing failed: {e}")
+            app_logger.error(traceback.format_exc())
+    
+    def refresh_preview(self, auto_fit=True):
+        """Refresh preview display"""
+        # Use the last processed image or last captured image
+        if not self.app.preview_image:
+            # Try to load the last processed image file
+            if self.app.last_processed_image and os.path.exists(self.app.last_processed_image):
+                try:
+                    self.app.preview_image = Image.open(self.app.last_processed_image)
+                except Exception as e:
+                    app_logger.error(f"Failed to load preview: {e}")
+                    return
+            else:
+                return
+        
+        try:
+            # Apply auto brightness if enabled (for display only)
+            display_base = self.app.preview_image.copy()
+            if self.app.auto_brightness_var.get():
+                from PIL import ImageEnhance
+                import numpy as np
+                
+                # Analyze brightness
+                img_array = np.array(display_base.convert('L'))
+                mean_brightness = np.mean(img_array)
+                target_brightness = 128
+                auto_factor = target_brightness / max(mean_brightness, 10)
+                auto_factor = max(0.5, min(auto_factor, 4.0))
+                
+                # Apply manual multiplier
+                manual_factor = self.app.brightness_var.get()
+                final_factor = auto_factor * manual_factor
+                
+                enhancer = ImageEnhance.Brightness(display_base)
+                display_base = enhancer.enhance(final_factor)
+            
+            # Auto-fit: calculate zoom to fit image in canvas
+            if auto_fit:
+                canvas_width = self.app.preview_canvas.winfo_width()
+                canvas_height = self.app.preview_canvas.winfo_height()
+                
+                # Only auto-fit if canvas has been sized (not 1x1)
+                if canvas_width > 1 and canvas_height > 1:
+                    # Calculate zoom to fit while maintaining aspect ratio
+                    zoom_x = (canvas_width - 20) / display_base.width
+                    zoom_y = (canvas_height - 20) / display_base.height
+                    zoom = min(zoom_x, zoom_y, 1.0)  # Don't zoom beyond 100%
+                    
+                    # Update the zoom slider
+                    zoom_percent = int(zoom * 100)
+                    if zoom_percent >= 10:  # Ensure it's within slider range
+                        self.app.preview_zoom_var.set(zoom_percent)
+            
+            zoom = self.app.preview_zoom_var.get() / 100.0
+            new_size = (int(display_base.width * zoom), int(display_base.height * zoom))
+            display_img = display_base.resize(new_size, Image.Resampling.LANCZOS)
+            
+            self.app.preview_photo = ImageTk.PhotoImage(display_img)
+            self.app.preview_canvas.delete('all')
+            self.app.preview_canvas.create_image(0, 0, anchor='nw', image=self.app.preview_photo)
+            self.app.preview_canvas.config(scrollregion=self.app.preview_canvas.bbox('all'))
+        except Exception as e:
+            app_logger.error(f"Preview refresh failed: {e}")
+    
+    def update_overlay_preview(self):
+        """Update the overlay preview"""
+        try:
+            # Create sample sky image
+            preview_img = Image.new('RGB', (600, 400), color='#0a0e27')
+            draw = ImageDraw.Draw(preview_img)
+            
+            # Add some stars
+            random.seed(42)
+            for _ in range(50):
+                x = random.randint(0, 600)
+                y = random.randint(0, 400)
+                brightness = random.randint(150, 255)
+                draw.ellipse([x-1, y-1, x+1, y+1], fill=(brightness, brightness, brightness))
+            
+            # Get current overlay config from editor
+            if self.app.selected_overlay_index is not None:
+                # Get datetime format from editor
+                mode = self.app.datetime_mode_var.get()
+                if mode == 'custom':
+                    datetime_format = self.app.datetime_custom_var.get()
+                elif hasattr(self.app, 'datetime_locale_var'):
+                    # Use locale-specific formats
+                    from .overlays.constants import LOCALE_FORMATS
+                    locale = self.app.datetime_locale_var.get()
+                    locale_data = LOCALE_FORMATS.get(locale, {'date': '%Y-%m-%d', 'time': '%H:%M:%S', 'datetime': '%Y-%m-%d %H:%M:%S'})
+                    if mode == 'date':
+                        datetime_format = locale_data['date']
+                    elif mode == 'time':
+                        datetime_format = locale_data['time']
+                    else:  # full
+                        datetime_format = locale_data['datetime']
+                else:
+                    from .overlays.constants import DATETIME_FORMATS
+                    datetime_format = DATETIME_FORMATS.get(mode, '%Y-%m-%d %H:%M:%S')
+                
+                overlay_config = {
+                    'text': self.app.overlay_text.get('1.0', 'end-1c'),
+                    'anchor': self.app.anchor_var.get(),
+                    'color': self.app.color_var.get(),
+                    'font_size': self.app.font_size_var.get(),
+                    'font_style': self.app.font_style_var.get(),
+                    'offset_x': self.app.offset_x_var.get(),
+                    'offset_y': self.app.offset_y_var.get(),
+                    'background_enabled': self.app.background_enabled_var.get(),
+                    'background_color': self.app.bg_color_var.get(),
+                    'datetime_format': datetime_format
+                }
+                
+                # Sample metadata for token replacement
+                metadata = {
+                    'CAMERA': 'ASI676MC',
+                    'EXPOSURE': '100ms',
+                    'GAIN': '150',
+                    'TEMP': '-5.2°C',
+                    'RES': '3840x2160',
+                    'FILENAME': 'preview.fits',
+                    'SESSION': datetime.now().strftime('%Y-%m-%d')
+                }
+                
+                # Apply overlay
+                preview_img = add_overlays(preview_img, [overlay_config], metadata)
+            
+            # Resize to fit canvas
+            preview_img.thumbnail((580, 380), Image.Resampling.LANCZOS)
+            
+            # Display in canvas
+            photo = ImageTk.PhotoImage(preview_img)
+            self.app.overlay_preview_canvas.delete('all')
+            self.app.overlay_preview_canvas.create_image(290, 190, image=photo, anchor='center')
+            self.app.overlay_preview_photo = photo  # Keep reference
+            
+        except Exception as e:
+            app_logger.error(f"Preview update failed: {e}")
+            app_logger.error(traceback.format_exc())
