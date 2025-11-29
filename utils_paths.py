@@ -60,3 +60,18 @@ def get_log_dir():
     log_dir = os.path.join(get_app_data_dir(), 'Logs')
     os.makedirs(log_dir, exist_ok=True)
     return log_dir
+
+
+def get_exe_dir():
+    """
+    Get the directory where the EXE is installed/running from.
+    
+    Returns:
+        Absolute path to the directory containing the executable (or script in dev mode)
+    """
+    if getattr(sys, 'frozen', False):
+        # Running as compiled executable
+        return os.path.dirname(sys.executable)
+    else:
+        # Running from source
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

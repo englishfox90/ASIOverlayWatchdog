@@ -597,8 +597,8 @@ Supports:
             output_format = 'png'
         self.output_format_var.set(output_format.lower())
         
-        self.jpg_quality_var.set(self.config.get('jpg_quality', 95))
-        self.resize_percent_var.set(self.config.get('resize_percent', 100))
+        self.jpg_quality_var.set(int(round(self.config.get('jpg_quality', 95))))
+        self.resize_percent_var.set(int(round(self.config.get('resize_percent', 100))))
         self.auto_brightness_var.set(self.config.get('auto_brightness', False))
         
         # Handle old brightness keys
@@ -944,11 +944,21 @@ Supports:
         import io
         
         try:
-            # Convert PIL Image to PNG bytes for web server
+            # Convert PIL Image to bytes for web server
+            # Use JPEG for better compression and faster transmission
             if self.web_server and self.web_server.running:
                 img_bytes = io.BytesIO()
-                processed_img.save(img_bytes, format='PNG')
-                self.web_server.update_image(image_path, img_bytes.getvalue())
+                # Use configured output format and quality for web server
+                output_format = self.output_format_var.get().upper()
+                if output_format == 'JPG' or output_format == 'JPEG':
+                    quality = int(round(self.jpg_quality_var.get()))
+                    processed_img.save(img_bytes, format='JPEG', quality=quality, optimize=True)
+                    content_type = 'image/jpeg'
+                else:
+                    processed_img.save(img_bytes, format='PNG', optimize=True)
+                    content_type = 'image/png'
+                
+                self.web_server.update_image(image_path, img_bytes.getvalue(), content_type=content_type)
             
             # Push PIL Image to RTSP server
             if self.rtsp_server and self.rtsp_server.running:

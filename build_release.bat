@@ -43,8 +43,9 @@ if not exist "dist\ASIOverlayWatchDog\_internal\ASICamera2.dll" (
     pause
 )
 
-REM Get version (you can edit this)
-set VERSION=2.0.0
+REM Get version from version.py
+for /f "tokens=3 delims= " %%a in ('findstr "__version__" version.py') do set VERSION_RAW=%%a
+set VERSION=%VERSION_RAW:"=%
 
 REM Create portable ZIP
 echo [4/5] Creating portable ZIP...

@@ -9,6 +9,7 @@ import json
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from .logger import app_logger
 
@@ -19,6 +20,7 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
     # Class-level variables shared between all handler instances
     latest_image_path = None
     latest_image_data = None
+    latest_image_content_type = 'image/jpeg'  # Default to JPEG
     latest_metadata = {}
     server_start_time = None
     image_count = 0
@@ -32,12 +34,31 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         config_path = self.server.config_path
         status_path = self.server.status_path
         
-        if self.path == config_path:
+        # Parse URL to strip query parameters (e.g., ?t=1764384123178)
+        parsed_url = urlparse(self.path)
+        clean_path = parsed_url.path
+        query_params = parse_qs(parsed_url.query)
+        
+        # Debug logging to diagnose path matching issues
+        app_logger.debug(f"Request: original='{self.path}', clean='{clean_path}', config='{config_path}', status='{status_path}'")
+        if query_params:
+            app_logger.debug(f"Query params: {query_params}")
+        
+        if clean_path == config_path:
             self._serve_image()
-        elif self.path == status_path:
+        elif clean_path == status_path:
             self._serve_status()
         else:
             self.send_error(404, f"Path not found. Available: {config_path}, {status_path}")
+    
+    def do_OPTIONS(self):
+        """Handle OPTIONS requests for CORS preflight."""
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
     
     def _serve_image(self):
         """Serve the latest processed image."""
@@ -47,14 +68,21 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         
         try:
             self.send_response(200)
-            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Type", self.latest_image_content_type)
             self.send_header("Content-Length", len(self.latest_image_data))
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.send_header("Pragma", "no-cache")
             self.send_header("Expires", "0")
+            # CORS headers for cross-origin requests (portals, web apps)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
             self.wfile.write(self.latest_image_data)
-            app_logger.debug(f"Served image: {len(self.latest_image_data)} bytes")
+            app_logger.debug(f"Served image: {len(self.latest_image_data)} bytes ({self.latest_image_content_type})")
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
+            # Client disconnected - this is normal, don't log as error
+            app_logger.debug(f"Client disconnected during image transfer: {e.__class__.__name__}")
         except Exception as e:
             app_logger.error(f"Error serving image: {e}")
     
@@ -78,6 +106,10 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-cache")
+            # CORS headers for cross-origin requests
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
             self.wfile.write(json.dumps(status, indent=2).encode('utf-8'))
         except Exception as e:
@@ -170,14 +202,15 @@ class WebOutputServer:
         except Exception as e:
             app_logger.error(f"Error stopping web server: {e}")
     
-    def update_image(self, image_path, image_data_bytes, metadata=None):
+    def update_image(self, image_path, image_data_bytes, metadata=None, content_type='image/jpeg'):
         """
         Update the latest image to serve.
         
         Args:
             image_path: Path to the saved image file (for reference)
-            image_data_bytes: PNG image data as bytes
+            image_data_bytes: Image data as bytes (JPEG or PNG)
             metadata: Optional dict with image metadata
+            content_type: MIME type (default: 'image/jpeg')
         """
         if not self.running:
             return
@@ -185,9 +218,10 @@ class WebOutputServer:
         try:
             ImageHTTPHandler.latest_image_path = image_path
             ImageHTTPHandler.latest_image_data = image_data_bytes
+            ImageHTTPHandler.latest_image_content_type = content_type
             ImageHTTPHandler.latest_metadata = metadata or {}
             ImageHTTPHandler.image_count += 1
-            app_logger.debug(f"Web server updated with new image: {os.path.basename(image_path)}")
+            app_logger.debug(f"Web server updated with new image: {os.path.basename(image_path)} ({len(image_data_bytes)} bytes, {content_type})")
         except Exception as e:
             app_logger.error(f"Error updating web server image: {e}")
     
