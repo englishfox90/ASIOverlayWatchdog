@@ -190,6 +190,7 @@ class CameraController:
             self.app.stop_capture_button.config(state='normal', cursor='hand2')
             self.app.camera_status_var.set("Capturing...")
             self.set_camera_status_dot('capturing')
+            
             app_logger.info("Camera capture started")
             
         except Exception as e:

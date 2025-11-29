@@ -187,13 +187,12 @@ def add_overlays(image_input, overlays, metadata):
         else:
             img = image_input
         
-        # Debug: Print the original mode
-        print(f"Original image mode: {img.mode}")
-        
-        # Don't convert - preserve the original color mode
-        # If it's already RGB or RGBA, keep it that way
-        # Only convert if it's a problematic mode for drawing
+        # Only convert palette mode - preserve RGB/RGBA
         if img.mode in ('P',):  # Only convert palette mode
+            img = img.convert('RGB')
+        
+        # Ensure RGB mode for drawing
+        if img.mode != 'RGB':
             img = img.convert('RGB')
         
         draw = ImageDraw.Draw(img)
@@ -234,7 +233,7 @@ def add_overlays(image_input, overlays, metadata):
             # Calculate position
             x, y = calculate_position(img.size, (text_width, text_height), anchor, x_offset, y_offset)
             
-            # Draw background box if enabled
+            # Draw solid background box if enabled
             if draw_background:
                 padding = 5
                 box_coords = [
@@ -243,7 +242,7 @@ def add_overlays(image_input, overlays, metadata):
                     x + text_width + padding,
                     y + text_height + padding
                 ]
-                draw.rectangle(box_coords, fill=(0, 0, 0, 180))
+                draw.rectangle(box_coords, fill=(0, 0, 0))
             
             # Draw text
             draw.text((x, y), text, fill=color, font=font)
