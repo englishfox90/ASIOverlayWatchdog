@@ -141,20 +141,28 @@ class StatusManager:
             # Clear canvas
             self.app.histogram_canvas.delete('all')
             
-            # Draw histograms
+            # Draw histograms as line graphs
             width = self.app.histogram_canvas.winfo_width()
             if width <= 1:
                 width = 600
             bin_width = width / 256
             
+            # Build coordinate lists for each channel
+            red_coords = []
+            green_coords = []
+            blue_coords = []
+            
             for i in range(256):
                 x = i * bin_width
-                # Red
-                self.app.histogram_canvas.create_line(x, 100, x, 100 - hist_r[i], fill='#ff6b6b', width=bin_width)
-                # Green (with transparency effect)
-                self.app.histogram_canvas.create_line(x, 100, x, 100 - hist_g[i], fill='#51cf66', width=bin_width)
-                # Blue
-                self.app.histogram_canvas.create_line(x, 100, x, 100 - hist_b[i], fill='#339af0', width=bin_width)
+                red_coords.extend([x, 100 - hist_r[i]])
+                green_coords.extend([x, 100 - hist_g[i]])
+                blue_coords.extend([x, 100 - hist_b[i]])
+            
+            # Draw as smooth lines (red first so it's in back, blue last so it's on top)
+            if len(red_coords) >= 4:  # Need at least 2 points
+                self.app.histogram_canvas.create_line(red_coords, fill='#ff6b6b', width=2, smooth=False)
+                self.app.histogram_canvas.create_line(green_coords, fill='#51cf66', width=2, smooth=False)
+                self.app.histogram_canvas.create_line(blue_coords, fill='#339af0', width=2, smooth=False)
             
         except Exception as e:
             app_logger.error(f"Histogram update failed: {e}")

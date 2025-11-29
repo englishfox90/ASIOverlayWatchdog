@@ -44,10 +44,39 @@ class ImageProcessor:
                 new_height = int(img.height * resize_percent / 100)
                 img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
             
-            # Apply auto brightness if enabled
-            if auto_brightness and brightness_factor:
+            # Apply auto brightness if enabled (with proper analysis)
+            if auto_brightness:
+                from PIL import ImageEnhance
+                import numpy as np
+                
+                # Analyze image brightness
+                img_array = np.array(img.convert('L'))  # Convert to grayscale for analysis
+                mean_brightness = np.mean(img_array)
+                
+                # Calculate adaptive enhancement factor
+                # Target brightness: 128 (mid-gray)
+                target_brightness = 128
+                auto_factor = target_brightness / max(mean_brightness, 10)  # Avoid division by zero
+                
+                # Clamp factor to reasonable range (0.5 - 4.0)
+                auto_factor = max(0.5, min(auto_factor, 4.0))
+                
+                # Apply manual brightness factor as additional adjustment
+                manual_factor = brightness_factor if brightness_factor else 1.0
+                final_factor = auto_factor * manual_factor
+                
                 enhancer = ImageEnhance.Brightness(img)
-                img = enhancer.enhance(brightness_factor)
+                img = enhancer.enhance(final_factor)
+                
+                app_logger.debug(f"Auto brightness: mean={mean_brightness:.1f}, auto={auto_factor:.2f}, manual={manual_factor:.2f}, final={final_factor:.2f}")
+            
+            # Apply saturation adjustment
+            saturation_factor = self.app.saturation_var.get()
+            if saturation_factor != 1.0:
+                from PIL import ImageEnhance
+                enhancer = ImageEnhance.Color(img)
+                img = enhancer.enhance(saturation_factor)
+                app_logger.debug(f"Saturation adjusted: factor={saturation_factor:.2f}")
             
             # Add timestamp corner if enabled
             if timestamp_corner:
@@ -88,11 +117,25 @@ class ImageProcessor:
                 img.save(output_path, 'JPEG', quality=jpg_quality)
             
             self.app.last_processed_image = output_path
-            self.app.preview_image = img  # Store for preview
+            # Store the ORIGINAL image before brightness/saturation for preview
+            # Preview will apply adjustments on top of this clean base
+            if resize_percent < 100:
+                new_width = int(self.app.last_captured_image.width * resize_percent / 100)
+                new_height = int(self.app.last_captured_image.height * resize_percent / 100)
+                self.app.preview_image = self.app.last_captured_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            else:
+                self.app.preview_image = self.app.last_captured_image.copy()
+            
+            # Store metadata for preview overlay rendering
+            self.app.preview_metadata = metadata.copy()
+            
             app_logger.info(f"Saved: {os.path.basename(output_path)}")
             
             # Push to output servers if active
             self.app._push_to_output_servers(output_path, img)
+            
+            # Check if Discord periodic update should be sent
+            self.app.check_discord_periodic_send(output_path)
             
             # Auto-refresh preview if enabled
             if self.app.auto_refresh_var.get():
@@ -117,10 +160,12 @@ class ImageProcessor:
                 return
         
         try:
-            # Apply auto brightness if enabled (for display only)
+            # Apply auto brightness and saturation adjustments (for display only)
             display_base = self.app.preview_image.copy()
+            from PIL import ImageEnhance
+            
+            # Apply brightness adjustment
             if self.app.auto_brightness_var.get():
-                from PIL import ImageEnhance
                 import numpy as np
                 
                 # Analyze brightness
@@ -136,6 +181,32 @@ class ImageProcessor:
                 
                 enhancer = ImageEnhance.Brightness(display_base)
                 display_base = enhancer.enhance(final_factor)
+            
+            # Apply saturation adjustment
+            saturation_factor = self.app.saturation_var.get()
+            if saturation_factor != 1.0:
+                enhancer = ImageEnhance.Color(display_base)
+                display_base = enhancer.enhance(saturation_factor)
+            
+            # Add overlays for preview (same as saved image)
+            from services.processor import add_overlays
+            overlays = self.app.overlay_manager.get_overlays_config()
+            # Use real metadata if available, otherwise create empty metadata
+            if hasattr(self.app, 'preview_metadata') and self.app.preview_metadata:
+                preview_metadata = self.app.preview_metadata
+            else:
+                # Fallback for when no image has been captured yet
+                preview_metadata = {
+                    'CAMERA': 'No Image',
+                    'EXPOSURE': '0',
+                    'GAIN': '0',
+                    'TEMP': '0',
+                    'RES': f'{display_base.width}x{display_base.height}',
+                    'FILENAME': 'preview.jpg',
+                    'SESSION': 'preview',
+                    'DATETIME': ''
+                }
+            display_base = add_overlays(display_base, overlays, preview_metadata)
             
             # Auto-fit: calculate zoom to fit image in canvas
             if auto_fit:

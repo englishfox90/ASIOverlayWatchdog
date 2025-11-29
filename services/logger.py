@@ -49,6 +49,22 @@ class AppLogger:
         self.file_logger = logging.getLogger('ASIOverlayWatchDog')
         self.file_logger.setLevel(logging.DEBUG)
         
+        # Prevent propagation to root logger to avoid duplicate messages
+        # (main.py sets up root logger via logging_config.py)
+        self.file_logger.propagate = False
+        
+        # Check if handlers already exist (prevent duplicates on re-import)
+        # Remove any existing watchdog.log handlers to avoid conflicts
+        for handler in list(self.file_logger.handlers):
+            if hasattr(handler, 'baseFilename') and 'watchdog.log' in str(handler.baseFilename):
+                self.file_logger.removeHandler(handler)
+                handler.close()
+        
+        # If there are still other handlers, just use the first one
+        if self.file_logger.handlers:
+            self.file_handler = self.file_logger.handlers[0]
+            return
+        
         # Daily rotating file handler (keeps last 7 days)
         log_file = self.log_dir / 'watchdog.log'
         handler = logging.handlers.TimedRotatingFileHandler(
@@ -139,5 +155,15 @@ class AppLogger:
         return messages
 
 
-# Global logger instance
-app_logger = AppLogger()
+# Singleton pattern to ensure only one logger instance
+_logger_instance = None
+
+def get_app_logger():
+    """Get or create the singleton logger instance"""
+    global _logger_instance
+    if _logger_instance is None:
+        _logger_instance = AppLogger()
+    return _logger_instance
+
+# Global logger instance (singleton)
+app_logger = get_app_logger()

@@ -473,13 +473,29 @@ class SettingsTab:
         
         self.app.brightness_value_label = tk.Label(
             factor_frame,
-            textvariable=self.app.brightness_var,
+            text=f"{self.app.brightness_var.get():.2f}",
             font=FONTS['body_bold'],
             bg=COLORS['bg_card'],
             fg=COLORS['text_disabled'],
-            width=4
+            width=6
         )
         self.app.brightness_value_label.pack(side='left')
+        
+        # Update label and preview when slider moves
+        def update_brightness_label(*args):
+            self.app.brightness_value_label.config(text=f"{self.app.brightness_var.get():.2f}")
+            # Refresh preview if there's an image loaded
+            if self.app.preview_image:
+                self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
+        
+        # Remove any existing traces to prevent duplicates
+        try:
+            for trace_id in self.app.brightness_var.trace_info():
+                self.app.brightness_var.trace_remove(*trace_id)
+        except:
+            pass
+        
+        self.app.brightness_var.trace_add('write', update_brightness_label)
         
         ToolTip(self.app.brightness_scale,
                text="Multiplier applied on top of auto brightness (1.0 = neutral, >1.0 = brighter, <1.0 = darker)",
@@ -509,13 +525,29 @@ class SettingsTab:
         
         self.app.saturation_value_label = tk.Label(
             scale_frame,
-            textvariable=self.app.saturation_var,
+            text=f"{self.app.saturation_var.get():.2f}",
             font=FONTS['body'],
             bg=COLORS['bg_card'],
             fg=COLORS['text_primary'],
-            width=4
+            width=6
         )
         self.app.saturation_value_label.pack(side='left')
+        
+        # Update label and preview when slider moves
+        def update_saturation_label(*args):
+            self.app.saturation_value_label.config(text=f"{self.app.saturation_var.get():.2f}")
+            # Refresh preview if there's an image loaded
+            if self.app.preview_image:
+                self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
+        
+        # Remove any existing traces to prevent duplicates
+        try:
+            for trace_id in self.app.saturation_var.trace_info():
+                self.app.saturation_var.trace_remove(*trace_id)
+        except:
+            pass
+        
+        self.app.saturation_var.trace_add('write', update_saturation_label)
         
         ToolTip(self.app.saturation_scale,
                text="Color saturation adjustment (0.0 = grayscale, 1.0 = neutral, 2.0 = very saturated)",

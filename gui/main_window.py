@@ -166,6 +166,9 @@ class ModernOverlayApp:
         self.discord_tab = DiscordTab(self.notebook, self)
         self.logs_tab = LogsTab(self.notebook, self)
         
+        # Bind tab selection to auto-fit preview when Preview tab is selected
+        self.notebook.bind('<<NotebookTabChanged>>', self.on_tab_changed)
+        
         # Create menu bar
         self.create_menu()
         
@@ -366,6 +369,19 @@ Supports:
             if hasattr(self, 'brightness_value_label'):
                 self.brightness_value_label.config(fg='#888888')
             app_logger.info("Auto brightness disabled - brightness factor has no effect")
+    
+    def on_tab_changed(self, event=None):
+        """Handle notebook tab change - auto-fit preview when Preview tab is selected"""
+        try:
+            # Get the currently selected tab index
+            current_tab = self.notebook.index(self.notebook.select())
+            # Preview tab is at index 3 (Capture=0, Overlays=1, Settings=2, Preview=3)
+            if current_tab == 3 and self.preview_image:
+                # Delay slightly to ensure canvas is sized
+                self.root.after(100, lambda: self.refresh_preview(auto_fit=True))
+        except Exception as e:
+            # Silently ignore errors (e.g., during initialization)
+            pass
     
     # ===== DELEGATE METHODS (for backward compatibility with tabs) =====
     
@@ -1118,29 +1134,40 @@ This is a test alert with your current configuration.""",
             self._set_widget_state_recursive(child, state)
     
     def schedule_discord_periodic(self):
-        """Schedule or cancel periodic Discord updates"""
-        # Cancel existing job if any
+        """Initialize Discord periodic tracking (no timer, sends on next image)"""
+        # Cancel any existing timer job
         if hasattr(self, 'discord_periodic_job') and self.discord_periodic_job:
             self.root.after_cancel(self.discord_periodic_job)
             self.discord_periodic_job = None
         
-        # Schedule new job if enabled
+        # Initialize last send time tracking
         discord_config = self.config.get('discord', {})
         if discord_config.get('enabled') and discord_config.get('periodic_enabled'):
+            import time
+            if not hasattr(self, 'discord_last_send_time'):
+                self.discord_last_send_time = 0  # Will send on first image
             interval_min = discord_config.get('periodic_interval_minutes', 60)
-            interval_ms = interval_min * 60 * 1000  # Convert to milliseconds
-            
-            def periodic_task():
-                # Send periodic update
-                image_path = self.last_processed_image or self.last_captured_image
-                self.discord_alerts.send_periodic_update(image_path)
-                
-                # Reschedule
-                self.discord_periodic_job = self.root.after(interval_ms, periodic_task)
-            
-            # Start the periodic task
-            self.discord_periodic_job = self.root.after(interval_ms, periodic_task)
-            app_logger.info(f"Discord periodic updates scheduled every {interval_min} minutes")
+            app_logger.info(f"Discord periodic updates: will send every {interval_min} minutes on next image save")
+    
+    def check_discord_periodic_send(self, image_path):
+        """Check if enough time has passed to send Discord update"""
+        discord_config = self.config.get('discord', {})
+        if not discord_config.get('enabled') or not discord_config.get('periodic_enabled'):
+            return
+        
+        import time
+        current_time = time.time()
+        interval_min = discord_config.get('periodic_interval_minutes', 60)
+        interval_sec = interval_min * 60
+        
+        # Check if enough time has passed since last send
+        if not hasattr(self, 'discord_last_send_time'):
+            self.discord_last_send_time = 0
+        
+        if current_time - self.discord_last_send_time >= interval_sec:
+            self.discord_alerts.send_periodic_update(image_path)
+            self.discord_last_send_time = current_time
+            app_logger.info(f"Discord periodic update sent (next in {interval_min} minutes)")
     
     def send_discord_error(self, error_text):
         """Send error to Discord if enabled"""
