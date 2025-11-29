@@ -71,9 +71,9 @@ class ModernOverlayApp:
         self.discord_alerts = DiscordAlerts(self.config.data)
         
         # Set window geometry
-        geometry = self.config.get('window_geometry', '1280x1700')
+        geometry = self.config.get('window_geometry', '1280x1300')
         self.root.geometry(geometry)
-        self.root.minsize(1024, 1750)
+        self.root.minsize(1024, 1300)
         
         # Save geometry on close
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
