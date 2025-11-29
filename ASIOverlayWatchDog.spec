@@ -32,6 +32,16 @@ except Exception as e:
     ttkbootstrap_binaries = []
     ttkbootstrap_hiddenimports = []
 
+# Collect requests and its dependencies for Discord webhooks
+try:
+    requests_datas, requests_binaries, requests_hiddenimports = collect_all('requests')
+    print(f"✓ Collected requests: {len(requests_datas)} data files, {len(requests_hiddenimports)} hidden imports")
+except Exception as e:
+    print(f"Warning: Could not collect requests: {e}")
+    requests_datas = []
+    requests_binaries = []
+    requests_hiddenimports = []
+
 # Additional data files to include
 added_files = [
     ('ASICamera2.dll', '.'),  # ZWO ASI SDK library
@@ -49,6 +59,29 @@ hiddenimports = [
     'PIL.ImageEnhance',
     'numpy',
     'cv2',
+    
+    # HTTP requests (required for Discord webhooks)
+    'requests',
+    'requests.adapters',
+    'requests.auth',
+    'requests.cookies',
+    'requests.exceptions',
+    'requests.models',
+    'requests.sessions',
+    'requests.structures',
+    'requests.utils',
+    'urllib3',
+    'urllib3.util',
+    'urllib3.util.retry',
+    'urllib3.util.ssl_',
+    'urllib3.connectionpool',
+    'urllib3.poolmanager',
+    'certifi',
+    'charset_normalizer',
+    'idna',
+    
+    # HTTP/Requests (for Discord webhooks)
+    'requests',
     
     # TTKBootstrap and all submodules
     'ttkbootstrap',
@@ -85,6 +118,7 @@ hiddenimports = [
     'services.color_balance',
     'services.web_output',
     'services.rtsp_output',
+    'services.discord_alerts',  # Force analyze Discord + requests dependencies
     
     # GUI modules
     'gui',
@@ -106,9 +140,9 @@ hiddenimports = [
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=ttkbootstrap_binaries,
-    datas=added_files + ttkbootstrap_datas,
-    hiddenimports=hiddenimports,
+    binaries=ttkbootstrap_binaries + requests_binaries,
+    datas=added_files + ttkbootstrap_datas + requests_datas,
+    hiddenimports=hiddenimports + ttkbootstrap_hiddenimports + requests_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

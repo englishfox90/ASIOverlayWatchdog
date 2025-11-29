@@ -106,6 +106,23 @@ On first launch, the application will:
 
 **No installation or Python required** - it's a standalone executable!
 
+#### Windows SmartScreen Warning
+
+When you first run `ASIOverlayWatchDog.exe`, Windows may show a security warning:
+
+```
+Windows protected your PC
+Microsoft Defender SmartScreen prevented an unrecognized app from starting.
+```
+
+**This is normal for unsigned software.** ASIOverlayWatchDog is open-source and safe.
+
+**To proceed:**
+1. Click **"More info"** link
+2. Click **"Run anyway"** button
+
+The warning appears because the executable isn't code-signed (costs $200-500/year). See [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) for details.
+
 ---
 
 ## Quick Start Usage
