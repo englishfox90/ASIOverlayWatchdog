@@ -3,7 +3,7 @@ Configuration management for AllSky Overlay App
 """
 import json
 import os
-from utils_paths import resource_path
+from utils_paths import resource_path, get_exe_dir
 
 DEFAULT_CONFIG = {
     # Window settings
@@ -17,11 +17,11 @@ DEFAULT_CONFIG = {
     "watch_recursive": True,
     
     # Output settings
-    "output_directory": "",
-    "filename_pattern": "{session}_{filename}",
-    "output_format": "png",
-    "jpg_quality": 95,
-    "resize_percent": 100,
+    "output_directory": get_exe_dir(),  # Save in the same directory as the EXE
+    "filename_pattern": "Latest_image",
+    "output_format": "jpg",
+    "jpg_quality": 85,
+    "resize_percent": 85,
     "timestamp_corner": False,
     
     # Output mode settings
