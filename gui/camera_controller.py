@@ -106,6 +106,9 @@ class CameraController:
     def start_camera_capture(self):
         """Start ZWO camera capture"""
         try:
+            # Ensure output servers are started if configured
+            self.app.ensure_output_mode_started()
+            
             # Show connecting status
             self.app.camera_status_var.set("Connecting...")
             self.set_camera_status_dot('connecting')

@@ -533,6 +533,9 @@ Supports:
             return
         
         try:
+            # Ensure output servers are started if configured
+            self.ensure_output_mode_started()
+            
             overlays = self.overlay_manager.get_overlays_config()
             output_dir = self.output_dir_var.get()
             recursive = self.watch_recursive_var.get()
@@ -938,6 +941,22 @@ Supports:
         
         else:  # file mode
             self.output_mode_status_var.set("Mode: File (Saving to output directory)")
+    
+    def ensure_output_mode_started(self):
+        """Ensure output mode servers are started if configured (called when capture begins)"""
+        mode = self.output_mode_var.get()
+        
+        # If webserver mode and not running, start it
+        if mode == 'webserver':
+            if not self.web_server or not self.web_server.running:
+                app_logger.info("Starting webserver automatically (configured as output mode)")
+                self.apply_output_mode()
+        
+        # If RTSP mode and not running, start it
+        elif mode == 'rtsp':
+            if not self.rtsp_server or not self.rtsp_server.running:
+                app_logger.info("Starting RTSP server automatically (configured as output mode)")
+                self.apply_output_mode()
     
     def _push_to_output_servers(self, image_path, processed_img):
         """Push processed image to active output servers"""
