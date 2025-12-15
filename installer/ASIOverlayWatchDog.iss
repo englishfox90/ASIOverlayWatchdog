@@ -3,7 +3,7 @@
 ; Requires: Inno Setup 6.0 or later (https://jrsoftware.org/isinfo.php)
 
 #define MyAppName "ASIOverlayWatchDog"
-#define MyAppVersion "2.0.3"
+#define MyAppVersion "2.0.4"
 #define MyAppPublisher "Paul Fox-Reeks"
 #define MyAppExeName "ASIOverlayWatchDog.exe"
 #define MyAppAssocName MyAppName + " File"

@@ -36,17 +36,26 @@ class CameraController:
             
             try:
                 import zwoasi as asi
+                app_logger.info("Starting camera detection...")
+                
                 # Initialize SDK
                 try:
+                    app_logger.debug(f"Initializing ASI SDK: {sdk_path}")
                     asi.init(sdk_path)
                     app_logger.info(f"ASI SDK initialized: {sdk_path}")
                 except Exception as init_error:
                     # SDK already initialized or initialization failed
                     if "already" not in str(init_error).lower():
-                        self.app.root.after(0, lambda: self._on_detection_complete([], f"SDK initialization failed: {str(init_error)}"))
+                        error_msg = f"SDK initialization failed: {str(init_error)}"
+                        app_logger.error(error_msg)
+                        self.app.root.after(0, lambda: self._on_detection_complete([], error_msg))
                         return
+                    else:
+                        app_logger.debug("SDK already initialized")
                 
+                app_logger.debug("Querying number of cameras...")
                 num_cameras = asi.get_num_cameras()
+                app_logger.info(f"SDK reports {num_cameras} camera(s)")
                 
                 if num_cameras == 0:
                     self.app.root.after(0, lambda: self._on_detection_complete([], "No cameras detected. Check USB connection."))
@@ -55,9 +64,12 @@ class CameraController:
                 camera_list = []
                 for i in range(num_cameras):
                     try:
+                        app_logger.debug(f"Opening camera {i}...")
                         cam = asi.Camera(i)
                         info = cam.get_camera_property()
-                        camera_list.append(f"{info['Name']} (ID: {info['CameraID']})")
+                        camera_name = f"{info['Name']} (ID: {info['CameraID']})"
+                        camera_list.append(camera_name)
+                        app_logger.info(f"Found camera: {camera_name}")
                     except Exception as cam_error:
                         app_logger.warning(f"Error getting camera {i} info: {cam_error}")
                         continue
@@ -69,9 +81,27 @@ class CameraController:
                 
             except Exception as e:
                 error_msg = f"Detection error: {str(e)}"
+                app_logger.error(f"Camera detection failed: {error_msg}")
+                import traceback
+                app_logger.debug(traceback.format_exc())
                 self.app.root.after(0, lambda: self._on_detection_complete([], error_msg))
         
-        threading.Thread(target=detect_thread, daemon=True).start()
+        # Start detection thread
+        detection_thread = threading.Thread(target=detect_thread, daemon=True)
+        detection_thread.start()
+        
+        # Start timeout monitor (10 second timeout)
+        def timeout_monitor():
+            detection_thread.join(timeout=10.0)
+            if detection_thread.is_alive():
+                # Thread still running after timeout
+                app_logger.error("Camera detection timed out after 10 seconds")
+                self.app.root.after(0, lambda: self._on_detection_complete(
+                    [], 
+                    "Detection timed out. Camera may be in use or SDK issue. Check logs."
+                ))
+        
+        threading.Thread(target=timeout_monitor, daemon=True).start()
     
     def _on_detection_complete(self, camera_list, error_msg):
         """Handle camera detection completion"""
@@ -79,11 +109,16 @@ class CameraController:
         self.app.capture_tab.hide_detection_spinner()
         
         if error_msg:
-            # Show inline error
+            # Show inline error with retry option
             self.app.capture_tab.show_detection_error(error_msg)
             app_logger.error(f"Camera detection failed: {error_msg}")
             self.app.camera_combo['values'] = []
             self.app.start_capture_button.config(state='disabled', cursor='')
+            
+            # Log file location hint for troubleshooting
+            log_location = app_logger.get_log_location()
+            app_logger.info(f"For detailed diagnostics, check log file: {log_location}")
+            app_logger.info("Click 'Detect Cameras' to try again")
         else:
             # Success
             self.app.camera_combo['values'] = camera_list

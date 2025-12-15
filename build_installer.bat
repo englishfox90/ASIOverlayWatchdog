@@ -60,7 +60,7 @@ echo   Build completed successfully!
 echo ========================================
 echo.
 echo Installer location:
-echo   installer\dist\ASIOverlayWatchDog-2.0.3-setup.exe
+echo   installer\dist\ASIOverlayWatchDog-2.0.4-setup.exe
 echo.
 echo You can now:
 echo   1. Test the installer

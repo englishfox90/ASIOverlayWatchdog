@@ -153,6 +153,10 @@ class AppLogger:
             except queue.Empty:
                 break
         return messages
+    
+    def get_log_location(self):
+        """Get the log file location for display to users"""
+        return str(self.log_dir / 'watchdog.log')
 
 
 # Singleton pattern to ensure only one logger instance
