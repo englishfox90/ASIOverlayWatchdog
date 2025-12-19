@@ -393,6 +393,8 @@ class CaptureTab:
                 width=10, anchor='w').pack(side='left', padx=(0, 12))
         
         self.app.schedule_start_var = tk.StringVar(value="17:00")
+        # Add trace to auto-save when time changes
+        self.app.schedule_start_var.trace_add('write', self.app.on_schedule_time_change)
         start_entry = ttk.Entry(time_frame, textvariable=self.app.schedule_start_var,
                                font=('Segoe UI', 9), style='Dark.TEntry',
                                width=6)
@@ -402,6 +404,8 @@ class CaptureTab:
                 bg=COLORS['bg_primary'], fg=COLORS['text_muted']).pack(side='left', padx=(0, 6))
         
         self.app.schedule_end_var = tk.StringVar(value="09:00")
+        # Add trace to auto-save when time changes
+        self.app.schedule_end_var.trace_add('write', self.app.on_schedule_time_change)
         end_entry = ttk.Entry(time_frame, textvariable=self.app.schedule_end_var,
                              font=('Segoe UI', 9), style='Dark.TEntry',
                              width=6)

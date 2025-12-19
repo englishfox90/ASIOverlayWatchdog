@@ -204,7 +204,8 @@ class CameraController:
                 bayer_pattern=bayer_pattern,
                 scheduled_capture_enabled=self.app.config.get('scheduled_capture_enabled', False),
                 scheduled_start_time=self.app.config.get('scheduled_start_time', '17:00'),
-                scheduled_end_time=self.app.config.get('scheduled_end_time', '09:00')
+                scheduled_end_time=self.app.config.get('scheduled_end_time', '09:00'),
+                status_callback=self.app.update_camera_status_for_schedule
             )
             
             # Set target brightness

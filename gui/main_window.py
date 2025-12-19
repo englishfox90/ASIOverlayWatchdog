@@ -412,6 +412,12 @@ Supports:
         self.schedule_start_entry.config(state=state)
         self.schedule_end_entry.config(state=state)
         
+        # Auto-save to config
+        self.config.set('scheduled_capture_enabled', enabled)
+        self.config.set('scheduled_start_time', self.schedule_start_var.get())
+        self.config.set('scheduled_end_time', self.schedule_end_var.get())
+        self.config.save()
+        
         # If camera is running, update its settings
         if hasattr(self.camera_controller, 'zwo_camera') and self.camera_controller.zwo_camera:
             self.camera_controller.zwo_camera.scheduled_capture_enabled = enabled
@@ -423,6 +429,31 @@ Supports:
                 app_logger.info(f"Scheduled capture {status}: {self.schedule_start_var.get()} - {self.schedule_end_var.get()}")
             else:
                 app_logger.info(f"Scheduled capture {status}")
+    
+    def on_schedule_time_change(self, *args):
+        """Called when schedule time entries are modified - auto-save to config"""
+        # Only save if scheduled capture is enabled
+        if self.scheduled_capture_var.get():
+            self.config.set('scheduled_start_time', self.schedule_start_var.get())
+            self.config.set('scheduled_end_time', self.schedule_end_var.get())
+            self.config.save()
+            
+            # If camera is running, update its settings
+            if hasattr(self.camera_controller, 'zwo_camera') and self.camera_controller.zwo_camera:
+                self.camera_controller.zwo_camera.scheduled_start_time = self.schedule_start_var.get()
+                self.camera_controller.zwo_camera.scheduled_end_time = self.schedule_end_var.get()
+                app_logger.info(f"Schedule times updated: {self.schedule_start_var.get()} - {self.schedule_end_var.get()}")
+    
+    def update_camera_status_for_schedule(self, status_text):
+        """Update camera status when schedule state changes (called from camera thread)"""
+        def update_ui():
+            self.camera_status_var.set(status_text)
+            if "Idle" in status_text or "off-peak" in status_text:
+                self.camera_controller.set_camera_status_dot('idle')
+            elif "Reconnecting" in status_text:
+                self.camera_controller.set_camera_status_dot('connecting')
+        
+        self.root.after(0, update_ui)
     
     def on_wb_mode_change(self):
         """Handle white balance mode change - show/hide appropriate controls"""
