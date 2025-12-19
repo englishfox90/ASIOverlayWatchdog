@@ -18,7 +18,7 @@ class ZWOCamera:
                  auto_exposure=False, max_exposure_sec=30.0, auto_wb=False,
                  wb_mode='asi_auto', wb_config=None, bayer_pattern='BGGR',
                  scheduled_capture_enabled=False, scheduled_start_time="17:00",
-                 scheduled_end_time="09:00"):
+                 scheduled_end_time="09:00", status_callback=None):
         self.sdk_path = sdk_path
         self.camera_index = camera_index
         self.camera = None
@@ -28,6 +28,7 @@ class ZWOCamera:
         self.capture_thread = None
         self.on_frame_callback = None
         self.on_log_callback = None
+        self.status_callback = status_callback  # Callback for schedule status updates
         
         # Capture settings
         self.exposure_seconds = exposure_sec
@@ -442,6 +443,10 @@ class ZWOCamera:
                                 self.camera.close()
                                 self.camera = None
                                 self.log("Camera disconnected during off-peak hours")
+                                
+                                # Update UI status to reflect disconnection
+                                if self.status_callback:
+                                    self.status_callback(f"Idle (off-peak until {self.scheduled_start_time})")
                             except Exception as e:
                                 self.log(f"Error disconnecting camera: {e}")
                     
@@ -453,6 +458,10 @@ class ZWOCamera:
                     if last_schedule_log == "outside_window":
                         self.log(f"Entered scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Reconnecting camera...")
                         last_schedule_log = "inside_window"
+                        
+                        # Update UI status
+                        if self.status_callback:
+                            self.status_callback("Reconnecting for scheduled window...")
                         
                         # Reconnect camera for scheduled window
                         if not self.camera:
