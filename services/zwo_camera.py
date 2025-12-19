@@ -83,11 +83,11 @@ class ZWOCamera:
             
             # Check if this is an overnight window (e.g., 17:00 - 09:00)
             if start_time > end_time:
-                # Overnight: capture if after start OR before end
-                return current_time >= start_time or current_time <= end_time
+                # Overnight: capture if after start OR before end (exclusive)
+                return current_time >= start_time or current_time < end_time
             else:
-                # Same day: capture if between start and end
-                return start_time <= current_time <= end_time
+                # Same day: capture if between start and end (end exclusive)
+                return start_time <= current_time < end_time
                 
         except Exception as e:
             self.log(f"Error checking scheduled window: {e}")
@@ -429,20 +429,38 @@ class ZWOCamera:
                 within_window = self.is_within_scheduled_window()
                 
                 if not within_window:
-                    # Outside scheduled window - skip capture but keep loop running
+                    # Outside scheduled window - disconnect camera to reduce load
                     current_status = "outside_window"
                     if last_schedule_log != current_status:
-                        self.log(f"Outside scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Waiting...")
+                        self.log(f"Outside scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Disconnecting camera...")
                         last_schedule_log = current_status
+                        
+                        # Disconnect camera to reduce load during off-peak hours
+                        if self.camera:
+                            try:
+                                self.camera.stop_video_capture()
+                                self.camera.close()
+                                self.camera = None
+                                self.log("Camera disconnected during off-peak hours")
+                            except Exception as e:
+                                self.log(f"Error disconnecting camera: {e}")
                     
                     # Sleep and continue loop without capturing
                     time.sleep(self.capture_interval)
                     continue
                 else:
-                    # Within window - log transition if needed
+                    # Within window - reconnect camera if needed
                     if last_schedule_log == "outside_window":
-                        self.log(f"Entered scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Resuming captures.")
+                        self.log(f"Entered scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Reconnecting camera...")
                         last_schedule_log = "inside_window"
+                        
+                        # Reconnect camera for scheduled window
+                        if not self.camera:
+                            if not self.connect_camera():
+                                self.log("ERROR: Failed to reconnect camera for scheduled window")
+                                time.sleep(5)  # Wait before retrying
+                                continue
+                            self.log("Camera reconnected for scheduled captures")
                 
                 # Check if camera is still connected
                 if not self.camera:
