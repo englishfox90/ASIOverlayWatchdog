@@ -164,6 +164,47 @@ class StatusManager:
                 self.app.histogram_canvas.create_line(green_coords, fill='#51cf66', width=2, smooth=False)
                 self.app.histogram_canvas.create_line(blue_coords, fill='#339af0', width=2, smooth=False)
             
+            # Draw target brightness line if auto exposure is enabled
+            if hasattr(self.app, 'auto_exposure_var') and self.app.auto_exposure_var.get():
+                target = self.app.target_brightness_var.get() if hasattr(self.app, 'target_brightness_var') else 100
+                # Convert target brightness (0-255) to x position
+                target_x = (target / 255.0) * width
+                
+                # Draw vertical line at target position
+                self.app.histogram_canvas.create_line(
+                    target_x, 0, target_x, 100,
+                    fill='#ffd700',  # Gold color
+                    width=2,
+                    dash=(4, 2)  # Dashed line
+                )
+                
+                # Add label above the line
+                self.app.histogram_canvas.create_text(
+                    target_x, 5,
+                    text=f'Target: {int(target)}',
+                    fill='#ffd700',
+                    font=('Segoe UI', 8, 'bold'),
+                    anchor='n'
+                )
+                
+                # Draw clipping threshold line (245)
+                clip_x = (245 / 255.0) * width
+                self.app.histogram_canvas.create_line(
+                    clip_x, 0, clip_x, 100,
+                    fill='#ff4444',  # Red color for warning
+                    width=1,
+                    dash=(2, 2)  # Shorter dashed line
+                )
+                
+                # Add small label for clipping threshold
+                self.app.histogram_canvas.create_text(
+                    clip_x, 15,
+                    text='Clip',
+                    fill='#ff4444',
+                    font=('Segoe UI', 7),
+                    anchor='n'
+                )
+            
         except Exception as e:
             app_logger.error(f"Histogram update failed: {e}")
     

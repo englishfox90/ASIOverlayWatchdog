@@ -327,12 +327,15 @@ class CameraController:
             return
         
         try:
-            # Update exposure (convert from UI to seconds)
+            # Update exposure (convert from UI to seconds) and apply immediately to camera
             exposure_value = self.app.exposure_var.get()
             if self.app.exposure_unit_var.get() == 's':
-                self.zwo_camera.exposure_seconds = exposure_value
+                exposure_sec = exposure_value
             else:
-                self.zwo_camera.exposure_seconds = exposure_value / 1000.0
+                exposure_sec = exposure_value / 1000.0
+            
+            # Use the new update_exposure method which applies to camera immediately
+            self.zwo_camera.update_exposure(exposure_sec)
             
             # Update other settings
             self.zwo_camera.gain = self.app.gain_var.get()
@@ -341,6 +344,10 @@ class CameraController:
             self.zwo_camera.offset = self.app.offset_var.get()
             self.zwo_camera.target_brightness = self.app.target_brightness_var.get()
             self.zwo_camera.bayer_pattern = self.app.bayer_pattern_var.get()
+            
+            # Update auto exposure settings
+            self.zwo_camera.auto_exposure = self.app.auto_exposure_var.get()
+            self.zwo_camera.max_exposure = self.app.max_exposure_var.get()
             
             # Update flip
             flip_map = {'None': 0, 'Horizontal': 1, 'Vertical': 2, 'Both': 3}
