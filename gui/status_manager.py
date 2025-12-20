@@ -244,7 +244,8 @@ class StatusManager:
         except Exception as e:
             print(f"Log polling error: {e}")
         finally:
-            self.app.root.after(100, self.poll_logs)
+            # Poll at 250ms (4 times/second) - sufficient for log updates, reduces CPU usage
+            self.app.root.after(250, self.poll_logs)
     
     def clear_logs(self):
         """Clear log display"""

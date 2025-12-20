@@ -92,12 +92,21 @@ ASIOverlayWatchDog/
 - **Import pattern**: `from .theme import COLORS, FONTS, SPACING` and `from . import theme`
 - **Benefits**: Consistent UI, easy theme updates, maintainable styling
 
-### File Size Limits
-- **Target maximum: 500 lines per file** - Keep modules focused and maintainable
-- If a file exceeds 500 lines, consider breaking it into smaller components
-- Exceptions: Large data structures or generated code may exceed this limit
-- Use modular architecture (see gui/overlays/ for example) to organize complex features
-- Benefits: Easier testing, debugging, code review, and reuse
+### File Size & Modularity
+- **Target max: 500 lines per file** (hard cap: **550**) to keep modules focused and maintainable.
+- If a file approaches limits, **split by responsibility** (not arbitrary chunks). Prefer extracting:
+  - `models.py` (dataclasses / pydantic models)
+  - `service.py` (core orchestration / use-cases)
+  - `handlers.py` (API/CLI/UI entrypoints)
+  - `repo.py` or `adapters/` (I/O, persistence, external integrations)
+  - `errors.py` (feature-specific exceptions)
+- For larger features, use a **package-per-feature folder** and grow via submodules:
+  - `features/<feature_name>/...`
+  - Add `features/<feature_name>/subflows/` or `features/<feature_name>/adapters/` when complexity increases.
+- Avoid “catch-all” files like `utils.py`. Shared helpers must live in clearly named modules (e.g., `common/logging.py`, `common/datetime.py`) and stay single-purpose.
+- Keep dependency direction clean: **domain/service code should not depend on UI/adapters**, and I/O should live at the edges.
+- **Exceptions:** large constant data structures, generated code, or vendor schemas may exceed limits (document why at the top of the file).
+- **Benefits:** easier testing, debugging, code review, and reuse.
 
 ## Developer Workflows
 

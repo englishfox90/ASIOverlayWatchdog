@@ -8,6 +8,8 @@ import threading
 import numpy as np
 from datetime import datetime
 from PIL import Image
+from .camera_utils import simple_debayer_rggb, is_within_scheduled_window as check_scheduled_window
+from .camera_calibration import CameraCalibration
 
 
 class ZWOCamera:
@@ -29,6 +31,7 @@ class ZWOCamera:
         self.on_frame_callback = None
         self.on_log_callback = None
         self.status_callback = status_callback  # Callback for schedule status updates
+        self._cleanup_lock = threading.Lock()  # Prevent multiple simultaneous disconnects
         
         # Capture settings
         self.exposure_seconds = exposure_sec
@@ -63,6 +66,25 @@ class ZWOCamera:
         self.calibration_mode = False  # Fast convergence before normal capture
         self.calibration_complete = False
         
+        # Initialize calibration manager
+        self.calibration_manager = None  # Will be initialized after camera connection
+    
+    def __del__(self):
+        """Destructor to ensure camera is disconnected when object is destroyed"""
+        try:
+            self.disconnect_camera()
+        except Exception:
+            pass  # Ignore errors during cleanup in destructor
+    
+    def __enter__(self):
+        """Context manager entry - allows use with 'with' statement"""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures cleanup even if exception occurs"""
+        self.disconnect_camera()
+        return False  # Don't suppress exceptions
+        
     def log(self, message):
         """Send log message via callback"""
         if self.on_log_callback:
@@ -75,32 +97,11 @@ class ZWOCamera:
         Handles overnight captures (e.g., 17:00 - 09:00).
         Returns True if scheduled capture is disabled or if within window.
         """
-        if not self.scheduled_capture_enabled:
-            return True  # Always capture if scheduling is disabled
-        
-        try:
-            from datetime import datetime
-            now = datetime.now()
-            current_time = now.time()
-            
-            # Parse start and end times
-            start_hour, start_min = map(int, self.scheduled_start_time.split(':'))
-            end_hour, end_min = map(int, self.scheduled_end_time.split(':'))
-            
-            start_time = now.replace(hour=start_hour, minute=start_min, second=0, microsecond=0).time()
-            end_time = now.replace(hour=end_hour, minute=end_min, second=0, microsecond=0).time()
-            
-            # Check if this is an overnight window (e.g., 17:00 - 09:00)
-            if start_time > end_time:
-                # Overnight: capture if after start OR before end (exclusive)
-                return current_time >= start_time or current_time < end_time
-            else:
-                # Same day: capture if between start and end (end exclusive)
-                return start_time <= current_time < end_time
-                
-        except Exception as e:
-            self.log(f"Error checking scheduled window: {e}")
-            return True  # Default to allowing capture on error
+        return check_scheduled_window(
+            self.scheduled_capture_enabled,
+            self.scheduled_start_time,
+            self.scheduled_end_time
+        )
     
     def initialize_sdk(self):
         """Initialize the ZWO ASI SDK"""
@@ -224,6 +225,19 @@ class ZWOCamera:
             # Set image format to RAW8
             self.camera.set_image_type(self.asi.ASI_IMG_RAW8)
             
+            # Initialize calibration manager
+            self.calibration_manager = CameraCalibration(self.camera, self.asi, self.log)
+            self.calibration_manager.update_settings(
+                exposure_seconds=self.exposure_seconds,
+                gain=self.gain,
+                target_brightness=self.target_brightness,
+                max_exposure_sec=self.max_exposure,
+                algorithm=self.exposure_algorithm,
+                percentile=self.exposure_percentile,
+                clipping_threshold=self.clipping_threshold,
+                clipping_prevention=self.clipping_prevention
+            )
+            
             return True
         
         except Exception as e:
@@ -285,16 +299,35 @@ class ZWOCamera:
             self.log(f"Error configuring camera: {e}")
     
     def disconnect_camera(self):
-        """Disconnect from camera"""
-        if self.camera:
+        """Disconnect from camera gracefully (idempotent - safe to call multiple times)"""
+        with self._cleanup_lock:
+            if not self.camera:
+                return  # Already disconnected
+            
             try:
+                # Stop capture first if active
                 if self.is_capturing:
+                    self.log("Stopping active capture before disconnect...")
                     self.stop_capture()
-                self.camera.close()
-                self.log("Camera disconnected")
+                
+                # Try to stop video capture if it was started
+                try:
+                    self.camera.stop_video_capture()
+                except Exception as e:
+                    # May not have been started, ignore
+                    pass
+                
+                # Close camera connection
+                try:
+                    self.camera.close()
+                    self.log("Camera disconnected gracefully")
+                except Exception as e:
+                    self.log(f"Warning during camera close: {e}")
+                    
             except Exception as e:
                 self.log(f"Error disconnecting camera: {e}")
             finally:
+                # Always clear camera reference even if close failed
                 self.camera = None
     
     def capture_single_frame(self):
@@ -400,8 +433,21 @@ class ZWOCamera:
                 img = Image.fromarray(img_rgb, mode='RGB')
             except ImportError:
                 # Fallback: simple debayering without OpenCV
-                img_rgb = self.simple_debayer_rggb(img_array)
+                img_rgb = simple_debayer_rggb(img_array, width, height)
                 img = Image.fromarray(img_rgb, mode='RGB')
+            
+            # Calculate image statistics for metadata
+            img_array_rgb = np.array(img)
+            mean_brightness = np.mean(img_array_rgb)
+            median_brightness = np.median(img_array_rgb)
+            min_pixel = np.min(img_array_rgb)
+            max_pixel = np.max(img_array_rgb)
+            std_dev = np.std(img_array_rgb)
+            
+            # Calculate percentiles for better exposure info
+            p25 = np.percentile(img_array_rgb, 25)
+            p75 = np.percentile(img_array_rgb, 75)
+            p95 = np.percentile(img_array_rgb, 95)
             
             # Build metadata dictionary
             metadata = {
@@ -410,13 +456,23 @@ class ZWOCamera:
                 'GAIN': str(self.gain),
                 'TEMP': temperature,
                 'TEMPERATURE': temperature,
-                'TEMP_C': temp_c,
-                'TEMP_F': temp_f,
+                'TEMP_C': f"{temp_c}°C" if temp_c != "N/A" else "N/A",
+                'TEMP_F': f"{temp_f}°F" if temp_f != "N/A" else "N/A",
                 'RES': f"{width}x{height}",
                 'CAPTURE AREA SIZE': f"{width} * {height}",
                 'FILENAME': f"capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
                 'SESSION': datetime.now().strftime('%Y-%m-%d'),
-                'DATETIME': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'DATETIME': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                # Image statistics
+                'BRIGHTNESS': f"{mean_brightness:.1f}",
+                'MEAN': f"{mean_brightness:.1f}",
+                'MEDIAN': f"{median_brightness:.1f}",
+                'MIN': f"{min_pixel}",
+                'MAX': f"{max_pixel}",
+                'STD_DEV': f"{std_dev:.2f}",
+                'P25': f"{p25:.1f}",
+                'P75': f"{p75:.1f}",
+                'P95': f"{p95:.1f}"
             }
             
             return img, metadata
@@ -432,122 +488,147 @@ class ZWOCamera:
         max_reconnect_attempts = 5
         last_schedule_log = None  # Track last schedule status to avoid log spam
         
-        # Run rapid calibration if auto exposure is enabled
-        if self.auto_exposure and not self.calibration_complete:
-            try:
-                self.run_calibration()
-            except Exception as e:
-                self.log(f"Calibration failed: {e}. Continuing with current settings.")
-                self.calibration_complete = True
+        try:
+            # Run rapid calibration if auto exposure is enabled
+            if self.auto_exposure and not self.calibration_complete:
+                try:
+                    self.run_calibration()
+                except Exception as e:
+                    self.log(f"Calibration failed: {e}. Continuing with current settings.")
+                    self.calibration_complete = True
+        except Exception as e:
+            self.log(f"Error during calibration: {e}")
         
-        while self.is_capturing:
-            try:
-                # Check if we're within the scheduled capture window
-                within_window = self.is_within_scheduled_window()
-                
-                if not within_window:
-                    # Outside scheduled window - disconnect camera to reduce load
-                    current_status = "outside_window"
-                    if last_schedule_log != current_status:
-                        self.log(f"Outside scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Disconnecting camera...")
-                        last_schedule_log = current_status
-                        
-                        # Disconnect camera to reduce load during off-peak hours
-                        if self.camera:
-                            try:
-                                self.camera.stop_video_capture()
-                                self.camera.close()
-                                self.camera = None
-                                self.log("Camera disconnected during off-peak hours")
-                                
-                                # Update UI status to reflect disconnection
-                                if self.status_callback:
-                                    self.status_callback(f"Idle (off-peak until {self.scheduled_start_time})")
-                            except Exception as e:
-                                self.log(f"Error disconnecting camera: {e}")
+        try:
+            while self.is_capturing:
+                try:
+                    # Check if we're within the scheduled capture window
+                    within_window = self.is_within_scheduled_window()
                     
-                    # Sleep and continue loop without capturing
-                    time.sleep(self.capture_interval)
-                    continue
-                else:
-                    # Within window - reconnect camera if needed
-                    if last_schedule_log == "outside_window":
-                        self.log(f"Entered scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Reconnecting camera...")
-                        last_schedule_log = "inside_window"
-                        
-                        # Update UI status
-                        if self.status_callback:
-                            self.status_callback("Reconnecting for scheduled window...")
-                        
-                        # Reconnect camera for scheduled window
-                        if not self.camera:
-                            if not self.connect_camera():
-                                self.log("ERROR: Failed to reconnect camera for scheduled window")
-                                time.sleep(5)  # Wait before retrying
-                                continue
-                            self.log("Camera reconnected for scheduled captures")
-                
-                # Check if camera is still connected
-                if not self.camera:
-                    raise Exception("Camera disconnected")
-                
-                # Capture frame
-                img, metadata = self.capture_single_frame()
-                
-                # Reset error counter on successful capture
-                consecutive_errors = 0
-                
-                # Auto-adjust exposure based on image brightness
-                if self.auto_exposure:
-                    img_array = np.array(img)
-                    self.adjust_exposure_auto(img_array)
-                
-                # Call callback with image and metadata
-                if self.on_frame_callback:
-                    self.on_frame_callback(img, metadata)
-                
-                self.log(f"Captured frame: {metadata['FILENAME']}")
-                
-                # Wait for next capture interval
-                if self.is_capturing:  # Check again in case stopped during capture
-                    time.sleep(self.capture_interval)
-            
-            except Exception as e:
-                consecutive_errors += 1
-                self.log(f"ERROR in capture loop: {e} (attempt {consecutive_errors}/{max_reconnect_attempts})")
-                
-                # Try to recover from camera disconnect
-                if consecutive_errors <= max_reconnect_attempts:
-                    self.log(f"Attempting to reconnect camera...")
-                    try:
-                        # Try to reconnect
-                        if self.camera:
-                            try:
-                                self.camera.close()
-                            except:
-                                pass
-                        
-                        # Reinitialize camera
-                        self.camera = self.asi.Camera(self.camera_index)
-                        self._configure_camera()
-                        self.log("Camera reconnected successfully")
-                        consecutive_errors = 0  # Reset counter on successful reconnection
-                        time.sleep(1.0)
+                    if not within_window:
+                        # Outside scheduled window - disconnect camera to reduce load
+                        current_status = "outside_window"
+                        if last_schedule_log != current_status:
+                            self.log(f"Outside scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Disconnecting camera...")
+                            last_schedule_log = current_status
+                            
+                            # Disconnect camera to reduce load during off-peak hours
+                            if self.camera:
+                                try:
+                                    # Temporarily stop capturing flag
+                                    was_capturing = self.is_capturing
+                                    self.is_capturing = False
+                                    
+                                    # Disconnect camera gracefully
+                                    self.camera.stop_video_capture()
+                                    self.camera.close()
+                                    self.camera = None
+                                    self.log("Camera disconnected during off-peak hours")
+                                    
+                                    # Restore capturing flag for reconnection logic
+                                    self.is_capturing = was_capturing
+                                    
+                                    # Update UI status to reflect disconnection
+                                    if self.status_callback:
+                                        self.status_callback(f"Idle (off-peak until {self.scheduled_start_time})")
+                                except Exception as e:
+                                    self.log(f"Error disconnecting camera: {e}")
+                                    self.is_capturing = was_capturing  # Restore flag even on error
                         continue
-                    except Exception as reconnect_error:
-                        self.log(f"Reconnection failed: {reconnect_error}")
-                        # Exponential backoff: 2, 4, 8, 16, 32 seconds
-                        backoff_time = min(2 ** consecutive_errors, 32)
-                        self.log(f"Waiting {backoff_time}s before retry...")
-                        time.sleep(backoff_time)
-                else:
-                    # Max attempts reached - stop capture
-                    self.log(f"ERROR: Maximum reconnection attempts ({max_reconnect_attempts}) reached. Stopping capture.")
-                    self.is_capturing = False
-                    # Notify via callback that capture failed
-                    if hasattr(self, 'on_error_callback') and self.on_error_callback:
-                        self.on_error_callback("Camera disconnected - failed to reconnect after multiple attempts")
-                    break
+                    else:
+                        # Within window - reconnect camera if needed
+                        if last_schedule_log == "outside_window":
+                            self.log(f"Entered scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Reconnecting camera...")
+                            last_schedule_log = "inside_window"
+                            
+                            # Update UI status
+                            if self.status_callback:
+                                self.status_callback("Reconnecting for scheduled window...")
+                            
+                            # Reconnect camera for scheduled window
+                            if not self.camera:
+                                if not self.connect_camera():
+                                    self.log("ERROR: Failed to reconnect camera for scheduled window")
+                                    time.sleep(5)  # Wait before retrying
+                                    continue
+                                self.log("Camera reconnected for scheduled captures")
+                    
+                    # Check if camera is still connected
+                    if not self.camera:
+                        raise Exception("Camera disconnected")
+                    
+                    # Capture frame
+                    img, metadata = self.capture_single_frame()
+                    
+                    # Reset error counter on successful capture
+                    consecutive_errors = 0
+                    
+                    # Auto-adjust exposure based on image brightness
+                    if self.auto_exposure:
+                        img_array = np.array(img)
+                        self.adjust_exposure_auto(img_array)
+                    
+                    # Call callback with image and metadata
+                    if self.on_frame_callback:
+                        self.on_frame_callback(img, metadata)
+                    
+                    self.log(f"Captured frame: {metadata['FILENAME']}")
+                    
+                    # Wait for next capture interval
+                    if self.is_capturing:  # Check again in case stopped during capture
+                        time.sleep(self.capture_interval)
+                
+                except Exception as e:
+                    consecutive_errors += 1
+                    self.log(f"ERROR in capture loop: {e} (attempt {consecutive_errors}/{max_reconnect_attempts})")
+                    
+                    # Try to recover from camera disconnect
+                    if consecutive_errors <= max_reconnect_attempts:
+                        self.log(f"Attempting to reconnect camera...")
+                        try:
+                            # Clean up existing camera first
+                            if self.camera:
+                                try:
+                                    self.camera.stop_video_capture()
+                                except:
+                                    pass
+                                try:
+                                    self.camera.close()
+                                except:
+                                    pass
+                                finally:
+                                    self.camera = None
+                            
+                            # Reinitialize camera
+                            time.sleep(0.5)  # Brief delay before reconnecting
+                            self.camera = self.asi.Camera(self.camera_index)
+                            self._configure_camera()
+                            self.log("Camera reconnected successfully")
+                            consecutive_errors = 0  # Reset counter on successful reconnection
+                            time.sleep(1.0)
+                            continue
+                        except Exception as reconnect_error:
+                            self.log(f"Reconnection failed: {reconnect_error}")
+                            # Exponential backoff: 2, 4, 8, 16, 32 seconds
+                            backoff_time = min(2 ** consecutive_errors, 32)
+                            self.log(f"Waiting {backoff_time}s before retry...")
+                            time.sleep(backoff_time)
+                    else:
+                        # Max attempts reached - stop capture
+                        self.log(f"ERROR: Maximum reconnection attempts ({max_reconnect_attempts}) reached. Stopping capture.")
+                        self.is_capturing = False
+                        # Notify via callback that capture failed
+                        if hasattr(self, 'on_error_callback') and self.on_error_callback:
+                            self.on_error_callback("Camera disconnected - failed to reconnect after multiple attempts")
+                        break
+        finally:
+            # Ensure camera is properly stopped on all exit paths (normal, error, or thread interrupt)
+            self.log("Capture loop exiting - cleaning up...")
+            if self.camera:
+                try:
+                    self.camera.stop_video_capture()
+                except Exception as e:
+                    self.log(f"Error stopping video capture in cleanup: {e}")
         
         self.log("Capture loop stopped")
     
@@ -572,14 +653,23 @@ class ZWOCamera:
         return True
     
     def stop_capture(self):
-        """Stop continuous capture"""
+        """Stop continuous capture and wait for thread to finish"""
         if not self.is_capturing:
             return
         
+        self.log("Stopping capture...")
         self.is_capturing = False
         
-        if self.capture_thread:
-            self.capture_thread.join(timeout=5.0)
+        # Wait for capture thread to finish
+        if self.capture_thread and self.capture_thread.is_alive():
+            self.log("Waiting for capture thread to finish...")
+            self.capture_thread.join(timeout=10.0)  # Increased timeout for long exposures
+            
+            if self.capture_thread.is_alive():
+                self.log("Warning: Capture thread did not finish in time")
+            else:
+                self.log("Capture thread finished successfully")
+            
             self.capture_thread = None
         
         self.log("Capture stopped")
@@ -608,198 +698,30 @@ class ZWOCamera:
             except Exception as e:
                 self.log(f"Failed to update camera exposure: {e}")
     
-    def calculate_brightness(self, img_array):
-        """Calculate brightness using configured algorithm (mean, median, or percentile)"""
-        if self.exposure_algorithm == 'mean':
-            return np.mean(img_array)
-        elif self.exposure_algorithm == 'median':
-            return np.median(img_array)
-        elif self.exposure_algorithm == 'percentile':
-            return np.percentile(img_array, self.exposure_percentile)
-        else:
-            # Default to mean
-            return np.mean(img_array)
-    
-    def check_clipping(self, img_array):
-        """Check if image has significant highlight clipping"""
-        if not self.clipping_prevention:
-            return False, 0.0
-        
-        # Count pixels above clipping threshold
-        clipped_pixels = np.sum(img_array > self.clipping_threshold)
-        total_pixels = img_array.size
-        clipping_percentage = (clipped_pixels / total_pixels) * 100
-        
-        # Consider clipping significant if > 5% of pixels are clipped
-        is_clipping = clipping_percentage > 5.0
-        
-        return is_clipping, clipping_percentage
-    
-    def simple_debayer_rggb(self, bayer):
-        """Simple debayering for RGGB Bayer pattern (fallback method)"""
-        height, width = bayer.shape
-        rgb = np.zeros((height, width, 3), dtype=np.uint8)
-        
-        # R channel (top-left pixels)
-        rgb[0::2, 0::2, 0] = bayer[0::2, 0::2]
-        rgb[0::2, 1::2, 0] = bayer[0::2, 0::2]
-        rgb[1::2, 0::2, 0] = bayer[0::2, 0::2]
-        rgb[1::2, 1::2, 0] = bayer[0::2, 0::2]
-        
-        # G channel (average of both green positions)
-        rgb[0::2, 1::2, 1] = bayer[0::2, 1::2]
-        rgb[1::2, 0::2, 1] = bayer[1::2, 0::2]
-        rgb[0::2, 0::2, 1] = (bayer[0::2, 1::2].astype(int) + bayer[1::2, 0::2].astype(int)) // 2
-        rgb[1::2, 1::2, 1] = (bayer[0::2, 1::2].astype(int) + bayer[1::2, 0::2].astype(int)) // 2
-        
-        # B channel (bottom-right pixels)
-        rgb[1::2, 1::2, 2] = bayer[1::2, 1::2]
-        rgb[0::2, 0::2, 2] = bayer[1::2, 1::2]
-        rgb[0::2, 1::2, 2] = bayer[1::2, 1::2]
-        rgb[1::2, 0::2, 2] = bayer[1::2, 1::2]
-        
-        return rgb
-    
     def run_calibration(self):
         """Rapid calibration to find optimal exposure before starting interval captures"""
-        if not self.auto_exposure or not self.camera:
+        if not self.auto_exposure or not self.camera or not self.calibration_manager:
             return
         
         self.log("Starting rapid auto-exposure calibration...")
         self.calibration_mode = True
-        max_calibration_attempts = 15  # Limit calibration time
-        attempt = 0
         
-        try:
-            while attempt < max_calibration_attempts:
-                attempt += 1
-                
-                # Capture test frame
-                img, metadata = self.capture_single_frame()
-                img_array = np.array(img)
-                
-                # Use histogram-based brightness calculation
-                brightness = self.calculate_brightness(img_array)
-                
-                # Check for clipping
-                is_clipping, clip_pct = self.check_clipping(img_array)
-                
-                # Check if we're close enough to target (within 10%)
-                if 0.9 * self.target_brightness <= brightness <= 1.1 * self.target_brightness:
-                    clip_info = f" (clipping: {clip_pct:.1f}%)" if is_clipping else ""
-                    self.log(f"Calibration complete! Found optimal exposure: {self.exposure_seconds*1000:.2f}ms (brightness: {brightness:.1f}/{self.target_brightness}){clip_info} in {attempt} attempt(s)")
-                    self.calibration_complete = True
-                    self.calibration_mode = False
-                    return
-                
-                # Adjust exposure with aggressive steps during calibration
-                brightness_ratio = brightness / self.target_brightness
-                
-                if brightness < self.target_brightness * 0.9:  # Too dark
-                    # Check if we're clipping - don't increase if already clipping
-                    if is_clipping:
-                        self.log(f"Calibration attempt {attempt}: target not reached but clipping detected ({clip_pct:.1f}%), stopping at {self.exposure_seconds*1000:.2f}ms")
-                        self.calibration_complete = True
-                        self.calibration_mode = False
-                        return
-                    if brightness_ratio < 0.2:  # Very dark
-                        adjustment = 5.0
-                    elif brightness_ratio < 0.4:
-                        adjustment = 3.0
-                    elif brightness_ratio < 0.6:
-                        adjustment = 2.0
-                    else:
-                        adjustment = 1.4
-                    
-                    new_exposure = self.exposure_seconds * adjustment
-                    if new_exposure > self.max_exposure:
-                        self.exposure_seconds = self.max_exposure
-                        self.log(f"Calibration attempt {attempt}: hit max exposure limit {self.max_exposure*1000:.2f}ms (brightness: {brightness:.1f})")
-                    else:
-                        self.exposure_seconds = new_exposure
-                        self.log(f"Calibration attempt {attempt}: increased to {new_exposure*1000:.2f}ms (brightness: {brightness:.1f})")
-                
-                elif brightness > self.target_brightness * 1.1:  # Too bright
-                    if brightness_ratio > 5.0:
-                        adjustment = 0.2
-                    elif brightness_ratio > 3.0:
-                        adjustment = 0.33
-                    elif brightness_ratio > 2.0:
-                        adjustment = 0.5
-                    else:
-                        adjustment = 0.75
-                    
-                    new_exposure = max(self.exposure_seconds * adjustment, 0.000032)
-                    self.exposure_seconds = new_exposure
-                    clip_info = f" (clipping: {clip_pct:.1f}%)" if is_clipping else ""
-                    self.log(f"Calibration attempt {attempt}: decreased to {new_exposure*1000:.2f}ms (brightness: {brightness:.1f}){clip_info}")
-            
-            # Max attempts reached
-            self.log(f"Calibration incomplete after {max_calibration_attempts} attempts. Proceeding with exposure: {self.exposure_seconds*1000:.2f}ms")
-            self.calibration_complete = True
-            self.calibration_mode = False
-            
-        except Exception as e:
-            self.log(f"Calibration error: {e}. Proceeding with current exposure.")
-            self.calibration_complete = True
-            self.calibration_mode = False
+        # Run calibration using the calibration manager
+        success = self.calibration_manager.run_calibration(max_attempts=15)
+        
+        # Update our exposure from calibration manager
+        self.exposure_seconds = self.calibration_manager.exposure_seconds
+        
+        self.calibration_complete = True
+        self.calibration_mode = False
     
     def adjust_exposure_auto(self, img_array):
         """Adjust exposure based on image brightness with intelligent step sizing"""
-        if not self.auto_exposure:
+        if not self.auto_exposure or not self.calibration_manager:
             return
         
-        # Calculate brightness using histogram-based method
-        brightness = self.calculate_brightness(img_array)
+        # Use calibration manager to adjust exposure
+        self.calibration_manager.adjust_exposure_auto(img_array)
         
-        # Check for clipping
-        is_clipping, clip_pct = self.check_clipping(img_array)
-        
-        # Calculate how far off we are from target
-        brightness_ratio = brightness / self.target_brightness
-        
-        # Adjust exposure to reach target brightness
-        if brightness < self.target_brightness * 0.9:  # Too dark (below 90% of target)
-            # Check if we're clipping - don't increase if already clipping significantly
-            if is_clipping:
-                self.log(f"Auto exposure: not increasing (clipping: {clip_pct:.1f}%, brightness: {brightness:.1f}/{self.target_brightness})")
-                return
-            
-            # Calculate adjustment factor based on how dark it is
-            if brightness_ratio < 0.3:  # Very dark (< 30% of target)
-                adjustment = 3.0  # Triple exposure
-            elif brightness_ratio < 0.5:  # Dark (< 50% of target)
-                adjustment = 2.0  # Double exposure
-            elif brightness_ratio < 0.7:  # Somewhat dark (< 70% of target)
-                adjustment = 1.5  # Increase by 50%
-            else:  # Slightly dark (70-90% of target)
-                adjustment = 1.2  # Increase by 20%
-            
-            new_exposure = self.exposure_seconds * adjustment
-            
-            # Check if we would exceed max limit BEFORE setting
-            if new_exposure > self.max_exposure:
-                if self.exposure_seconds < self.max_exposure:
-                    # Set to max limit (only if not already there)
-                    self.exposure_seconds = self.max_exposure
-                    self.log(f"Auto exposure: MAX LIMIT REACHED at {self.max_exposure*1000:.2f}ms (brightness: {brightness:.1f}/{self.target_brightness})")
-            elif new_exposure != self.exposure_seconds:
-                self.exposure_seconds = new_exposure
-                self.log(f"Auto exposure: increased to {new_exposure*1000:.2f}ms (brightness: {brightness:.1f}/{self.target_brightness})")
-        
-        elif brightness > self.target_brightness * 1.1:  # Too bright (above 110% of target)
-            # Calculate adjustment factor based on how bright it is
-            if brightness_ratio > 3.0:  # Very bright (> 300% of target)
-                adjustment = 0.33  # Reduce to 1/3
-            elif brightness_ratio > 2.0:  # Bright (> 200% of target)
-                adjustment = 0.5  # Halve exposure
-            elif brightness_ratio > 1.5:  # Somewhat bright (> 150% of target)
-                adjustment = 0.7  # Reduce by 30%
-            else:  # Slightly bright (110-150% of target)
-                adjustment = 0.85  # Reduce by 15%
-            
-            new_exposure = max(self.exposure_seconds * adjustment, 0.000032)  # Min 32µs
-            if new_exposure != self.exposure_seconds:
-                self.exposure_seconds = new_exposure
-                clip_info = f" (clipping: {clip_pct:.1f}%)" if is_clipping else ""
-                self.log(f"Auto exposure: decreased to {new_exposure*1000:.2f}ms (brightness: {brightness:.1f}/{self.target_brightness}){clip_info}")
+        # Update our exposure from calibration manager
+        self.exposure_seconds = self.calibration_manager.exposure_seconds

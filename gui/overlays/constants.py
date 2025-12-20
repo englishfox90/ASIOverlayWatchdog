@@ -14,6 +14,15 @@ TOKENS = [
     ("Session", "{SESSION}"),
     ("Date & Time", "{DATETIME}"),
     ("Filename", "{FILENAME}"),
+    # Image statistics
+    ("Brightness/Mean", "{BRIGHTNESS}"),
+    ("Median", "{MEDIAN}"),
+    ("Min Pixel", "{MIN}"),
+    ("Max Pixel", "{MAX}"),
+    ("Std Deviation", "{STD_DEV}"),
+    ("25th Percentile", "{P25}"),
+    ("75th Percentile", "{P75}"),
+    ("95th Percentile", "{P95}"),
 ]
 
 # Position presets

@@ -26,6 +26,9 @@ from .overlay_manager import OverlayManager
 from .camera_controller import CameraController
 from .image_processor import ImageProcessor
 from .status_manager import StatusManager
+from .output_manager import OutputManager
+from .watch_controller import WatchController
+from .settings_manager import SettingsManager
 from version import __version__
 
 # Application metadata
@@ -109,12 +112,15 @@ class ModernOverlayApp:
         self.camera_controller = CameraController(self)
         self.image_processor = ImageProcessor(self)
         self.status_manager = StatusManager(self)
+        self.output_manager = OutputManager(self)
+        self.watch_controller = WatchController(self)
+        self.settings_manager = SettingsManager(self)
         
         # Set Discord error callback
         app_logger.set_error_callback(self.send_discord_error)
         
         # Load configuration
-        self.load_config()
+        self.settings_manager.load_config()
         
         # Start log polling
         self.status_manager.poll_logs()
@@ -406,80 +412,20 @@ Supports:
         self.camera_controller.on_auto_exposure_toggle()
     
     def on_scheduled_capture_toggle(self):
-        """Enable/disable scheduled capture time inputs"""
-        enabled = self.scheduled_capture_var.get()
-        state = 'normal' if enabled else 'disabled'
-        self.schedule_start_entry.config(state=state)
-        self.schedule_end_entry.config(state=state)
-        
-        # Auto-save to config
-        self.config.set('scheduled_capture_enabled', enabled)
-        self.config.set('scheduled_start_time', self.schedule_start_var.get())
-        self.config.set('scheduled_end_time', self.schedule_end_var.get())
-        self.config.save()
-        
-        # If camera is running, update its settings
-        if hasattr(self.camera_controller, 'zwo_camera') and self.camera_controller.zwo_camera:
-            self.camera_controller.zwo_camera.scheduled_capture_enabled = enabled
-            self.camera_controller.zwo_camera.scheduled_start_time = self.schedule_start_var.get()
-            self.camera_controller.zwo_camera.scheduled_end_time = self.schedule_end_var.get()
-            
-            status = "enabled" if enabled else "disabled"
-            if enabled:
-                app_logger.info(f"Scheduled capture {status}: {self.schedule_start_var.get()} - {self.schedule_end_var.get()}")
-            else:
-                app_logger.info(f"Scheduled capture {status}")
+        """Delegate to camera_controller"""
+        self.camera_controller.on_scheduled_capture_toggle()
     
     def on_schedule_time_change(self, *args):
-        """Called when schedule time entries are modified - auto-save to config"""
-        # Only save if scheduled capture is enabled
-        if self.scheduled_capture_var.get():
-            self.config.set('scheduled_start_time', self.schedule_start_var.get())
-            self.config.set('scheduled_end_time', self.schedule_end_var.get())
-            self.config.save()
-            
-            # If camera is running, update its settings
-            if hasattr(self.camera_controller, 'zwo_camera') and self.camera_controller.zwo_camera:
-                self.camera_controller.zwo_camera.scheduled_start_time = self.schedule_start_var.get()
-                self.camera_controller.zwo_camera.scheduled_end_time = self.schedule_end_var.get()
-                app_logger.info(f"Schedule times updated: {self.schedule_start_var.get()} - {self.schedule_end_var.get()}")
+        """Delegate to camera_controller"""
+        self.camera_controller.on_schedule_time_change(*args)
     
     def update_camera_status_for_schedule(self, status_text):
-        """Update camera status when schedule state changes (called from camera thread)"""
-        def update_ui():
-            self.camera_status_var.set(status_text)
-            if "Idle" in status_text or "off-peak" in status_text:
-                self.camera_controller.set_camera_status_dot('idle')
-            elif "Reconnecting" in status_text:
-                self.camera_controller.set_camera_status_dot('connecting')
-        
-        self.root.after(0, update_ui)
+        """Delegate to camera_controller"""
+        self.camera_controller.update_camera_status_for_schedule(status_text)
     
     def on_wb_mode_change(self):
-        """Handle white balance mode change - show/hide appropriate controls"""
-        mode = self.wb_mode_var.get()
-        
-        # Update hint label
-        hints = {
-            'asi_auto': '(SDK Auto WB)',
-            'manual': '(Manual R/B gains)',
-            'gray_world': '(Software algorithm)'
-        }
-        self.wb_mode_hint_label.config(text=hints.get(mode, ''))
-        
-        # Show/hide appropriate control frames
-        if mode == 'manual':
-            self.wb_manual_frame.pack(fill='x', pady=(0, 0))
-            self.wb_gray_world_frame.pack_forget()
-        elif mode == 'gray_world':
-            self.wb_manual_frame.pack_forget()
-            self.wb_gray_world_frame.pack(fill='x', pady=(0, 0))
-        else:  # asi_auto
-            self.wb_manual_frame.pack_forget()
-            self.wb_gray_world_frame.pack_forget()
-        
-        # Save to config
-        self.save_config()
+        """Delegate to camera_controller"""
+        self.camera_controller.on_wb_mode_change()
     
     def get_overlays_config(self):
         """Delegate to overlay_manager"""
@@ -552,16 +498,12 @@ Supports:
     # ===== DIRECTORY/FILE BROWSING =====
     
     def browse_watch_dir(self):
-        """Browse for watch directory"""
-        dir_path = filedialog.askdirectory(title="Select directory to watch")
-        if dir_path:
-            self.watch_dir_var.set(dir_path)
+        """Delegate to watch_controller"""
+        self.watch_controller.browse_watch_dir()
     
     def browse_output_dir(self):
-        """Browse for output directory"""
-        dir_path = filedialog.askdirectory(title="Select output directory")
-        if dir_path:
-            self.output_dir_var.set(dir_path)
+        """Delegate to watch_controller"""
+        self.watch_controller.browse_output_dir()
     
     def browse_sdk_path(self):
         """Browse for SDK DLL"""
@@ -575,703 +517,90 @@ Supports:
     # ===== DIRECTORY WATCHING =====
     
     def start_watching(self):
-        """Start directory watching"""
-        watch_dir = self.watch_dir_var.get()
-        
-        if not watch_dir or not os.path.exists(watch_dir):
-            messagebox.showerror("Error", "Please select a valid directory to watch")
-            return
-        
-        try:
-            # Ensure output servers are started if configured
-            self.ensure_output_mode_started()
-            
-            overlays = self.overlay_manager.get_overlays_config()
-            output_dir = self.output_dir_var.get()
-            recursive = self.watch_recursive_var.get()
-            
-            self.watcher = FileWatcher(
-                watch_directory=watch_dir,
-                output_directory=output_dir,
-                overlays=overlays,
-                recursive=recursive,
-                callback=self.on_image_processed
-            )
-            
-            self.watcher.start()
-            
-            # Update UI
-            self.start_watch_button.config(state='disabled')
-            self.stop_watch_button.config(state='normal')
-            app_logger.info(f"Started watching: {watch_dir}")
-            
-        except Exception as e:
-            app_logger.error(f"Failed to start watching: {e}")
-            messagebox.showerror("Error", f"Failed to start watching:\n{str(e)}")
+        """Delegate to watch_controller"""
+        self.watch_controller.start_watching()
     
     def stop_watching(self):
-        """Stop directory watching"""
-        if self.watcher:
-            self.watcher.stop()
-            self.watcher = None
-            
-            self.start_watch_button.config(state='normal')
-            self.stop_watch_button.config(state='disabled')
-            app_logger.info("Stopped watching")
+        """Delegate to watch_controller"""
+        self.watch_controller.stop_watching()
     
     def on_image_processed(self, output_path, processed_img=None):
-        """Callback when watcher processes an image"""
-        self.image_count += 1
-        self.root.after(0, lambda: self.image_count_var.set(str(self.image_count)))
-        
-        # Push to output servers if active
-        if processed_img:
-            self._push_to_output_servers(output_path, processed_img)
+        """Delegate to watch_controller"""
+        self.watch_controller.on_image_processed(output_path, processed_img)
     
     # ===== CONFIGURATION =====
     
     def load_config(self):
-        """Load configuration into GUI"""
-        self.is_loading_config = True  # Prevent saves during load
-        
-        self.capture_mode_var.set(self.config.get('capture_mode', 'watch'))
-        self.watch_dir_var.set(self.config.get('watch_directory', ''))
-        self.watch_recursive_var.set(self.config.get('watch_recursive', True))
-        self.output_dir_var.set(self.config.get('output_directory', ''))
-        
-        # Handle old config keys
-        filename_pattern = self.config.get('filename_pattern', self.config.get('output_pattern', '{session}_{filename}'))
-        self.filename_pattern_var.set(filename_pattern)
-        
-        output_format = self.config.get('output_format', 'png')
-        if output_format.upper() == 'JPG':
-            output_format = 'jpg'
-        elif output_format.upper() == 'PNG':
-            output_format = 'png'
-        self.output_format_var.set(output_format.lower())
-        
-        self.jpg_quality_var.set(int(round(self.config.get('jpg_quality', 95))))
-        self.resize_percent_var.set(int(round(self.config.get('resize_percent', 100))))
-        self.auto_brightness_var.set(self.config.get('auto_brightness', False))
-        
-        # Handle old brightness keys
-        brightness = self.config.get('brightness_factor', 
-                                    self.config.get('auto_brightness_factor',
-                                                   self.config.get('preview_brightness', 1.5)))
-        self.brightness_var.set(brightness)
-        
-        # Saturation
-        self.saturation_var.set(self.config.get('saturation_factor', 1.0))
-        
-        # Handle old timestamp corner key
-        timestamp = self.config.get('timestamp_corner', False)
-        if isinstance(timestamp, bool):
-            self.timestamp_corner_var.set(timestamp)
-        else:
-            self.timestamp_corner_var.set(self.config.get('show_timestamp_corner', False))
-        
-        self.cleanup_enabled_var.set(self.config.get('cleanup_enabled', False))
-        self.cleanup_max_size_var.set(self.config.get('cleanup_max_size_gb', 10.0))
-        
-        # ZWO settings
-        from utils_paths import resource_path
-        self.sdk_path_var.set(self.config.get('zwo_sdk_path', resource_path('ASICamera2.dll')))
-        
-        # Handle exposure in both ms and seconds - default to seconds for better UX
-        exposure_ms = self.config.get('zwo_exposure_ms', self.config.get('zwo_exposure', 100.0))
-        self.exposure_var.set(exposure_ms / 1000.0)
-        self.exposure_unit_var.set('s')
-        self.capture_tab.set_exposure_unit('s')
-        
-        self.gain_var.set(self.config.get('zwo_gain', 100))
-        self.wb_r_var.set(self.config.get('zwo_wb_r', 75))
-        self.wb_b_var.set(self.config.get('zwo_wb_b', 99))
-        
-        # Load white balance config (replaces old auto_wb_var)
-        wb_config = self.config.get('white_balance', {
-            'mode': 'asi_auto',
-            'manual_red_gain': 1.0,
-            'manual_blue_gain': 1.0,
-            'gray_world_low_pct': 5,
-            'gray_world_high_pct': 95
-        })
-        self.wb_mode_var.set(wb_config.get('mode', 'asi_auto'))
-        self.wb_gw_low_var.set(wb_config.get('gray_world_low_pct', 5))
-        self.wb_gw_high_var.set(wb_config.get('gray_world_high_pct', 95))
-        
-        self.offset_var.set(self.config.get('zwo_offset', 20))
-        self.bayer_pattern_var.set(self.config.get('zwo_bayer_pattern', 'BGGR'))
-        
-        # Handle flip - convert string to int if needed
-        flip_val = self.config.get('zwo_flip', 0)
-        flip_map_reverse = {'None': 'None', 0: 'None', 1: 'Horizontal', 2: 'Vertical', 3: 'Both'}
-        if isinstance(flip_val, str):
-            self.flip_var.set(flip_val)
-        else:
-            self.flip_var.set(flip_map_reverse.get(flip_val, 'None'))
-        
-        # Handle interval
-        interval = self.config.get('zwo_interval', self.config.get('zwo_capture_interval', 5.0))
-        self.interval_var.set(interval)
-        
-        # Load scheduled capture settings
-        self.scheduled_capture_var.set(self.config.get('scheduled_capture_enabled', False))
-        self.schedule_start_var.set(self.config.get('scheduled_start_time', '17:00'))
-        self.schedule_end_var.set(self.config.get('scheduled_end_time', '09:00'))
-        
-        self.auto_exposure_var.set(self.config.get('zwo_auto_exposure', False))
-        
-        # Handle max exposure - convert from ms to seconds for new UI
-        max_exp_ms = self.config.get('zwo_max_exposure_ms', self.config.get('zwo_max_exposure', 30000.0))
-        self.max_exposure_var.set(max_exp_ms / 1000.0)
-        
-        # Load target brightness
-        self.target_brightness_var.set(self.config.get('zwo_target_brightness', 100))
-        
-        # Update UI states
-        self.on_mode_change()
-        self.camera_controller.on_auto_exposure_toggle()
-        self.on_auto_brightness_toggle()
-        self.on_wb_mode_change()  # Set initial WB mode UI state
-        self.on_scheduled_capture_toggle()  # Set initial scheduled capture UI state
-        
-        # Update mode button styling
-        self.capture_tab.update_mode_button_styling()
-        
-        # Load overlays - handle old field names
-        overlays = self.config.get('overlays', [])
-        for overlay in overlays:
-            if 'x_offset' in overlay and 'offset_x' not in overlay:
-                overlay['offset_x'] = overlay['x_offset']
-            if 'y_offset' in overlay and 'offset_y' not in overlay:
-                overlay['offset_y'] = overlay['y_offset']
-            if 'font_style' not in overlay:
-                overlay['font_style'] = 'normal'
-            # Add default name if missing
-            if 'name' not in overlay:
-                overlay['name'] = overlay.get('text', 'Overlay')[:30]
-        
-        self.overlay_manager.rebuild_overlay_list()
-        
-        # Load Discord settings
-        discord_config = self.config.get('discord', {})
-        app_logger.info(f"Loading Discord webhook: {discord_config.get('webhook_url', '')[:50]}..." if len(discord_config.get('webhook_url', '')) > 50 else f"Loading Discord webhook: {discord_config.get('webhook_url', '')}")
-        app_logger.info(f"Discord enabled: {discord_config.get('enabled', False)}")
-        
-        self.discord_enabled_var.set(discord_config.get('enabled', False))
-        self.discord_webhook_var.set(discord_config.get('webhook_url', ''))
-        self.discord_color_var.set(discord_config.get('embed_color_hex', '#0EA5E9'))
-        self.discord_post_errors_var.set(discord_config.get('post_errors', False))
-        self.discord_post_lifecycle_var.set(discord_config.get('post_startup_shutdown', False))
-        self.discord_periodic_enabled_var.set(discord_config.get('periodic_enabled', False))
-        self.discord_interval_var.set(discord_config.get('periodic_interval_minutes', 60))
-        self.discord_include_image_var.set(discord_config.get('include_latest_image', True))
-        self.discord_username_var.set(discord_config.get('username_override', ''))
-        self.discord_avatar_var.set(discord_config.get('avatar_url', ''))
-        
-        # Update Discord UI state
-        self.on_discord_enabled_change()
-        self.on_discord_periodic_change()
-        
-        # Load output mode settings
-        output_config = self.config.get('output', {})
-        self.output_mode_var.set(output_config.get('mode', 'file'))
-        self.webserver_host_var.set(output_config.get('webserver_host', '127.0.0.1'))
-        self.webserver_port_var.set(output_config.get('webserver_port', 8080))
-        self.webserver_path_var.set(output_config.get('webserver_path', '/latest'))
-        self.rtsp_host_var.set(output_config.get('rtsp_host', '127.0.0.1'))
-        self.rtsp_port_var.set(output_config.get('rtsp_port', 8554))
-        self.rtsp_stream_name_var.set(output_config.get('rtsp_stream_name', 'asiwatchdog'))
-        self.rtsp_fps_var.set(output_config.get('rtsp_fps', 1.0))
-        
-        # Update output mode UI state
-        self.on_output_mode_change()
-        
-        # Start periodic Discord scheduler
-        self.discord_periodic_job = None
-        self.schedule_discord_periodic()
-        
-        # Send startup message if enabled
-        if discord_config.get('enabled') and discord_config.get('post_startup_shutdown'):
-            self.root.after(2000, self.discord_alerts.send_startup_message)  # Delay 2s to let UI settle
-        
-        self.is_loading_config = False  # Config loading complete
+        """Delegate to settings_manager"""
+        self.settings_manager.load_config()
     
     def save_config(self):
-        """Save current configuration"""
-        # Don't save during initial config load
-        if hasattr(self, 'is_loading_config') and self.is_loading_config:
-            return
-        
-        self.config.set('capture_mode', self.capture_mode_var.get())
-        self.config.set('watch_directory', self.watch_dir_var.get())
-        self.config.set('watch_recursive', self.watch_recursive_var.get())
-        self.config.set('output_directory', self.output_dir_var.get())
-        self.config.set('filename_pattern', self.filename_pattern_var.get())
-        self.config.set('output_format', self.output_format_var.get())
-        self.config.set('jpg_quality', self.jpg_quality_var.get())
-        self.config.set('resize_percent', self.resize_percent_var.get())
-        self.config.set('auto_brightness', self.auto_brightness_var.get())
-        self.config.set('brightness_factor', self.brightness_var.get())
-        self.config.set('saturation_factor', self.saturation_var.get())
-        self.config.set('timestamp_corner', self.timestamp_corner_var.get())
-        self.config.set('cleanup_enabled', self.cleanup_enabled_var.get())
-        self.config.set('cleanup_max_size_gb', self.cleanup_max_size_var.get())
-        
-        # ZWO settings - save exposure in milliseconds for consistency
-        self.config.set('zwo_sdk_path', self.sdk_path_var.get())
-        
-        # Convert exposure to ms for storage
-        exposure_value = self.exposure_var.get()
-        if self.exposure_unit_var.get() == 's':
-            exposure_ms = exposure_value * 1000.0
-        else:
-            exposure_ms = exposure_value
-        self.config.set('zwo_exposure_ms', exposure_ms)
-        
-        self.config.set('zwo_gain', self.gain_var.get())
-        self.config.set('zwo_wb_r', self.wb_r_var.get())
-        self.config.set('zwo_wb_b', self.wb_b_var.get())
-        
-        # Save white balance config structure (replaces old zwo_auto_wb)
-        self.config.set('white_balance', {
-            'mode': self.wb_mode_var.get(),
-            'manual_red_gain': 1.0,  # Not used in current UI, but kept for future
-            'manual_blue_gain': 1.0,
-            'gray_world_low_pct': self.wb_gw_low_var.get(),
-            'gray_world_high_pct': self.wb_gw_high_var.get()
-        })
-        
-        self.config.set('zwo_offset', self.offset_var.get())
-        self.config.set('zwo_bayer_pattern', self.bayer_pattern_var.get())
-        flip_map = {'None': 0, 'Horizontal': 1, 'Vertical': 2, 'Both': 3}
-        self.config.set('zwo_flip', flip_map.get(self.flip_var.get(), 0))
-        self.config.set('zwo_interval', self.interval_var.get())
-        self.config.set('zwo_auto_exposure', self.auto_exposure_var.get())
-        
-        # Save scheduled capture settings
-        self.config.set('scheduled_capture_enabled', self.scheduled_capture_var.get())
-        self.config.set('scheduled_start_time', self.schedule_start_var.get())
-        self.config.set('scheduled_end_time', self.schedule_end_var.get())
-        
-        # Max exposure is now in seconds in UI
-        max_exp_value = self.max_exposure_var.get()
-        self.config.set('zwo_max_exposure_ms', max_exp_value * 1000.0)
-        
-        # Save target brightness
-        self.config.set('zwo_target_brightness', self.target_brightness_var.get())
-        
-        # Save Discord settings
-        self.config.set('discord', {
-            'enabled': self.discord_enabled_var.get(),
-            'webhook_url': self.discord_webhook_var.get(),
-            'embed_color_hex': self.discord_color_var.get(),
-            'post_errors': self.discord_post_errors_var.get(),
-            'post_startup_shutdown': self.discord_post_lifecycle_var.get(),
-            'periodic_enabled': self.discord_periodic_enabled_var.get(),
-            'periodic_interval_minutes': self.discord_interval_var.get(),
-            'include_latest_image': self.discord_include_image_var.get(),
-            'username_override': self.discord_username_var.get(),
-            'avatar_url': self.discord_avatar_var.get()
-        })
-        
-        # Save output mode settings
-        self.config.set('output', {
-            'mode': self.output_mode_var.get(),
-            'webserver_enabled': self.output_mode_var.get() == 'webserver',
-            'webserver_host': self.webserver_host_var.get(),
-            'webserver_port': self.webserver_port_var.get(),
-            'webserver_path': self.webserver_path_var.get(),
-            'webserver_status_path': self.config.get('output', {}).get('webserver_status_path', '/status'),
-            'rtsp_enabled': self.output_mode_var.get() == 'rtsp',
-            'rtsp_host': self.rtsp_host_var.get(),
-            'rtsp_port': self.rtsp_port_var.get(),
-            'rtsp_stream_name': self.rtsp_stream_name_var.get(),
-            'rtsp_fps': self.rtsp_fps_var.get()
-        })
-        
-        # Debug: Verify it's in self.config.data before saving
-        app_logger.info(f"Before save - webhook in config.data: {self.config.data.get('discord', {}).get('webhook_url', '')[:50]}...")
-        
-        self.config.save()
-        app_logger.info("Configuration saved")
+        """Delegate to settings_manager"""
+        self.settings_manager.save_config()
     
     def apply_settings(self):
-        """Apply all settings"""
-        self.save_config()
-        
-        # Update running camera's schedule settings if active
-        if hasattr(self.camera_controller, 'zwo_camera') and self.camera_controller.zwo_camera:
-            self.camera_controller.zwo_camera.scheduled_capture_enabled = self.scheduled_capture_var.get()
-            self.camera_controller.zwo_camera.scheduled_start_time = self.schedule_start_var.get()
-            self.camera_controller.zwo_camera.scheduled_end_time = self.schedule_end_var.get()
-            app_logger.info(f"Updated camera scheduled capture settings: enabled={self.scheduled_capture_var.get()}, window={self.schedule_start_var.get()}-{self.schedule_end_var.get()}")
-        
-        # Apply output mode changes (start/stop servers as needed)
-        self.apply_output_mode()
-        messagebox.showinfo("Success", "Settings applied and saved")
+        """Delegate to settings_manager"""
+        self.settings_manager.apply_settings()
     
-    # ===== Output Mode Methods =====
+    # ===== Output Mode Methods (Delegated to OutputManager) =====
     
     def on_output_mode_change(self):
-        """Handle output mode selection change"""
-        from .theme import SPACING
-        mode = self.output_mode_var.get()
-        
-        # Show/hide mode-specific settings
-        if mode == 'file':
-            self.webserver_frame.pack_forget()
-            self.rtsp_frame.pack_forget()
-            self.file_frame.pack(fill='x', pady=(0, SPACING['element_gap']))
-            self.output_mode_status_var.set("Mode: File (Save to output directory)")
-            self.output_mode_copy_btn.pack_forget()
-        elif mode == 'webserver':
-            self.file_frame.pack_forget()
-            self.rtsp_frame.pack_forget()
-            self.webserver_frame.pack(fill='x', pady=(0, SPACING['element_gap']))
-            
-            host = self.webserver_host_var.get()
-            port = self.webserver_port_var.get()
-            path = self.webserver_path_var.get()
-            self.output_mode_status_var.set(f"Mode: Web Server (Click Apply to start)")
-            self.output_mode_copy_btn.pack_forget()
-        elif mode == 'rtsp':
-            self.file_frame.pack_forget()
-            self.webserver_frame.pack_forget()
-            self.rtsp_frame.pack(fill='x', pady=(0, SPACING['element_gap']))
-            
-            host = self.rtsp_host_var.get()
-            port = self.rtsp_port_var.get()
-            stream = self.rtsp_stream_name_var.get()
-            self.output_mode_status_var.set(f"Mode: RTSP Stream (Click Apply to start)")
-            self.output_mode_copy_btn.pack_forget()
+        """Delegate to output_manager"""
+        self.output_manager.on_output_mode_change()
     
     def apply_output_mode(self):
-        """Start/stop output servers based on selected mode"""
-        mode = self.output_mode_var.get()
-        
-        # Stop any running servers
-        if self.web_server and self.web_server.running:
-            self.web_server.stop()
-            self.web_server = None
-        
-        if self.rtsp_server and self.rtsp_server.running:
-            self.rtsp_server.stop()
-            self.rtsp_server = None
-        
-        # Hide copy button by default
-        self.output_mode_copy_btn.pack_forget()
-        
-        # Start server for selected mode
-        if mode == 'webserver':
-            host = self.webserver_host_var.get()
-            port = self.webserver_port_var.get()
-            image_path = self.webserver_path_var.get()
-            status_path = self.config.get('output', {}).get('webserver_status_path', '/status')
-            
-            self.web_server = WebOutputServer(host, port, image_path, status_path)
-            if self.web_server.start():
-                url = self.web_server.get_url()
-                status_url = self.web_server.get_status_url()
-                self.output_mode_status_var.set(f"✓ Web Server: {url}")
-                self.output_mode_copy_btn.pack(side='right')  # Show copy button
-                app_logger.info(f"Web server started: {url}")
-                app_logger.info(f"Status endpoint: {status_url}")
-            else:
-                self.output_mode_status_var.set("❌ Failed to start web server (check logs)")
-                self.web_server = None
-        
-        elif mode == 'rtsp':
-            host = self.rtsp_host_var.get()
-            port = self.rtsp_port_var.get()
-            stream_name = self.rtsp_stream_name_var.get()
-            fps = self.rtsp_fps_var.get()
-            
-            self.rtsp_server = RTSPStreamServer(host, port, stream_name, fps)
-            if self.rtsp_server.start():
-                url = self.rtsp_server.get_url()
-                self.output_mode_status_var.set(f"✓ RTSP Stream: {url}")
-                self.output_mode_copy_btn.pack(side='right')  # Show copy button
-                app_logger.info(f"RTSP server started: {url}")
-                app_logger.info(f"Connect with VLC or NINA using above URL")
-            else:
-                self.output_mode_status_var.set("❌ ffmpeg not found - Install ffmpeg and add to PATH (see Logs)")
-                self.rtsp_server = None
-                # Show helpful dialog
-                messagebox.showwarning(
-                    "ffmpeg Required",
-                    "RTSP streaming requires ffmpeg.\n\n"
-                    "Steps to enable RTSP:\n"
-                    "1. Download ffmpeg from https://ffmpeg.org/download.html\n"
-                    "2. Extract and add ffmpeg.exe to your system PATH\n"
-                    "3. Restart ASIOverlayWatchDog\n\n"
-                    "Check the Logs tab for more details."
-                )
-        
-        else:  # file mode
-            self.output_mode_status_var.set("Mode: File (Saving to output directory)")
+        """Delegate to output_manager"""
+        self.output_manager.apply_output_mode()
     
     def ensure_output_mode_started(self):
-        """Ensure output mode servers are started if configured (called when capture begins)"""
-        mode = self.output_mode_var.get()
-        
-        # If webserver mode and not running, start it
-        if mode == 'webserver':
-            if not self.web_server or not self.web_server.running:
-                app_logger.info("Starting webserver automatically (configured as output mode)")
-                self.apply_output_mode()
-        
-        # If RTSP mode and not running, start it
-        elif mode == 'rtsp':
-            if not self.rtsp_server or not self.rtsp_server.running:
-                app_logger.info("Starting RTSP server automatically (configured as output mode)")
-                self.apply_output_mode()
+        """Delegate to output_manager"""
+        self.output_manager.ensure_output_mode_started()
     
     def _push_to_output_servers(self, image_path, processed_img):
-        """Push processed image to active output servers"""
-        import io
-        
-        try:
-            # Convert PIL Image to bytes for web server
-            # Use JPEG for better compression and faster transmission
-            if self.web_server and self.web_server.running:
-                img_bytes = io.BytesIO()
-                # Use configured output format and quality for web server
-                output_format = self.output_format_var.get().upper()
-                if output_format == 'JPG' or output_format == 'JPEG':
-                    quality = int(round(self.jpg_quality_var.get()))
-                    processed_img.save(img_bytes, format='JPEG', quality=quality, optimize=True)
-                    content_type = 'image/jpeg'
-                else:
-                    processed_img.save(img_bytes, format='PNG', optimize=True)
-                    content_type = 'image/png'
-                
-                self.web_server.update_image(image_path, img_bytes.getvalue(), content_type=content_type)
-            
-            # Push PIL Image to RTSP server
-            if self.rtsp_server and self.rtsp_server.running:
-                self.rtsp_server.update_image(processed_img)
-        except Exception as e:
-            app_logger.error(f"Error pushing to output servers: {e}")
+        """Delegate to output_manager"""
+        self.output_manager.push_to_output_servers(image_path, processed_img)
     
     def copy_output_url(self):
-        """Copy the output server URL to clipboard"""
-        mode = self.output_mode_var.get()
-        url = None
-        
-        if mode == 'webserver' and self.web_server:
-            url = self.web_server.get_url()
-        elif mode == 'rtsp' and self.rtsp_server:
-            url = self.rtsp_server.get_url()
-        
-        if url:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(url)
-            self.root.update()  # Ensure clipboard is updated
-            app_logger.info(f"Copied to clipboard: {url}")
-            
-            # Visual feedback
-            original_text = self.output_mode_status_var.get()
-            self.output_mode_status_var.set(f"📋 Copied: {url}")
-            self.root.after(2000, lambda: self.output_mode_status_var.set(original_text))
-        else:
-            app_logger.warning("No URL to copy - server may not be running")
+        """Delegate to output_manager"""
+        self.output_manager.copy_output_url()
     
-    # ===== Discord Alert Methods =====
+    # ===== Discord Methods (Delegated to OutputManager) =====
     
     def save_discord_settings(self):
-        """Save Discord settings"""
-        # Debug: Log what we're about to save
-        app_logger.info(f"Saving Discord webhook: {self.discord_webhook_var.get()[:50]}..." if len(self.discord_webhook_var.get()) > 50 else f"Saving Discord webhook: {self.discord_webhook_var.get()}")
-        app_logger.info(f"Discord enabled: {self.discord_enabled_var.get()}")
-        
-        self.save_config()
-        app_logger.info("Discord settings saved")
-        self.discord_test_status_var.set("✓ Settings saved")
-        self.root.after(3000, lambda: self.discord_test_status_var.set(""))
-        
-        # Update Discord alerts instance with new config
-        self.discord_alerts = DiscordAlerts(self.config.data)
-        
-        # Reschedule periodic updates if interval changed
-        self.schedule_discord_periodic()
+        """Delegate to output_manager"""
+        self.output_manager.save_discord_settings()
     
     def test_discord_webhook(self):
-        """Test Discord webhook connection"""
-        if not self.discord_webhook_var.get():
-            self.discord_test_status_var.set("❌ Please enter webhook URL")
-            app_logger.error("Discord webhook URL not set")
-            return
-        
-        # Auto-save settings before testing
-        self.save_discord_settings()
-        
-        # Temporarily enable Discord for testing if not enabled
-        was_enabled = self.discord_enabled_var.get()
-        if not was_enabled:
-            self.discord_enabled_var.set(True)
-            self.save_discord_settings()
-        
-        # Send test message
-        success = self.discord_alerts.send_discord_message(
-            "🧪 Test Alert",
-            "This is a test message from ASIOverlayWatchDog. If you see this, your webhook is configured correctly!",
-            level="info"
-        )
-        
-        # Restore original enabled state if we changed it
-        if not was_enabled:
-            self.discord_enabled_var.set(False)
-            self.save_discord_settings()
-        
-        if success:
-            self.discord_test_status_var.set("✓ Test successful!")
-        else:
-            self.discord_test_status_var.set("❌ Test failed - check logs")
-        
-        # Update status display if status var exists
-        if hasattr(self, 'discord_status_var'):
-            self.discord_status_var.set(self.discord_alerts.get_last_status())
-        
-        # Clear test status after 5 seconds
-        self.root.after(5000, lambda: self.discord_test_status_var.set(""))
+        """Delegate to output_manager"""
+        self.output_manager.test_discord_webhook()
     
     def send_test_discord_alert(self):
-        """Send a full test alert with image if available"""
-        if not self.discord_enabled_var.get():
-            messagebox.showwarning("Discord Disabled", 
-                                 "Please enable Discord alerts first")
-            return
-        
-        if not self.discord_webhook_var.get():
-            messagebox.showwarning("No Webhook", 
-                                 "Please configure webhook URL first")
-            return
-        
-        # Auto-save settings before testing
-        self.save_discord_settings()
-        
-        # Get latest image path
-        image_path = None
-        if self.discord_include_image_var.get() and self.last_processed_image:
-            image_path = self.last_processed_image
-        elif self.discord_include_image_var.get() and self.last_captured_image:
-            image_path = self.last_captured_image
-        
-        # Send test alert
-        success = self.discord_alerts.send_discord_message(
-            "🧪 Test Alert from ASIOverlayWatchDog",
-            f"""**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-This is a test alert with your current configuration.""",
-            level="info",
-            image_path=image_path
-        )
-        
-        if success:
-            messagebox.showinfo("Test Sent", 
-                              "Test alert sent successfully! Check your Discord channel.")
-        else:
-            messagebox.showerror("Test Failed", 
-                               "Failed to send test alert. Check the Logs tab for details.")
+        """Delegate to output_manager"""
+        self.output_manager.send_test_discord_alert()
     
     def on_discord_enabled_change(self):
-        """Handle Discord enable/disable"""
-        enabled = self.discord_enabled_var.get()
-        
-        # Enable/disable all option widgets
-        state = 'normal' if enabled else 'disabled'
-        
-        for child in self.discord_options_frame.winfo_children():
-            self._set_widget_state_recursive(child, state)
-        
-        # Reschedule periodic updates
-        self.schedule_discord_periodic()
+        """Delegate to output_manager"""
+        self.output_manager.on_discord_enabled_change()
     
     def on_discord_periodic_change(self):
-        """Handle periodic posting enable/disable"""
-        enabled = self.discord_periodic_enabled_var.get()
-        
-        # Enable/disable periodic options
-        state = 'normal' if enabled else 'disabled'
-        
-        for child in self.discord_periodic_options_frame.winfo_children():
-            self._set_widget_state_recursive(child, state)
-        
-        # Reschedule periodic updates
-        self.schedule_discord_periodic()
+        """Delegate to output_manager"""
+        self.output_manager.on_discord_periodic_change()
     
     def on_discord_color_change(self, *args):
-        """Update color preview when hex value changes"""
-        hex_color = self.discord_color_var.get()
-        
-        try:
-            # Validate hex color
-            if hex_color.startswith('#') and len(hex_color) == 7:
-                int(hex_color[1:], 16)  # Test if valid hex
-                self.discord_color_preview.configure(bg=hex_color)
-            else:
-                # Invalid, revert to default
-                self.discord_color_preview.configure(bg='#0EA5E9')
-        except (ValueError, tk.TclError):
-            # Invalid hex, revert to default
-            self.discord_color_preview.configure(bg='#0EA5E9')
-    
-    def _set_widget_state_recursive(self, widget, state):
-        """Recursively set state for all child widgets"""
-        try:
-            if isinstance(widget, (ttk.Entry, ttk.Spinbox, ttk.Combobox)):
-                widget.configure(state=state)
-            elif isinstance(widget, (tk.Checkbutton, tk.Radiobutton)):
-                widget.configure(state=state)
-        except:
-            pass
-        
-        # Recurse into children
-        for child in widget.winfo_children():
-            self._set_widget_state_recursive(child, state)
+        """Delegate to output_manager"""
+        self.output_manager.on_discord_color_change(*args)
     
     def schedule_discord_periodic(self):
-        """Initialize Discord periodic tracking (no timer, sends on next image)"""
-        # Cancel any existing timer job
-        if hasattr(self, 'discord_periodic_job') and self.discord_periodic_job:
-            self.root.after_cancel(self.discord_periodic_job)
-            self.discord_periodic_job = None
-        
-        # Initialize last send time tracking
-        discord_config = self.config.get('discord', {})
-        if discord_config.get('enabled') and discord_config.get('periodic_enabled'):
-            import time
-            if not hasattr(self, 'discord_last_send_time'):
-                self.discord_last_send_time = 0  # Will send on first image
-            interval_min = discord_config.get('periodic_interval_minutes', 60)
-            app_logger.info(f"Discord periodic updates: will send every {interval_min} minutes on next image save")
+        """Delegate to output_manager"""
+        self.output_manager.schedule_discord_periodic()
     
     def check_discord_periodic_send(self, image_path):
-        """Check if enough time has passed to send Discord update"""
-        discord_config = self.config.get('discord', {})
-        if not discord_config.get('enabled') or not discord_config.get('periodic_enabled'):
-            return
-        
-        import time
-        current_time = time.time()
-        interval_min = discord_config.get('periodic_interval_minutes', 60)
-        interval_sec = interval_min * 60
-        
-        # Check if enough time has passed since last send
-        if not hasattr(self, 'discord_last_send_time'):
-            self.discord_last_send_time = 0
-        
-        if current_time - self.discord_last_send_time >= interval_sec:
-            self.discord_alerts.send_periodic_update(image_path)
-            self.discord_last_send_time = current_time
-            app_logger.info(f"Discord periodic update sent (next in {interval_min} minutes)")
+        """Delegate to output_manager"""
+        self.output_manager.check_discord_periodic_send(image_path)
     
     def send_discord_error(self, error_text):
-        """Send error to Discord if enabled"""
-        discord_config = self.config.get('discord', {})
-        if discord_config.get('enabled') and discord_config.get('post_errors'):
-            self.discord_alerts.send_error_message(error_text)
+        """Delegate to output_manager"""
+        self.output_manager.send_discord_error(error_text)
 
 
 def main(auto_start=False, auto_stop=None, headless=False):

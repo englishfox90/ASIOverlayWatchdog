@@ -111,10 +111,8 @@ class ImageFileHandler(FileSystemEventHandler):
         
         # Check if it's an image file (PNG for now)
         if filepath.lower().endswith('.png'):
-            # Process in a separate thread to avoid blocking the watcher
-            thread = threading.Thread(target=self.process_file, args=(filepath,))
-            thread.daemon = True
-            thread.start()
+            # Submit to thread pool instead of spawning new thread (limits concurrent processing)
+            self.executor.submit(self.process_file, filepath)
     
     def on_modified(self, event):
         """Called when a file is modified - we'll also catch files here"""
@@ -128,9 +126,17 @@ class ImageFileHandler(FileSystemEventHandler):
         if filepath.lower().endswith('.png'):
             with self.lock:
                 if filepath not in self.processing:
-                    thread = threading.Thread(target=self.process_file, args=(filepath,))
-                    thread.daemon = True
-                    thread.start()
+                    # Submit to thread pool instead of spawning new thread
+                    self.executor.submit(self.process_file, filepath)
+
+
+    def shutdown(self):
+        """Cleanup thread pool (called when stopping watcher)"""
+        try:
+            self.executor.shutdown(wait=False)
+            app_logger.debug("File processing thread pool shut down")
+        except Exception as e:
+            app_logger.debug(f"Error shutting down thread pool: {e}")
 
 
 class FileWatcher:

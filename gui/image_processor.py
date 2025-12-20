@@ -15,8 +15,9 @@ class ImageProcessor:
     """Manages image processing and preview generation"""
     
     def __init__(self, app):
-        self.app = app
-    
+        self.app = app        # Preview caching to avoid re-reading from disk
+        self.preview_cache = None
+        self.preview_cache_path = None    
     def process_and_save_image(self, img, metadata):
         """Process image with overlays and save"""
         try:

@@ -245,11 +245,27 @@ class CameraController:
             self.app.stop_capture_button.config(state='disabled', cursor='')
     
     def stop_camera_capture(self):
-        """Stop camera capture"""
+        """Stop camera capture with proper cleanup and error handling"""
         self.app.is_capturing = False
+        
         if self.zwo_camera:
-            self.zwo_camera.disconnect_camera()
-            self.zwo_camera = None
+            try:
+                app_logger.info("Stopping camera capture...")
+                
+                # Disconnect camera gracefully (includes stop_capture call)
+                self.zwo_camera.disconnect_camera()
+                
+                # Wait briefly for cleanup to complete
+                import time
+                time.sleep(0.2)
+                
+                app_logger.info("Camera disconnected successfully")
+                
+            except Exception as e:
+                app_logger.error(f"Error during camera disconnect: {e}")
+            finally:
+                # Always clear reference even if disconnect failed
+                self.zwo_camera = None
         
         # Only enable start button if camera is selected
         if self.app.camera_combo.get():
@@ -392,3 +408,83 @@ class CameraController:
         except Exception as e:
             app_logger.debug(f"SDK not available: {e}")
             return False
+    
+    # ===== SCHEDULED CAPTURE METHODS =====
+    
+    def on_scheduled_capture_toggle(self):
+        """Enable/disable scheduled capture time inputs"""
+        enabled = self.app.scheduled_capture_var.get()
+        state = 'normal' if enabled else 'disabled'
+        self.app.schedule_start_entry.config(state=state)
+        self.app.schedule_end_entry.config(state=state)
+        
+        # Auto-save to config
+        self.app.config.set('scheduled_capture_enabled', enabled)
+        self.app.config.set('scheduled_start_time', self.app.schedule_start_var.get())
+        self.app.config.set('scheduled_end_time', self.app.schedule_end_var.get())
+        self.app.config.save()
+        
+        # If camera is running, update its settings
+        if self.zwo_camera:
+            self.zwo_camera.scheduled_capture_enabled = enabled
+            self.zwo_camera.scheduled_start_time = self.app.schedule_start_var.get()
+            self.zwo_camera.scheduled_end_time = self.app.schedule_end_var.get()
+            
+            status = "enabled" if enabled else "disabled"
+            if enabled:
+                app_logger.info(f"Scheduled capture {status}: {self.app.schedule_start_var.get()} - {self.app.schedule_end_var.get()}")
+            else:
+                app_logger.info(f"Scheduled capture {status}")
+    
+    def on_schedule_time_change(self, *args):
+        """Called when schedule time entries are modified - auto-save to config"""
+        # Only save if scheduled capture is enabled
+        if self.app.scheduled_capture_var.get():
+            self.app.config.set('scheduled_start_time', self.app.schedule_start_var.get())
+            self.app.config.set('scheduled_end_time', self.app.schedule_end_var.get())
+            self.app.config.save()
+            
+            # If camera is running, update its settings
+            if self.zwo_camera:
+                self.zwo_camera.scheduled_start_time = self.app.schedule_start_var.get()
+                self.zwo_camera.scheduled_end_time = self.app.schedule_end_var.get()
+                app_logger.info(f"Schedule times updated: {self.app.schedule_start_var.get()} - {self.app.schedule_end_var.get()}")
+    
+    def update_camera_status_for_schedule(self, status_text):
+        """Update camera status when schedule state changes (called from camera thread)"""
+        def update_ui():
+            self.app.camera_status_var.set(status_text)
+            if "Idle" in status_text or "off-peak" in status_text:
+                self.set_camera_status_dot('idle')
+            elif "Reconnecting" in status_text:
+                self.set_camera_status_dot('connecting')
+        
+        self.app.root.after(0, update_ui)
+    
+    # ===== WHITE BALANCE METHODS =====
+    
+    def on_wb_mode_change(self):
+        """Handle white balance mode change - show/hide appropriate controls"""
+        mode = self.app.wb_mode_var.get()
+        
+        # Update hint label
+        hints = {
+            'asi_auto': '(SDK Auto WB)',
+            'manual': '(Manual R/B gains)',
+            'gray_world': '(Software algorithm)'
+        }
+        self.app.wb_mode_hint_label.config(text=hints.get(mode, ''))
+        
+        # Show/hide appropriate control frames
+        if mode == 'manual':
+            self.app.wb_manual_frame.pack(fill='x', pady=(0, 0))
+            self.app.wb_gray_world_frame.pack_forget()
+        elif mode == 'gray_world':
+            self.app.wb_manual_frame.pack_forget()
+            self.app.wb_gray_world_frame.pack(fill='x', pady=(0, 0))
+        else:  # asi_auto
+            self.app.wb_manual_frame.pack_forget()
+            self.app.wb_gray_world_frame.pack_forget()
+        
+        # Save to config
+        self.app.settings_manager.save_config()
