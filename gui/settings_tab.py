@@ -498,7 +498,7 @@ class SettingsTab:
         self.app.brightness_var.trace_add('write', update_brightness_label)
         
         ToolTip(self.app.brightness_scale,
-               text="Multiplier applied on top of auto brightness (1.0 = neutral, >1.0 = brighter, <1.0 = darker)",
+               text="Post-processing brightness adjustment for saved images (1.0 = no change). Does not affect camera exposure.",
                bootstyle="warning-inverse")
         
         row += 1

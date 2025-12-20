@@ -36,7 +36,11 @@ class ZWOCamera:
         self.capture_interval = 5.0  # Seconds between captures
         self.auto_exposure = auto_exposure
         self.max_exposure = max_exposure_sec  # Max exposure for auto mode
-        self.target_brightness = 100  # Target mean brightness for auto exposure
+        self.target_brightness = 100  # Target brightness for auto exposure
+        self.exposure_algorithm = 'percentile'  # 'mean', 'median', or 'percentile'
+        self.exposure_percentile = 75  # Use 75th percentile (focuses on brighter areas)
+        self.clipping_threshold = 245  # Consider pixels > this value as clipped
+        self.clipping_prevention = True  # Prevent further exposure increase if clipping detected
         self.white_balance_r = white_balance_r
         self.white_balance_b = white_balance_b
         self.auto_wb = auto_wb
@@ -54,6 +58,10 @@ class ZWOCamera:
         # Exposure tracking for UI
         self.exposure_start_time = None
         self.exposure_remaining = 0.0
+        
+        # Rapid calibration mode
+        self.calibration_mode = False  # Fast convergence before normal capture
+        self.calibration_complete = False
         
     def log(self, message):
         """Send log message via callback"""
@@ -424,6 +432,14 @@ class ZWOCamera:
         max_reconnect_attempts = 5
         last_schedule_log = None  # Track last schedule status to avoid log spam
         
+        # Run rapid calibration if auto exposure is enabled
+        if self.auto_exposure and not self.calibration_complete:
+            try:
+                self.run_calibration()
+            except Exception as e:
+                self.log(f"Calibration failed: {e}. Continuing with current settings.")
+                self.calibration_complete = True
+        
         while self.is_capturing:
             try:
                 # Check if we're within the scheduled capture window
@@ -580,6 +596,45 @@ class ZWOCamera:
         """Set interval between captures"""
         self.capture_interval = max(1.0, seconds)
     
+    def update_exposure(self, exposure_seconds):
+        """Update exposure setting and apply immediately to camera if connected"""
+        self.exposure_seconds = exposure_seconds
+        
+        # If camera is connected and not in auto exposure mode, apply immediately
+        if self.camera and not self.auto_exposure:
+            try:
+                self.camera.set_control_value(self.asi.ASI_EXPOSURE, int(exposure_seconds * 1000000))
+                self.log(f"Exposure updated to {exposure_seconds*1000:.2f}ms")
+            except Exception as e:
+                self.log(f"Failed to update camera exposure: {e}")
+    
+    def calculate_brightness(self, img_array):
+        """Calculate brightness using configured algorithm (mean, median, or percentile)"""
+        if self.exposure_algorithm == 'mean':
+            return np.mean(img_array)
+        elif self.exposure_algorithm == 'median':
+            return np.median(img_array)
+        elif self.exposure_algorithm == 'percentile':
+            return np.percentile(img_array, self.exposure_percentile)
+        else:
+            # Default to mean
+            return np.mean(img_array)
+    
+    def check_clipping(self, img_array):
+        """Check if image has significant highlight clipping"""
+        if not self.clipping_prevention:
+            return False, 0.0
+        
+        # Count pixels above clipping threshold
+        clipped_pixels = np.sum(img_array > self.clipping_threshold)
+        total_pixels = img_array.size
+        clipping_percentage = (clipped_pixels / total_pixels) * 100
+        
+        # Consider clipping significant if > 5% of pixels are clipped
+        is_clipping = clipping_percentage > 5.0
+        
+        return is_clipping, clipping_percentage
+    
     def simple_debayer_rggb(self, bayer):
         """Simple debayering for RGGB Bayer pattern (fallback method)"""
         height, width = bayer.shape
@@ -605,19 +660,111 @@ class ZWOCamera:
         
         return rgb
     
+    def run_calibration(self):
+        """Rapid calibration to find optimal exposure before starting interval captures"""
+        if not self.auto_exposure or not self.camera:
+            return
+        
+        self.log("Starting rapid auto-exposure calibration...")
+        self.calibration_mode = True
+        max_calibration_attempts = 15  # Limit calibration time
+        attempt = 0
+        
+        try:
+            while attempt < max_calibration_attempts:
+                attempt += 1
+                
+                # Capture test frame
+                img, metadata = self.capture_single_frame()
+                img_array = np.array(img)
+                
+                # Use histogram-based brightness calculation
+                brightness = self.calculate_brightness(img_array)
+                
+                # Check for clipping
+                is_clipping, clip_pct = self.check_clipping(img_array)
+                
+                # Check if we're close enough to target (within 10%)
+                if 0.9 * self.target_brightness <= brightness <= 1.1 * self.target_brightness:
+                    clip_info = f" (clipping: {clip_pct:.1f}%)" if is_clipping else ""
+                    self.log(f"Calibration complete! Found optimal exposure: {self.exposure_seconds*1000:.2f}ms (brightness: {brightness:.1f}/{self.target_brightness}){clip_info} in {attempt} attempt(s)")
+                    self.calibration_complete = True
+                    self.calibration_mode = False
+                    return
+                
+                # Adjust exposure with aggressive steps during calibration
+                brightness_ratio = brightness / self.target_brightness
+                
+                if brightness < self.target_brightness * 0.9:  # Too dark
+                    # Check if we're clipping - don't increase if already clipping
+                    if is_clipping:
+                        self.log(f"Calibration attempt {attempt}: target not reached but clipping detected ({clip_pct:.1f}%), stopping at {self.exposure_seconds*1000:.2f}ms")
+                        self.calibration_complete = True
+                        self.calibration_mode = False
+                        return
+                    if brightness_ratio < 0.2:  # Very dark
+                        adjustment = 5.0
+                    elif brightness_ratio < 0.4:
+                        adjustment = 3.0
+                    elif brightness_ratio < 0.6:
+                        adjustment = 2.0
+                    else:
+                        adjustment = 1.4
+                    
+                    new_exposure = self.exposure_seconds * adjustment
+                    if new_exposure > self.max_exposure:
+                        self.exposure_seconds = self.max_exposure
+                        self.log(f"Calibration attempt {attempt}: hit max exposure limit {self.max_exposure*1000:.2f}ms (brightness: {brightness:.1f})")
+                    else:
+                        self.exposure_seconds = new_exposure
+                        self.log(f"Calibration attempt {attempt}: increased to {new_exposure*1000:.2f}ms (brightness: {brightness:.1f})")
+                
+                elif brightness > self.target_brightness * 1.1:  # Too bright
+                    if brightness_ratio > 5.0:
+                        adjustment = 0.2
+                    elif brightness_ratio > 3.0:
+                        adjustment = 0.33
+                    elif brightness_ratio > 2.0:
+                        adjustment = 0.5
+                    else:
+                        adjustment = 0.75
+                    
+                    new_exposure = max(self.exposure_seconds * adjustment, 0.000032)
+                    self.exposure_seconds = new_exposure
+                    clip_info = f" (clipping: {clip_pct:.1f}%)" if is_clipping else ""
+                    self.log(f"Calibration attempt {attempt}: decreased to {new_exposure*1000:.2f}ms (brightness: {brightness:.1f}){clip_info}")
+            
+            # Max attempts reached
+            self.log(f"Calibration incomplete after {max_calibration_attempts} attempts. Proceeding with exposure: {self.exposure_seconds*1000:.2f}ms")
+            self.calibration_complete = True
+            self.calibration_mode = False
+            
+        except Exception as e:
+            self.log(f"Calibration error: {e}. Proceeding with current exposure.")
+            self.calibration_complete = True
+            self.calibration_mode = False
+    
     def adjust_exposure_auto(self, img_array):
         """Adjust exposure based on image brightness with intelligent step sizing"""
         if not self.auto_exposure:
             return
         
-        # Calculate mean brightness
-        mean_brightness = np.mean(img_array)
+        # Calculate brightness using histogram-based method
+        brightness = self.calculate_brightness(img_array)
+        
+        # Check for clipping
+        is_clipping, clip_pct = self.check_clipping(img_array)
         
         # Calculate how far off we are from target
-        brightness_ratio = mean_brightness / self.target_brightness
+        brightness_ratio = brightness / self.target_brightness
         
         # Adjust exposure to reach target brightness
-        if mean_brightness < self.target_brightness * 0.9:  # Too dark (below 90% of target)
+        if brightness < self.target_brightness * 0.9:  # Too dark (below 90% of target)
+            # Check if we're clipping - don't increase if already clipping significantly
+            if is_clipping:
+                self.log(f"Auto exposure: not increasing (clipping: {clip_pct:.1f}%, brightness: {brightness:.1f}/{self.target_brightness})")
+                return
+            
             # Calculate adjustment factor based on how dark it is
             if brightness_ratio < 0.3:  # Very dark (< 30% of target)
                 adjustment = 3.0  # Triple exposure
@@ -628,16 +775,19 @@ class ZWOCamera:
             else:  # Slightly dark (70-90% of target)
                 adjustment = 1.2  # Increase by 20%
             
-            new_exposure = min(self.exposure_seconds * adjustment, self.max_exposure)
-            if new_exposure != self.exposure_seconds:
-                # Check if we hit the max limit
-                if new_exposure >= self.max_exposure:
-                    self.log(f"Auto exposure: MAX LIMIT REACHED at {new_exposure*1000:.2f}ms (brightness: {mean_brightness:.1f}/{self.target_brightness})")
-                else:
-                    self.log(f"Auto exposure: increased to {new_exposure*1000:.2f}ms (brightness: {mean_brightness:.1f}/{self.target_brightness})")
+            new_exposure = self.exposure_seconds * adjustment
+            
+            # Check if we would exceed max limit BEFORE setting
+            if new_exposure > self.max_exposure:
+                if self.exposure_seconds < self.max_exposure:
+                    # Set to max limit (only if not already there)
+                    self.exposure_seconds = self.max_exposure
+                    self.log(f"Auto exposure: MAX LIMIT REACHED at {self.max_exposure*1000:.2f}ms (brightness: {brightness:.1f}/{self.target_brightness})")
+            elif new_exposure != self.exposure_seconds:
                 self.exposure_seconds = new_exposure
+                self.log(f"Auto exposure: increased to {new_exposure*1000:.2f}ms (brightness: {brightness:.1f}/{self.target_brightness})")
         
-        elif mean_brightness > self.target_brightness * 1.1:  # Too bright (above 110% of target)
+        elif brightness > self.target_brightness * 1.1:  # Too bright (above 110% of target)
             # Calculate adjustment factor based on how bright it is
             if brightness_ratio > 3.0:  # Very bright (> 300% of target)
                 adjustment = 0.33  # Reduce to 1/3
@@ -651,4 +801,5 @@ class ZWOCamera:
             new_exposure = max(self.exposure_seconds * adjustment, 0.000032)  # Min 32µs
             if new_exposure != self.exposure_seconds:
                 self.exposure_seconds = new_exposure
-                self.log(f"Auto exposure: decreased to {new_exposure*1000:.2f}ms (brightness: {mean_brightness:.1f}/{self.target_brightness})")
+                clip_info = f" (clipping: {clip_pct:.1f}%)" if is_clipping else ""
+                self.log(f"Auto exposure: decreased to {new_exposure*1000:.2f}ms (brightness: {brightness:.1f}/{self.target_brightness}){clip_info}")

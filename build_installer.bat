@@ -29,9 +29,9 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 REM Check if Inno Setup is installed
-set "INNO_PATH=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+set INNO_PATH=C:\Program Files (x86)\Inno Setup 6\ISCC.exe
 if not exist "%INNO_PATH%" (
-    set "INNO_PATH=C:\Program Files\Inno Setup 6\ISCC.exe"
+    set INNO_PATH=C:\Program Files\Inno Setup 6\ISCC.exe
 )
 
 if not exist "%INNO_PATH%" (
