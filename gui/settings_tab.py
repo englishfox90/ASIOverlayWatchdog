@@ -5,7 +5,7 @@ Modern dark theme with consistent styling matching Capture tab
 import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.tooltip import ToolTip
-from .theme import COLORS, FONTS, SPACING, LAYOUT, configure_dark_input_styles, create_card, create_secondary_button
+from .theme import COLORS, FONTS, SPACING, LAYOUT, configure_dark_input_styles, create_card, create_secondary_button, create_primary_button
 
 
 class SettingsTab:
@@ -511,7 +511,7 @@ class SettingsTab:
         
         tk.Label(icon_row, text="", width=12).pack(side='left')  # Spacer
         
-        icon_btn = create_secondary_button(icon_row, "🌤️ Add Weather Icon",
+        icon_btn = create_primary_button(icon_row, "🌤️ Add Weather Icon",
                                           self.app.add_weather_icon_overlay)
         icon_btn.pack(side='left', padx=(0, 8))
         

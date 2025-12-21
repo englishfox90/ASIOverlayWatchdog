@@ -547,7 +547,7 @@ class ZWOCamera:
                             
                             # Reconnect camera for scheduled window
                             if not self.camera:
-                                if not self.connect_camera():
+                                if not self.connect_camera(self.camera_index):
                                     self.log("ERROR: Failed to reconnect camera for scheduled window")
                                     time.sleep(5)  # Wait before retrying
                                     continue
