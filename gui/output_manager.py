@@ -21,6 +21,9 @@ class OutputManager:
         self.rtsp_server = None
         self.discord_alerts = None
         self.discord_periodic_job = None
+        
+        # Initialize Discord alerts
+        self.initialize_discord()
     
     def initialize_discord(self):
         """Initialize Discord alerts with current config"""
@@ -356,6 +359,7 @@ This is a test alert with your current configuration.""",
     def _post_periodic_discord_update(self):
         """Post a periodic update to Discord"""
         if not self.discord_alerts:
+            app_logger.warning("Discord alerts not initialized")
             return
         
         # Get latest image if available
@@ -363,8 +367,14 @@ This is a test alert with your current configuration.""",
         if self.app.discord_include_image_var.get():
             if self.app.last_processed_image:
                 image_path = self.app.last_processed_image
+                app_logger.debug(f"Using last_processed_image: {image_path}")
             elif self.app.last_captured_image:
                 image_path = self.app.last_captured_image
+                app_logger.debug(f"Using last_captured_image: {image_path}")
+            else:
+                app_logger.warning("No image available for Discord post")
+        else:
+            app_logger.debug("Discord image inclusion disabled")
         
         # Build status message
         mode = "Camera Capture" if self.app.is_capturing else "Directory Watch"
@@ -376,6 +386,7 @@ This is a test alert with your current configuration.""",
 **Images Processed:** {count}
 **Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
         
+        app_logger.info(f"Sending Discord update with image: {image_path if image_path else 'None'}")
         self.discord_alerts.send_discord_message(
             "📊 Status Update",
             message,

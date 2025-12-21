@@ -2,8 +2,11 @@
 Constants for overlay system
 """
 
-# Token definitions with friendly labels
+# Token definitions with friendly labels - organized with headers
+# Format: ("Label", "Token") or ("HEADER", None) for section headers
 TOKENS = [
+    # Camera tokens
+    ("━━━ Camera ━━━", None),  # Header (not selectable)
     ("Camera", "{CAMERA}"),
     ("Exposure", "{EXPOSURE}"),
     ("Gain", "{GAIN}"),
@@ -14,7 +17,9 @@ TOKENS = [
     ("Session", "{SESSION}"),
     ("Date & Time", "{DATETIME}"),
     ("Filename", "{FILENAME}"),
-    # Image statistics
+    
+    # Image statistics tokens
+    ("━━━ Image Stats ━━━", None),  # Header
     ("Brightness/Mean", "{BRIGHTNESS}"),
     ("Median", "{MEDIAN}"),
     ("Min Pixel", "{MIN}"),
@@ -23,6 +28,22 @@ TOKENS = [
     ("25th Percentile", "{P25}"),
     ("75th Percentile", "{P75}"),
     ("95th Percentile", "{P95}"),
+    
+    # Weather tokens (only shown if weather service is configured)
+    ("━━━ Weather ━━━", None),  # Header
+    ("Weather Temp", "{WEATHER_TEMP}"),
+    ("Feels Like", "{WEATHER_FEELS_LIKE}"),
+    ("Condition", "{WEATHER_CONDITION}"),
+    ("Description", "{WEATHER_DESC}"),
+    ("Humidity", "{WEATHER_HUMIDITY}"),
+    ("Pressure", "{WEATHER_PRESSURE}"),
+    ("Wind Speed", "{WEATHER_WIND_SPEED}"),
+    ("Wind Direction", "{WEATHER_WIND_DIR}"),
+    ("Clouds", "{WEATHER_CLOUDS}"),
+    ("Visibility", "{WEATHER_VISIBILITY}"),
+    ("Sunrise", "{WEATHER_SUNRISE}"),
+    ("Sunset", "{WEATHER_SUNSET}"),
+    ("City", "{WEATHER_CITY}"),
 ]
 
 # Position presets

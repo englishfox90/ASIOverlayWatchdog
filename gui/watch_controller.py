@@ -55,6 +55,9 @@ class WatchController:
             output_dir = self.app.output_dir_var.get()
             recursive = self.app.watch_recursive_var.get()
             
+            # Reset Discord flag for new watch session
+            self.app.first_image_posted_to_discord = False
+            
             self.watcher = FileWatcher(
                 watch_directory=watch_dir,
                 output_directory=output_dir,
@@ -98,6 +101,12 @@ class WatchController:
         """
         self.app.image_count += 1
         self.app.root.after(0, lambda: self.app.image_count_var.set(str(self.app.image_count)))
+        
+        # Post first image to Discord immediately (only once)
+        if not self.app.first_image_posted_to_discord and self.app.discord_enabled_var.get() and self.app.discord_periodic_enabled_var.get():
+            self.app.first_image_posted_to_discord = True
+            self.app.root.after(1000, self.app.output_manager._post_periodic_discord_update)  # 1 second delay to ensure file is saved
+            app_logger.info("Posting first image to Discord")
         
         # Push to output servers if active
         if processed_img:

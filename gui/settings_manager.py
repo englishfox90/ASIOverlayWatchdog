@@ -165,6 +165,20 @@ class SettingsManager:
         self.app.on_discord_enabled_change()
         self.app.on_discord_periodic_change()
         
+        # Load weather settings
+        weather_config = self.app.config.get('weather', {})
+        if hasattr(self.app, 'weather_api_key_var'):
+            self.app.weather_api_key_var.set(weather_config.get('api_key', ''))
+        if hasattr(self.app, 'weather_location_var'):
+            self.app.weather_location_var.set(weather_config.get('location', ''))
+        if hasattr(self.app, 'weather_units_var'):
+            self.app.weather_units_var.set(weather_config.get('units', 'metric'))
+        if hasattr(self.app, 'weather_status_var'):
+            if weather_config.get('enabled'):
+                self.app.weather_status_var.set(f"✓ Configured: {weather_config.get('location', '')}")
+            else:
+                self.app.weather_status_var.set("Not configured")
+        
         # Load output mode settings
         output_config = self.app.config.get('output', {})
         self.app.output_mode_var.set(output_config.get('mode', 'file'))
@@ -255,6 +269,17 @@ class SettingsManager:
         # Save target brightness
         self.app.config.set('zwo_target_brightness', self.app.target_brightness_var.get())
         
+        # Save weather settings
+        api_key = self.app.weather_api_key_var.get() if hasattr(self.app, 'weather_api_key_var') else ''
+        location = self.app.weather_location_var.get() if hasattr(self.app, 'weather_location_var') else ''
+        self.app.config.set('weather', {
+            'enabled': bool(api_key and location),
+            'api_key': api_key,
+            'location': location,
+            'units': self.app.weather_units_var.get() if hasattr(self.app, 'weather_units_var') else 'metric',
+            'cache_duration': 600
+        })
+        
         # Save Discord settings
         self.app.config.set('discord', {
             'enabled': self.app.discord_enabled_var.get(),
@@ -295,6 +320,9 @@ class SettingsManager:
     def apply_settings(self):
         """Apply all settings"""
         self.save_config()
+        
+        # Reinitialize weather service with new settings
+        self.app._init_weather_service()
         
         # Update running camera's schedule settings if active
         if hasattr(self.app.camera_controller, 'zwo_camera') and self.app.camera_controller.zwo_camera:

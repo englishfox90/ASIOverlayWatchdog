@@ -35,6 +35,11 @@ class SettingsTab:
         output_mode_card_frame.master.pack(fill='x', pady=(0, SPACING['section_gap']))
         self.create_output_mode_selector(output_mode_card_frame)
         
+        # Weather Settings Card - NEW: OpenWeatherMap API integration
+        weather_card = create_card(container, title="Weather Settings (Optional)")
+        weather_card.master.pack(fill='x', pady=(0, SPACING['section_gap']))
+        self.create_weather_settings(weather_card)
+        
         # Image Processing Card - full width
         processing_card = create_card(container, title="Image Processing")
         processing_card.master.pack(fill='x', pady=(0, SPACING['section_gap']))
@@ -398,6 +403,127 @@ class SettingsTab:
         tk.Label(quality_frame, textvariable=self.app.jpg_quality_var,
                 font=FONTS['body_bold'], bg=COLORS['bg_card'],
                 fg=COLORS['text_primary'], width=3).pack(side='left')
+    
+    
+    def create_weather_settings(self, parent):
+        """Create weather API settings (OpenWeatherMap) - Optimized compact layout"""
+        # Main container with better spacing
+        container = tk.Frame(parent, bg=COLORS['bg_card'])
+        container.pack(fill='x', padx=5, pady=5)
+        
+        # === Row 1: Info and Link ===
+        info_row = tk.Frame(container, bg=COLORS['bg_card'])
+        info_row.pack(fill='x', pady=(0, 8))
+        
+        tk.Label(info_row, 
+                text="🌤️ Add live weather data to overlays • ",
+                font=FONTS['small'],
+                bg=COLORS['bg_card'], fg=COLORS['text_muted']).pack(side='left')
+        
+        link_label = tk.Label(info_row,
+                text="Get free API key (1000 calls/day)",
+                font=FONTS['small'],
+                bg=COLORS['bg_card'], fg=COLORS['accent_primary'],
+                cursor='hand2')
+        link_label.pack(side='left')
+        link_label.bind('<Button-1>', lambda e: self._open_weather_url())
+        
+        # === Row 2: API Key (full width) ===
+        api_row = tk.Frame(container, bg=COLORS['bg_card'])
+        api_row.pack(fill='x', pady=(0, 6))
+        
+        tk.Label(api_row, text="API Key:", font=FONTS['body'],
+                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
+                width=12, anchor='w').pack(side='left')
+        
+        if not hasattr(self.app, 'weather_api_key_var'):
+            self.app.weather_api_key_var = tk.StringVar()
+        api_entry = ttk.Entry(api_row, textvariable=self.app.weather_api_key_var,
+                             font=FONTS['body'], style='Dark.TEntry', show='*')
+        api_entry.pack(side='left', fill='x', expand=True, padx=(0, 5))
+        
+        # Show/Hide toggle
+        self.weather_api_show_var = tk.BooleanVar(value=False)
+        show_btn = ttk.Checkbutton(api_row, text="Show",
+                                   variable=self.weather_api_show_var,
+                                   command=lambda: api_entry.config(
+                                       show='' if self.weather_api_show_var.get() else '*'),
+                                   bootstyle="primary-round-toggle")
+        show_btn.pack(side='left')
+        
+        # === Row 3: Location (full width) ===
+        loc_row = tk.Frame(container, bg=COLORS['bg_card'])
+        loc_row.pack(fill='x', pady=(0, 2))
+        
+        tk.Label(loc_row, text="Location:", font=FONTS['body'],
+                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
+                width=12, anchor='w').pack(side='left')
+        
+        if not hasattr(self.app, 'weather_location_var'):
+            self.app.weather_location_var = tk.StringVar()
+        location_entry = ttk.Entry(loc_row, textvariable=self.app.weather_location_var,
+                                   font=FONTS['body'], style='Dark.TEntry')
+        location_entry.pack(side='left', fill='x', expand=True)
+        
+        # Location hint
+        hint_row = tk.Frame(container, bg=COLORS['bg_card'])
+        hint_row.pack(fill='x', pady=(0, 8))
+        tk.Label(hint_row, text="", width=12).pack(side='left')  # Spacer
+        tk.Label(hint_row, 
+                text="e.g., London, London,GB, New York,US",
+                font=FONTS['tiny'], bg=COLORS['bg_card'],
+                fg=COLORS['text_muted']).pack(side='left')
+        
+        # === Row 4: Units + Test + Status (compact inline) ===
+        control_row = tk.Frame(container, bg=COLORS['bg_card'])
+        control_row.pack(fill='x', pady=(0, 8))
+        
+        tk.Label(control_row, text="Units:", font=FONTS['body'],
+                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
+                width=12, anchor='w').pack(side='left')
+        
+        if not hasattr(self.app, 'weather_units_var'):
+            self.app.weather_units_var = tk.StringVar(value='metric')
+        
+        # Units
+        ttk.Radiobutton(control_row, text="°C",
+                       variable=self.app.weather_units_var, value="metric",
+                       bootstyle="primary-toolbutton").pack(side='left', padx=(0, 3))
+        ttk.Radiobutton(control_row, text="°F",
+                       variable=self.app.weather_units_var, value="imperial",
+                       bootstyle="primary-toolbutton").pack(side='left', padx=(0, 12))
+        
+        # Test button
+        test_btn = create_secondary_button(control_row, "🌐 Test",
+                                          self.app.test_weather_connection)
+        test_btn.pack(side='left', padx=(0, 10))
+        
+        # Status (flexible width)
+        if not hasattr(self.app, 'weather_status_var'):
+            self.app.weather_status_var = tk.StringVar(value="Not configured")
+        tk.Label(control_row, textvariable=self.app.weather_status_var,
+                font=FONTS['small'], bg=COLORS['bg_card'],
+                fg=COLORS['text_muted'], anchor='w').pack(side='left', fill='x', expand=True)
+        
+        # === Row 5: Weather Icon Helper ===
+        icon_row = tk.Frame(container, bg=COLORS['bg_card'])
+        icon_row.pack(fill='x', pady=(4, 0))
+        
+        tk.Label(icon_row, text="", width=12).pack(side='left')  # Spacer
+        
+        icon_btn = create_secondary_button(icon_row, "🌤️ Add Weather Icon",
+                                          self.app.add_weather_icon_overlay)
+        icon_btn.pack(side='left', padx=(0, 8))
+        
+        tk.Label(icon_row, 
+                text="Dynamic icon that updates with conditions",
+                font=FONTS['tiny'], bg=COLORS['bg_card'],
+                fg=COLORS['text_muted']).pack(side='left')
+    
+    def _open_weather_url(self):
+        """Open OpenWeatherMap API page in browser"""
+        import webbrowser
+        webbrowser.open('https://openweathermap.org/api')
     
     
     def create_processing_settings(self, parent):
