@@ -16,12 +16,14 @@ class TextOverlayEditor:
     def __init__(self, parent, app):
         self.app = app
         self.parent = parent
+        # Create container frame for show/hide capability
+        self.frame = tk.Frame(parent, bg=COLORS['bg_card'])
         self.create_ui()
     
     def create_ui(self):
         """Create text editor UI"""
         # Name field
-        name_frame = tk.Frame(self.parent, bg=COLORS['bg_card'])
+        name_frame = tk.Frame(self.frame, bg=COLORS['bg_card'])
         name_frame.pack(fill='x', pady=(0, SPACING['row_gap']))
         
         tk.Label(name_frame, text="Name:",
@@ -38,7 +40,7 @@ class TextOverlayEditor:
         self.app.overlay_name_var.trace('w', lambda *args: self.app.on_overlay_edit())
         
         # Text area with token insertion
-        text_label = tk.Label(self.parent, text="Text:",
+        text_label = tk.Label(self.frame, text="Text:",
                              font=FONTS['body_bold'],
                              fg=COLORS['text_primary'],
                              bg=COLORS['bg_card'])
@@ -50,7 +52,7 @@ class TextOverlayEditor:
         
         # Text widget
         self.app.overlay_text = tk.Text(
-            self.parent,
+            self.frame,
             height=4,
             wrap='word',
             font=FONTS['body'],
@@ -79,7 +81,7 @@ class TextOverlayEditor:
     
     def create_token_toolbar(self):
         """Create token insertion toolbar"""
-        token_frame = tk.Frame(self.parent, bg=COLORS['bg_card'])
+        token_frame = tk.Frame(self.frame, bg=COLORS['bg_card'])
         token_frame.pack(fill='x', pady=(0, SPACING['element_gap']))
         
         tk.Label(token_frame, text="Tokens:",
@@ -104,7 +106,7 @@ class TextOverlayEditor:
     
     def create_datetime_section(self):
         """Create DateTime format configuration"""
-        dt_frame = tk.Frame(self.parent, bg=COLORS['bg_card'])
+        dt_frame = tk.Frame(self.frame, bg=COLORS['bg_card'])
         # Store reference for show/hide
         self.app.datetime_section_frame = dt_frame
         # Don't pack initially - will be shown when {DATETIME} token is present
@@ -189,7 +191,7 @@ class TextOverlayEditor:
     
     def create_appearance_section(self):
         """Create text appearance settings"""
-        appearance_frame = tk.Frame(self.parent, bg=COLORS['bg_card'])
+        appearance_frame = tk.Frame(self.frame, bg=COLORS['bg_card'])
         appearance_frame.pack(fill='x', pady=(SPACING['section_gap'], 0))
         self.app.appearance_section_frame = appearance_frame
         
@@ -260,7 +262,7 @@ class TextOverlayEditor:
     
     def create_background_section(self):
         """Create background rectangle options"""
-        bg_frame = tk.Frame(self.parent, bg=COLORS['bg_card'])
+        bg_frame = tk.Frame(self.frame, bg=COLORS['bg_card'])
         bg_frame.pack(fill='x', pady=(SPACING['section_gap'], 0))
         
         tk.Label(bg_frame, text="Background:",
@@ -309,7 +311,7 @@ class TextOverlayEditor:
     
     def create_position_section(self):
         """Create position settings"""
-        pos_frame = tk.Frame(self.parent, bg=COLORS['bg_card'])
+        pos_frame = tk.Frame(self.frame, bg=COLORS['bg_card'])
         pos_frame.pack(fill='x', pady=(SPACING['section_gap'], 0))
         
         tk.Label(pos_frame, text="Position:",

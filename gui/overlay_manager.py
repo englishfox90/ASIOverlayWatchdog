@@ -31,7 +31,7 @@ class OverlayManager:
         # Populate tree
         for i, overlay in enumerate(overlays):
             name = overlay.get('name', overlay.get('text', 'Overlay')[:20])
-            overlay_type = 'Text'  # Phase 1: text only
+            overlay_type = overlay.get('type', 'text').capitalize()
             summary = overlay.get('anchor', 'Bottom-Left')
             
             self.app.overlay_tree.insert('', 'end', iid=str(i),
@@ -43,6 +43,10 @@ class OverlayManager:
             self.app.overlay_tree.selection_set('0')
             self.app.selected_overlay_index = 0
             self.load_overlay_into_editor(overlays[0])
+        else:
+            # No overlays - clear preview
+            if hasattr(self.app, 'overlay_preview_canvas'):
+                self.app.overlay_preview_canvas.delete('all')
     
     def on_overlay_tree_select(self, event=None):
         """Handle Treeview selection"""
@@ -61,51 +65,73 @@ class OverlayManager:
     
     def load_overlay_into_editor(self, overlay):
         """Load overlay data into editor"""
-        # Load all fields from overlay config
+        overlay_type = overlay.get('type', 'text')
+        
+        # Switch editor UI based on type
+        if hasattr(self.app, 'overlays_tab'):
+            self.app.overlays_tab.switch_editor(overlay_type)
+        
+        # Load common fields
         self.app.overlay_name_var.set(overlay.get('name', overlay.get('text', '')[:30]))
-        
-        # Text content
-        self.app.overlay_text.delete('1.0', 'end')
-        self.app.overlay_text.insert('1.0', overlay.get('text', ''))
-        
-        # Datetime format (default to 'full')
-        self.app.datetime_mode_var.set(overlay.get('datetime_mode', 'full'))
-        self.app.datetime_custom_var.set(overlay.get('datetime_format', '%Y-%m-%d %H:%M:%S'))
-        if hasattr(self.app, 'datetime_locale_var'):
-            self.app.datetime_locale_var.set(overlay.get('datetime_locale', 'ISO (YYYY-MM-DD)'))
-        
-        # Font appearance
-        self.app.font_size_var.set(overlay.get('font_size', 24))
-        self.app.color_var.set(overlay.get('color', 'white'))
-        self.app.font_style_var.set(overlay.get('font_style', 'normal'))
-        
-        # Background
-        self.app.background_enabled_var.set(overlay.get('background_enabled', False))
-        self.app.bg_color_var.set(overlay.get('background_color', 'black'))
-        self.on_background_toggle()  # Update UI state
-        
-        # Position
         self.app.anchor_var.set(overlay.get('anchor', 'Bottom-Left'))
         self.app.offset_x_var.set(overlay.get('offset_x', 10))
         self.app.offset_y_var.set(overlay.get('offset_y', 10))
         
-        # Check if datetime section should be visible
-        text_content = overlay.get('text', '')
-        self.update_datetime_visibility('{DATETIME}' in text_content.upper())
+        if overlay_type == 'image':
+            # Load image-specific fields
+            if hasattr(self.app, 'overlay_image_path_var'):
+                self.app.overlay_image_path_var.set(overlay.get('image_path', ''))
+            if hasattr(self.app, 'overlay_image_width_var'):
+                self.app.overlay_image_width_var.set(overlay.get('width', 200))
+            if hasattr(self.app, 'overlay_image_height_var'):
+                self.app.overlay_image_height_var.set(overlay.get('height', 200))
+            if hasattr(self.app, 'overlay_image_maintain_aspect_var'):
+                self.app.overlay_image_maintain_aspect_var.set(overlay.get('maintain_aspect', True))
+            if hasattr(self.app, 'overlay_image_opacity_var'):
+                self.app.overlay_image_opacity_var.set(overlay.get('opacity', 100))
+        else:
+            # Load text-specific fields
+            self.app.overlay_text.delete('1.0', 'end')
+            self.app.overlay_text.insert('1.0', overlay.get('text', ''))
+            
+            # Datetime format (default to 'full')
+            self.app.datetime_mode_var.set(overlay.get('datetime_mode', 'full'))
+            self.app.datetime_custom_var.set(overlay.get('datetime_format', '%Y-%m-%d %H:%M:%S'))
+            if hasattr(self.app, 'datetime_locale_var'):
+                self.app.datetime_locale_var.set(overlay.get('datetime_locale', 'ISO (YYYY-MM-DD)'))
+            
+            # Font appearance
+            self.app.font_size_var.set(overlay.get('font_size', 24))
+            self.app.color_var.set(overlay.get('color', 'white'))
+            self.app.font_style_var.set(overlay.get('font_style', 'normal'))
+            
+            # Background
+            self.app.background_enabled_var.set(overlay.get('background_enabled', False))
+            self.app.bg_color_var.set(overlay.get('background_color', 'black'))
+            self.on_background_toggle()  # Update UI state
+            
+            # Check if datetime section should be visible
+            text_content = overlay.get('text', '')
+            self.update_datetime_visibility('{DATETIME}' in text_content.upper())
+        
+        # Update preview with loaded overlay (delayed to allow UI to update)
+        # Increased delay to ensure Text widget is fully updated
+        self.app.root.after(100, lambda: self.app.image_processor.update_overlay_preview())
     
-    def add_new_overlay(self):
-        """Add new overlay"""
+    def add_new_overlay(self, overlay_type='text'):
+        """Add new overlay with specified type"""
+        from .overlays.constants import DEFAULT_TEXT_OVERLAY, DEFAULT_IMAGE_OVERLAY
+        
         overlays = self.get_overlays_config()
-        overlays.append({
-            'name': f'Overlay {len(overlays) + 1}',
-            'text': 'New Overlay {CAMERA}',
-            'anchor': 'Bottom-Left',
-            'color': 'white',
-            'font_size': 24,
-            'font_style': 'normal',
-            'offset_x': 10,
-            'offset_y': 10
-        })
+        
+        if overlay_type == 'image':
+            new_overlay = DEFAULT_IMAGE_OVERLAY.copy()
+            new_overlay['name'] = f'Image {len([o for o in overlays if o.get("type") == "image"]) + 1}'
+        else:
+            new_overlay = DEFAULT_TEXT_OVERLAY.copy()
+            new_overlay['name'] = f'Overlay {len(overlays) + 1}'
+        
+        overlays.append(new_overlay)
         self.app.config.set('overlays', overlays)
         self.rebuild_overlay_list()
         
@@ -153,41 +179,61 @@ class OverlayManager:
         
         overlays = self.get_overlays_config()
         if 0 <= self.app.selected_overlay_index < len(overlays):
-            # Get datetime format based on mode and locale
-            mode = self.app.datetime_mode_var.get()
-            if mode == 'custom':
-                datetime_format = self.app.datetime_custom_var.get()
-            elif hasattr(self.app, 'datetime_locale_var'):
-                # Use locale-specific formats
-                from .overlays.constants import LOCALE_FORMATS
-                locale = self.app.datetime_locale_var.get()
-                locale_data = LOCALE_FORMATS.get(locale, {'date': '%Y-%m-%d', 'time': '%H:%M:%S', 'datetime': '%Y-%m-%d %H:%M:%S'})
-                if mode == 'date':
-                    datetime_format = locale_data['date']
-                elif mode == 'time':
-                    datetime_format = locale_data['time']
-                else:  # full
-                    datetime_format = locale_data['datetime']
-            else:
-                from .overlays.constants import DATETIME_FORMATS
-                datetime_format = DATETIME_FORMATS.get(mode, '%Y-%m-%d %H:%M:%S')
+            current_overlay = overlays[self.app.selected_overlay_index]
+            overlay_type = current_overlay.get('type', 'text')
             
-            # Save all fields
-            overlays[self.app.selected_overlay_index] = {
+            # Save common fields
+            overlay_data = {
+                'type': overlay_type,
                 'name': self.app.overlay_name_var.get(),
-                'text': self.app.overlay_text.get('1.0', 'end-1c'),
                 'anchor': self.app.anchor_var.get(),
-                'color': self.app.color_var.get(),
-                'font_size': self.app.font_size_var.get(),
-                'font_style': self.app.font_style_var.get(),
                 'offset_x': self.app.offset_x_var.get(),
-                'offset_y': self.app.offset_y_var.get(),
-                'datetime_mode': mode,
-                'datetime_format': datetime_format,
-                'datetime_locale': self.app.datetime_locale_var.get() if hasattr(self.app, 'datetime_locale_var') else 'ISO (YYYY-MM-DD)',
-                'background_enabled': self.app.background_enabled_var.get(),
-                'background_color': self.app.bg_color_var.get()
+                'offset_y': self.app.offset_y_var.get()
             }
+            
+            if overlay_type == 'image':
+                # Save image-specific fields
+                overlay_data.update({
+                    'image_path': self.app.overlay_image_path_var.get() if hasattr(self.app, 'overlay_image_path_var') else '',
+                    'width': self.app.overlay_image_width_var.get() if hasattr(self.app, 'overlay_image_width_var') else 200,
+                    'height': self.app.overlay_image_height_var.get() if hasattr(self.app, 'overlay_image_height_var') else 200,
+                    'maintain_aspect': self.app.overlay_image_maintain_aspect_var.get() if hasattr(self.app, 'overlay_image_maintain_aspect_var') else True,
+                    'opacity': self.app.overlay_image_opacity_var.get() if hasattr(self.app, 'overlay_image_opacity_var') else 100
+                })
+            else:
+                # Get datetime format based on mode and locale
+                mode = self.app.datetime_mode_var.get()
+                if mode == 'custom':
+                    datetime_format = self.app.datetime_custom_var.get()
+                elif hasattr(self.app, 'datetime_locale_var'):
+                    # Use locale-specific formats
+                    from .overlays.constants import LOCALE_FORMATS
+                    locale = self.app.datetime_locale_var.get()
+                    locale_data = LOCALE_FORMATS.get(locale, {'date': '%Y-%m-%d', 'time': '%H:%M:%S', 'datetime': '%Y-%m-%d %H:%M:%S'})
+                    if mode == 'date':
+                        datetime_format = locale_data['date']
+                    elif mode == 'time':
+                        datetime_format = locale_data['time']
+                    else:  # full
+                        datetime_format = locale_data['datetime']
+                else:
+                    from .overlays.constants import DATETIME_FORMATS
+                    datetime_format = DATETIME_FORMATS.get(mode, '%Y-%m-%d %H:%M:%S')
+                
+                # Save text-specific fields
+                overlay_data.update({
+                    'text': self.app.overlay_text.get('1.0', 'end-1c'),
+                    'color': self.app.color_var.get(),
+                    'font_size': self.app.font_size_var.get(),
+                    'font_style': self.app.font_style_var.get(),
+                    'datetime_mode': mode,
+                    'datetime_format': datetime_format,
+                    'datetime_locale': self.app.datetime_locale_var.get() if hasattr(self.app, 'datetime_locale_var') else 'ISO (YYYY-MM-DD)',
+                    'background_enabled': self.app.background_enabled_var.get(),
+                    'background_color': self.app.bg_color_var.get()
+                })
+            
+            overlays[self.app.selected_overlay_index] = overlay_data
             self.app.config.set('overlays', overlays)
             self.rebuild_overlay_list()
             app_logger.info("Overlay changes applied")

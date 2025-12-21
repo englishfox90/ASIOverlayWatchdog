@@ -28,6 +28,8 @@ from .image_processor import ImageProcessor
 from .status_manager import StatusManager
 from .output_manager import OutputManager
 from .watch_controller import WatchController
+from .theme import COLORS, FONTS, SPACING
+from . import theme
 from .settings_manager import SettingsManager
 from version import __version__
 
@@ -440,8 +442,114 @@ Supports:
         self.overlay_manager.on_overlay_tree_select(event)
     
     def add_new_overlay(self):
-        """Delegate to overlay_manager"""
-        self.overlay_manager.add_new_overlay()
+        """Show type selection dialog and delegate to overlay_manager"""
+        from tkinter import simpledialog
+        
+        # Create semi-transparent overlay on main window
+        overlay = tk.Frame(self.root, bg='black')
+        overlay.place(x=0, y=0, relwidth=1, relheight=1)
+        overlay.lift()
+        
+        # Set transparency (0.0 to 1.0, where 0.5 = 50% opaque)
+        # Note: This sets the opacity of the overlay frame itself
+        try:
+            overlay.winfo_toplevel().attributes('-alpha', 0.5)
+        except:
+            pass  # Fallback if transparency not supported
+        
+        # Make overlay semi-transparent by using a canvas with alpha
+        overlay_canvas = tk.Canvas(overlay, bg='black', highlightthickness=0)
+        overlay_canvas.pack(fill='both', expand=True)
+        # Set background with some transparency effect
+        overlay_canvas.configure(bg='#000000')
+        overlay.configure(bg='#000000')
+        
+        # Reset root alpha (overlay frame handles transparency differently)
+        self.root.attributes('-alpha', 1.0)
+        
+        # Create actual overlay effect by updating
+        self.root.update()
+        
+        # Create type selection dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Overlay Type")
+        dialog.resizable(False, False)
+        dialog.configure(bg=COLORS['bg_card'])
+        
+        # Set transient and grab
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Set size and center over parent window
+        dialog_width = 450
+        dialog_height = 150
+        
+        # Update to calculate proper size
+        dialog.update_idletasks()
+        
+        # Get parent window position and size
+        parent_x = self.root.winfo_x()
+        parent_y = self.root.winfo_y()
+        parent_width = self.root.winfo_width()
+        parent_height = self.root.winfo_height()
+        
+        # Calculate centered position
+        x = parent_x + (parent_width - dialog_width) // 2
+        y = parent_y + (parent_height - dialog_height) // 2
+        
+        dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
+        
+        # Lift dialog above overlay
+        dialog.lift()
+        dialog.focus_force()
+        
+        # Result variable
+        selected_type = tk.StringVar(value='text')
+        
+        # Title label
+        title_label = tk.Label(dialog, text="Choose overlay type:",
+                              font=FONTS['heading'],
+                              bg=COLORS['bg_card'],
+                              fg=COLORS['text_primary'])
+        title_label.pack(pady=(20, 10))
+        
+        # Buttons frame
+        btn_frame = tk.Frame(dialog, bg=COLORS['bg_card'])
+        btn_frame.pack(pady=20)
+        
+        def select_and_close(overlay_type):
+            selected_type.set(overlay_type)
+            dialog.destroy()
+            overlay.destroy()  # Remove overlay when dialog closes
+        
+        # Handle window close button (X)
+        def on_close():
+            dialog.destroy()
+            overlay.destroy()
+        
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
+        
+        # Text overlay button
+        text_btn = theme.create_primary_button(btn_frame, "📝 Text Overlay",
+                                                     lambda: select_and_close('text'))
+        text_btn.pack(side='left', padx=5)
+        
+        # Image overlay button
+        image_btn = theme.create_secondary_button(btn_frame, "🖼️ Image Overlay",
+                                                        lambda: select_and_close('image'))
+        image_btn.pack(side='left', padx=5)
+        
+        # Wait for dialog to close
+        self.root.wait_window(dialog)
+        
+        # Ensure overlay is removed if still exists
+        try:
+            overlay.destroy()
+        except:
+            pass
+        
+        # Add overlay with selected type
+        self.overlay_manager.add_new_overlay(selected_type.get())
     
     def duplicate_overlay(self):
         """Delegate to overlay_manager"""

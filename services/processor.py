@@ -169,14 +169,15 @@ def parse_color(color_str):
     return (255, 255, 255)
 
 
-def add_overlays(image_input, overlays, metadata):
+def add_overlays(image_input, overlays, metadata, image_cache=None):
     """
-    Add text overlays to an image.
+    Add text and image overlays to an image.
     
     Args:
         image_input: Either a file path (str) or PIL Image object
         overlays: List of overlay configurations
         metadata: Metadata dictionary
+        image_cache: Optional dict to cache loaded overlay images
     
     Returns the modified PIL Image object.
     """
@@ -191,66 +192,28 @@ def add_overlays(image_input, overlays, metadata):
         if img.mode in ('P',):  # Only convert palette mode
             img = img.convert('RGB')
         
-        # Ensure RGB mode for drawing
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
+        # Ensure RGBA mode for drawing (to support image overlays with transparency)
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
         
         draw = ImageDraw.Draw(img)
         
         for overlay in overlays:
-            # Get datetime format from overlay config
-            datetime_format = overlay.get('datetime_format', '%Y-%m-%d %H:%M:%S')
+            overlay_type = overlay.get('type', 'text')
             
-            # Create overlay-specific metadata with custom datetime format
-            overlay_metadata = metadata.copy()
-            if '{DATETIME}' in overlay.get('text', '').upper():
-                overlay_metadata['DATETIME'] = datetime.now().strftime(datetime_format)
-            
-            # Replace tokens in overlay text
-            text = replace_tokens(overlay.get('text', ''), overlay_metadata)
-            
-            # Get overlay properties
-            font_size = overlay.get('font_size', 28)
-            color = parse_color(overlay.get('color', 'white'))
-            anchor = overlay.get('anchor', 'Bottom-Left')
-            x_offset = overlay.get('x_offset', 10)
-            y_offset = overlay.get('y_offset', 10)
-            draw_background = overlay.get('background', True)
-            
-            # Load font (use default if custom font loading fails)
-            try:
-                font = ImageFont.truetype("arial.ttf", font_size)
-            except:
-                try:
-                    font = ImageFont.truetype("Arial.ttf", font_size)
-                except:
-                    # Fall back to default font
-                    font = ImageFont.load_default()
-            
-            # Calculate text bounding box for proper padding
-            # Get bbox relative to (0, 0) to find actual text dimensions including descenders
-            bbox = draw.textbbox((0, 0), text, font=font)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            
-            # Calculate position
-            x, y = calculate_position(img.size, (text_width, text_height), anchor, x_offset, y_offset)
-            
-            # Draw solid background box if enabled
-            if draw_background:
-                padding = 5
-                # Get bbox at actual drawing position for accurate background box
-                text_bbox = draw.textbbox((x, y), text, font=font)
-                box_coords = [
-                    text_bbox[0] - padding,  # left
-                    text_bbox[1] - padding,  # top
-                    text_bbox[2] + padding,  # right
-                    text_bbox[3] + padding   # bottom (includes descenders)
-                ]
-                draw.rectangle(box_coords, fill=(0, 0, 0))
-            
-            # Draw text
-            draw.text((x, y), text, fill=color, font=font)
+            if overlay_type == 'image':
+                # Handle image overlay with cache
+                img = add_image_overlay(img, overlay, image_cache)
+            else:
+                # Handle text overlay
+                img = add_text_overlay(img, draw, overlay, metadata)
+        
+        # Convert back to RGB for final output
+        if img.mode == 'RGBA':
+            # Create RGB image with white background
+            rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+            rgb_img.paste(img, mask=img.split()[3] if img.mode == 'RGBA' else None)
+            img = rgb_img
         
         return img
     
@@ -258,6 +221,172 @@ def add_overlays(image_input, overlays, metadata):
         error_msg = f"Error adding overlays: {e}"
         print(error_msg)
         raise Exception(error_msg)
+
+
+def add_image_overlay(base_img, overlay, image_cache=None):
+    """
+    Add an image overlay to the base image
+    
+    Args:
+        base_img: Base PIL Image
+        overlay: Overlay configuration dict
+        image_cache: Optional dict to cache loaded images
+        
+    Returns:
+        Modified PIL Image
+    """
+    try:
+        import os
+        
+        image_path = overlay.get('image_path', '')
+        if not image_path:
+            print(f"Image overlay has no image_path: {overlay}")
+            return base_img
+        if not os.path.exists(image_path):
+            print(f"Image overlay path does not exist: {image_path}")
+            return base_img
+        
+        # Use cache if available
+        if image_cache is not None and image_path in image_cache:
+            overlay_img = image_cache[image_path].copy()
+        else:
+            print(f"Loading image overlay from: {image_path}")
+            # Load overlay image
+            overlay_img = Image.open(image_path)
+            print(f"Loaded image: {overlay_img.size}, mode: {overlay_img.mode}")
+            
+            # Cache the loaded image if cache is provided
+            if image_cache is not None:
+                image_cache[image_path] = overlay_img.copy()
+        
+        # Get size settings
+        target_width = overlay.get('width', overlay_img.width)
+        target_height = overlay.get('height', overlay_img.height)
+        maintain_aspect = overlay.get('maintain_aspect', True)
+        
+        # Resize if needed
+        if maintain_aspect and (target_width != overlay_img.width or target_height != overlay_img.height):
+            # Calculate aspect-preserving size
+            aspect_ratio = overlay_img.width / overlay_img.height
+            if target_width / target_height > aspect_ratio:
+                # Height is limiting factor
+                target_width = int(target_height * aspect_ratio)
+            else:
+                # Width is limiting factor
+                target_height = int(target_width / aspect_ratio)
+        
+        # Resize overlay image
+        if target_width != overlay_img.width or target_height != overlay_img.height:
+            overlay_img = overlay_img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+        
+        # Apply opacity
+        opacity = overlay.get('opacity', 100)
+        if opacity < 100 and overlay_img.mode in ('RGBA', 'LA'):
+            # Adjust alpha channel
+            alpha = overlay_img.split()[3 if overlay_img.mode == 'RGBA' else 1]
+            alpha = alpha.point(lambda p: int(p * opacity / 100))
+            overlay_img.putalpha(alpha)
+        elif opacity < 100:
+            # Convert to RGBA and set opacity
+            overlay_img = overlay_img.convert('RGBA')
+            alpha = Image.new('L', overlay_img.size, int(255 * opacity / 100))
+            overlay_img.putalpha(alpha)
+        
+        # Ensure overlay has alpha channel
+        if overlay_img.mode != 'RGBA':
+            overlay_img = overlay_img.convert('RGBA')
+        
+        # Calculate position
+        anchor = overlay.get('anchor', 'Bottom-Right')
+        x_offset = overlay.get('offset_x', 10)
+        y_offset = overlay.get('offset_y', 10)
+        
+        x, y = calculate_position(base_img.size, (target_width, target_height), 
+                                 anchor, x_offset, y_offset)
+        
+        # Paste overlay onto base image
+        base_img.paste(overlay_img, (x, y), overlay_img)
+        
+        return base_img
+        
+    except Exception as e:
+        print(f"Error adding image overlay: {e}")
+        return base_img
+
+
+def add_text_overlay(img, draw, overlay, metadata):
+    """
+    Add a text overlay to the image
+    
+    Args:
+        img: PIL Image
+        draw: ImageDraw object
+        overlay: Overlay configuration dict
+        metadata: Metadata dictionary
+        
+    Returns:
+        Modified PIL Image
+    """
+    try:
+        # Get datetime format from overlay config
+        datetime_format = overlay.get('datetime_format', '%Y-%m-%d %H:%M:%S')
+        
+        # Create overlay-specific metadata with custom datetime format
+        overlay_metadata = metadata.copy()
+        if '{DATETIME}' in overlay.get('text', '').upper():
+            overlay_metadata['DATETIME'] = datetime.now().strftime(datetime_format)
+        
+        # Replace tokens in overlay text
+        text = replace_tokens(overlay.get('text', ''), overlay_metadata)
+        
+        # Get overlay properties
+        font_size = overlay.get('font_size', 28)
+        color = parse_color(overlay.get('color', 'white'))
+        anchor = overlay.get('anchor', 'Bottom-Left')
+        x_offset = overlay.get('x_offset', 10)
+        y_offset = overlay.get('y_offset', 10)
+        draw_background = overlay.get('background', True)
+        
+        # Load font (use default if custom font loading fails)
+        try:
+            font = ImageFont.truetype("arial.ttf", font_size)
+        except:
+            try:
+                font = ImageFont.truetype("Arial.ttf", font_size)
+            except:
+                # Fall back to default font
+                font = ImageFont.load_default()
+        
+        # Calculate text bounding box for proper padding
+        # Get bbox relative to (0, 0) to find actual text dimensions including descenders
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        # Calculate position
+        x, y = calculate_position(img.size, (text_width, text_height), anchor, x_offset, y_offset)
+        
+        # Draw solid background box if enabled
+        if draw_background:
+            padding = 5
+            # Get bbox at actual drawing position for accurate background box
+            text_bbox = draw.textbbox((x, y), text, font=font)
+            box_coords = [
+                text_bbox[0] - padding,  # left
+                text_bbox[1] - padding,  # top
+                text_bbox[2] + padding,  # right
+                text_bbox[3] + padding   # bottom (includes descenders)
+            ]
+            draw.rectangle(box_coords, fill=(0, 0, 0))
+        
+        # Draw text
+        draw.text((x, y), text, fill=color, font=font)
+        
+        return img
+        
+    except Exception as e:
+        print(f"Error adding text overlay: {e}")
+        return img
 
 
 def build_output_filename(pattern, metadata, output_format='PNG'):

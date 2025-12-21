@@ -78,6 +78,8 @@ DEFAULT_IMAGE_OVERLAY = {
     'anchor': 'Bottom-Right',
     'offset_x': 10,
     'offset_y': 10,
-    'image_scale_mode': 'original',
-    'image_scale_percent': 100
+    'width': 100,
+    'height': 100,
+    'maintain_aspect': True,
+    'opacity': 100
 }

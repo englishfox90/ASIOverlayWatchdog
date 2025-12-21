@@ -29,8 +29,8 @@ class OverlayListPanel:
                                                 self.app.duplicate_overlay)
         dup_btn.pack(side='left', padx=(0, SPACING['button_gap']))
         
-        del_btn = theme.create_destructive_button(btn_frame, "🗑 Delete All", 
-                                                  self.app.clear_all_overlays)
+        del_btn = theme.create_destructive_button(btn_frame, "🗑 Delete", 
+                                                  self.app.delete_overlay)
         del_btn.pack(side='left')
         
         # Treeview for overlay list
@@ -53,7 +53,7 @@ class OverlayListPanel:
         self.app.overlay_tree.heading('summary', text='Summary', anchor='w')
         
         self.app.overlay_tree.column('#0', width=120, minwidth=80, anchor='w')
-        self.app.overlay_tree.column('type', width=60, minwidth=50, anchor='center')
+        self.app.overlay_tree.column('type', width=60, minwidth=50, anchor='w')
         self.app.overlay_tree.column('summary', width=150, minwidth=100, anchor='w')
         
         # Scrollbar

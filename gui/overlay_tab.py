@@ -1,5 +1,5 @@
 """
-Overlay tab component - Phase 1: Theme integration with modular structure
+Overlay tab component - Theme integration with modular structure
 """
 import tkinter as tk
 import ttkbootstrap as ttk
@@ -7,6 +7,7 @@ from .theme import COLORS, FONTS, SPACING
 from . import theme
 from .overlays.overlay_list import OverlayListPanel
 from .overlays.text_editor import TextOverlayEditor
+from .overlays.image_editor import ImageOverlayEditor
 from .overlays.preview import OverlayPreview
 
 
@@ -63,7 +64,7 @@ class OverlayTab:
         self.create_editor_panel(editor_content)
     
     def create_editor_panel(self, parent):
-        """Create editor panel"""
+        """Create editor panel with switchable text/image editors"""
         # Scrollable editor content
         editor_scroll_frame = tk.Frame(parent, bg=COLORS['bg_card'])
         editor_scroll_frame.pack(fill='both', expand=True, pady=(0, SPACING['row_gap']))
@@ -96,8 +97,13 @@ class OverlayTab:
         
         editor_canvas.bind('<Configure>', configure_canvas_width)
         
-        # Create text editor (Phase 1 - text only)
+        # Create both text and image editors (hide/show based on type)
         self.text_editor = TextOverlayEditor(self.app.editor_content_frame, self.app)
+        self.image_editor = ImageOverlayEditor(self.app.editor_content_frame, self.app)
+        
+        # Start with text editor visible
+        self.text_editor.frame.pack(fill='both', expand=True)
+        self.image_editor.frame.pack_forget()
         
         # Buttons at bottom
         btn_frame = tk.Frame(parent, bg=COLORS['bg_card'])
@@ -110,4 +116,13 @@ class OverlayTab:
         reset_btn = theme.create_secondary_button(btn_frame, "↺ Reset",
                                                   self.app.reset_overlay_editor)
         reset_btn.pack(side='left')
+    
+    def switch_editor(self, overlay_type):
+        """Switch between text and image editors based on overlay type"""
+        if overlay_type == 'image':
+            self.text_editor.frame.pack_forget()
+            self.image_editor.frame.pack(fill='both', expand=True)
+        else:  # 'text' or default
+            self.image_editor.frame.pack_forget()
+            self.text_editor.frame.pack(fill='both', expand=True)
 

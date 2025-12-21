@@ -17,7 +17,10 @@ class ImageProcessor:
     def __init__(self, app):
         self.app = app        # Preview caching to avoid re-reading from disk
         self.preview_cache = None
-        self.preview_cache_path = None    
+        self.preview_cache_path = None
+        # Cache for overlay images
+        self.overlay_image_cache = {}
+        self.preview_update_pending = False    
     def process_and_save_image(self, img, metadata):
         """Process image with overlays and save"""
         try:
@@ -238,7 +241,13 @@ class ImageProcessor:
             app_logger.error(f"Preview refresh failed: {e}")
     
     def update_overlay_preview(self):
-        """Update the overlay preview"""
+        """Update the overlay preview with debouncing"""
+        # Prevent recursive/multiple simultaneous updates
+        if self.preview_update_pending:
+            return
+        
+        self.preview_update_pending = True
+        
         try:
             # Create sample sky image
             preview_img = Image.new('RGB', (600, 400), color='#0a0e27')
@@ -254,51 +263,78 @@ class ImageProcessor:
             
             # Get current overlay config from editor
             if self.app.selected_overlay_index is not None:
-                # Get datetime format from editor
-                mode = self.app.datetime_mode_var.get()
-                if mode == 'custom':
-                    datetime_format = self.app.datetime_custom_var.get()
-                elif hasattr(self.app, 'datetime_locale_var'):
-                    # Use locale-specific formats
-                    from .overlays.constants import LOCALE_FORMATS
-                    locale = self.app.datetime_locale_var.get()
-                    locale_data = LOCALE_FORMATS.get(locale, {'date': '%Y-%m-%d', 'time': '%H:%M:%S', 'datetime': '%Y-%m-%d %H:%M:%S'})
-                    if mode == 'date':
-                        datetime_format = locale_data['date']
-                    elif mode == 'time':
-                        datetime_format = locale_data['time']
-                    else:  # full
-                        datetime_format = locale_data['datetime']
-                else:
-                    from .overlays.constants import DATETIME_FORMATS
-                    datetime_format = DATETIME_FORMATS.get(mode, '%Y-%m-%d %H:%M:%S')
-                
-                overlay_config = {
-                    'text': self.app.overlay_text.get('1.0', 'end-1c'),
-                    'anchor': self.app.anchor_var.get(),
-                    'color': self.app.color_var.get(),
-                    'font_size': self.app.font_size_var.get(),
-                    'font_style': self.app.font_style_var.get(),
-                    'offset_x': self.app.offset_x_var.get(),
-                    'offset_y': self.app.offset_y_var.get(),
-                    'background_enabled': self.app.background_enabled_var.get(),
-                    'background_color': self.app.bg_color_var.get(),
-                    'datetime_format': datetime_format
-                }
-                
-                # Sample metadata for token replacement
-                metadata = {
-                    'CAMERA': 'ASI676MC',
-                    'EXPOSURE': '100ms',
-                    'GAIN': '150',
-                    'TEMP': '-5.2°C',
-                    'RES': '3840x2160',
-                    'FILENAME': 'preview.fits',
-                    'SESSION': datetime.now().strftime('%Y-%m-%d')
-                }
-                
-                # Apply overlay
-                preview_img = add_overlays(preview_img, [overlay_config], metadata)
+                overlays = self.app.overlay_manager.get_overlays_config()
+                if 0 <= self.app.selected_overlay_index < len(overlays):
+                    current_overlay = overlays[self.app.selected_overlay_index]
+                    overlay_type = current_overlay.get('type', 'text')
+                    
+                    if overlay_type == 'image':
+                        # Use saved overlay config with live editor updates
+                        overlay_config = current_overlay.copy()
+                        # Override with current editor values for live preview
+                        try:
+                            overlay_config['width'] = self.app.overlay_image_width_var.get() if hasattr(self.app, 'overlay_image_width_var') else overlay_config.get('width', 100)
+                        except:
+                            overlay_config['width'] = overlay_config.get('width', 100)
+                        try:
+                            overlay_config['height'] = self.app.overlay_image_height_var.get() if hasattr(self.app, 'overlay_image_height_var') else overlay_config.get('height', 100)
+                        except:
+                            overlay_config['height'] = overlay_config.get('height', 100)
+                        try:
+                            overlay_config['opacity'] = self.app.overlay_image_opacity_var.get() if hasattr(self.app, 'overlay_image_opacity_var') else overlay_config.get('opacity', 100)
+                        except:
+                            overlay_config['opacity'] = overlay_config.get('opacity', 100)
+                        
+                        overlay_config['anchor'] = self.app.anchor_var.get()
+                        overlay_config['offset_x'] = self.app.offset_x_var.get()
+                        overlay_config['offset_y'] = self.app.offset_y_var.get()
+                    else:
+                        # Get datetime format from editor
+                        mode = self.app.datetime_mode_var.get()
+                        if mode == 'custom':
+                            datetime_format = self.app.datetime_custom_var.get()
+                        elif hasattr(self.app, 'datetime_locale_var'):
+                            # Use locale-specific formats
+                            from .overlays.constants import LOCALE_FORMATS
+                            locale = self.app.datetime_locale_var.get()
+                            locale_data = LOCALE_FORMATS.get(locale, {'date': '%Y-%m-%d', 'time': '%H:%M:%S', 'datetime': '%Y-%m-%d %H:%M:%S'})
+                            if mode == 'date':
+                                datetime_format = locale_data['date']
+                            elif mode == 'time':
+                                datetime_format = locale_data['time']
+                            else:  # full
+                                datetime_format = locale_data['datetime']
+                        else:
+                            from .overlays.constants import DATETIME_FORMATS
+                            datetime_format = DATETIME_FORMATS.get(mode, '%Y-%m-%d %H:%M:%S')
+                        
+                        overlay_config = {
+                            'type': 'text',
+                            'text': self.app.overlay_text.get('1.0', 'end-1c'),
+                            'anchor': self.app.anchor_var.get(),
+                            'color': self.app.color_var.get(),
+                            'font_size': self.app.font_size_var.get(),
+                            'font_style': self.app.font_style_var.get(),
+                            'offset_x': self.app.offset_x_var.get(),
+                            'offset_y': self.app.offset_y_var.get(),
+                            'background_enabled': self.app.background_enabled_var.get(),
+                            'background_color': self.app.bg_color_var.get(),
+                            'datetime_format': datetime_format
+                        }
+                    
+                    # Sample metadata for token replacement
+                    metadata = {
+                        'CAMERA': 'ASI676MC',
+                        'EXPOSURE': '100ms',
+                        'GAIN': '150',
+                        'TEMP': '-5.2°C',
+                        'RES': '3840x2160',
+                        'FILENAME': 'preview.fits',
+                        'SESSION': datetime.now().strftime('%Y-%m-%d')
+                    }
+                    
+                    # Apply overlay
+                    preview_img = add_overlays(preview_img, [overlay_config], metadata, image_cache=self.overlay_image_cache)
             
             # Resize to fit canvas
             preview_img.thumbnail((580, 380), Image.Resampling.LANCZOS)
@@ -312,3 +348,6 @@ class ImageProcessor:
         except Exception as e:
             app_logger.error(f"Preview update failed: {e}")
             app_logger.error(traceback.format_exc())
+        finally:
+            # Reset pending flag after a short delay
+            self.app.root.after(100, lambda: setattr(self, 'preview_update_pending', False))
