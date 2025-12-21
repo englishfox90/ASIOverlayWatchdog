@@ -169,7 +169,7 @@ def parse_color(color_str):
     return (255, 255, 255)
 
 
-def add_overlays(image_input, overlays, metadata, image_cache=None):
+def add_overlays(image_input, overlays, metadata, image_cache=None, weather_service=None):
     """
     Add text and image overlays to an image.
     
@@ -178,10 +178,20 @@ def add_overlays(image_input, overlays, metadata, image_cache=None):
         overlays: List of overlay configurations
         metadata: Metadata dictionary
         image_cache: Optional dict to cache loaded overlay images
+        weather_service: Optional WeatherService instance for weather tokens
     
     Returns the modified PIL Image object.
     """
     try:
+        # Merge weather data into metadata if weather service is available
+        if weather_service and weather_service.is_configured():
+            try:
+                weather_tokens = weather_service.get_weather_tokens()
+                if weather_tokens:
+                    metadata.update(weather_tokens)
+            except Exception as e:
+                print(f"Warning: Failed to fetch weather data: {e}")
+        
         # Load image if it's a path, otherwise use the Image object directly
         if isinstance(image_input, str):
             img = Image.open(image_input)
@@ -202,8 +212,8 @@ def add_overlays(image_input, overlays, metadata, image_cache=None):
             overlay_type = overlay.get('type', 'text')
             
             if overlay_type == 'image':
-                # Handle image overlay with cache
-                img = add_image_overlay(img, overlay, image_cache)
+                # Handle image overlay with cache and weather service
+                img = add_image_overlay(img, overlay, image_cache, weather_service)
             else:
                 # Handle text overlay
                 img = add_text_overlay(img, draw, overlay, metadata)
@@ -223,7 +233,7 @@ def add_overlays(image_input, overlays, metadata, image_cache=None):
         raise Exception(error_msg)
 
 
-def add_image_overlay(base_img, overlay, image_cache=None):
+def add_image_overlay(base_img, overlay, image_cache=None, weather_service=None):
     """
     Add an image overlay to the base image
     
@@ -231,6 +241,7 @@ def add_image_overlay(base_img, overlay, image_cache=None):
         base_img: Base PIL Image
         overlay: Overlay configuration dict
         image_cache: Optional dict to cache loaded images
+        weather_service: Optional WeatherService for dynamic weather icons
         
     Returns:
         Modified PIL Image
@@ -242,6 +253,21 @@ def add_image_overlay(base_img, overlay, image_cache=None):
         if not image_path:
             print(f"Image overlay has no image_path: {overlay}")
             return base_img
+        
+        # Handle dynamic weather icon
+        if image_path == 'WEATHER_ICON':
+            if weather_service and weather_service.is_configured():
+                actual_path = weather_service.get_weather_icon_path()
+                if actual_path and os.path.exists(actual_path):
+                    app_logger.debug(f"Resolved WEATHER_ICON to: {actual_path}")
+                    image_path = actual_path
+                else:
+                    app_logger.warning("Weather icon not available - path not returned or doesn't exist")
+                    return base_img
+            else:
+                app_logger.debug("Weather service not configured for WEATHER_ICON")
+                return base_img
+        
         if not os.path.exists(image_path):
             print(f"Image overlay path does not exist: {image_path}")
             return base_img
@@ -343,8 +369,8 @@ def add_text_overlay(img, draw, overlay, metadata):
         font_size = overlay.get('font_size', 28)
         color = parse_color(overlay.get('color', 'white'))
         anchor = overlay.get('anchor', 'Bottom-Left')
-        x_offset = overlay.get('x_offset', 10)
-        y_offset = overlay.get('y_offset', 10)
+        x_offset = overlay.get('offset_x', 10)  # Match config key
+        y_offset = overlay.get('offset_y', 10)  # Match config key
         draw_background = overlay.get('background', True)
         
         # Load font (use default if custom font loading fails)

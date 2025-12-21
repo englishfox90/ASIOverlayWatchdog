@@ -228,6 +228,7 @@ class CameraController:
             
             # Update UI
             self.app.is_capturing = True
+            self.app.first_image_posted_to_discord = False  # Reset flag for new capture session
             self.app.start_capture_button.config(state='disabled', cursor='')
             self.app.stop_capture_button.config(state='normal', cursor='hand2')
             self.app.camera_status_var.set("Capturing...")
@@ -295,6 +296,12 @@ class CameraController:
             # Increment counter
             self.app.image_count += 1
             self.app.root.after(0, lambda: self.app.image_count_var.set(str(self.app.image_count)))
+            
+            # Post first image to Discord immediately after calibration (only once)
+            if not self.app.first_image_posted_to_discord and self.app.discord_enabled_var.get() and self.app.discord_periodic_enabled_var.get():
+                self.app.first_image_posted_to_discord = True
+                self.app.root.after(1000, self.app.output_manager._post_periodic_discord_update)  # 1 second delay to ensure file is saved
+                app_logger.info("Posting first image to Discord")
             
         except Exception as e:
             app_logger.error(f"Error processing camera frame: {e}")

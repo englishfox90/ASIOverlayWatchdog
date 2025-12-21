@@ -5,6 +5,7 @@ Handles image processing, overlays, and preview generation
 import os
 import random
 from datetime import datetime
+from tkinter import TclError
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageTk
 from services.processor import add_overlays
 from services.logger import app_logger
@@ -93,8 +94,8 @@ class ImageProcessor:
                 # Top-right corner
                 draw.text((img.width - 200, 10), timestamp_text, fill='white', font=font)
             
-            # Add overlays
-            img = add_overlays(img, overlays, metadata)
+            # Add overlays (pass weather_service for weather tokens)
+            img = add_overlays(img, overlays, metadata, weather_service=self.app.weather_service)
             
             # Generate output filename
             session = metadata.get('session', datetime.now().strftime('%Y-%m-%d'))
@@ -210,7 +211,7 @@ class ImageProcessor:
                     'SESSION': 'preview',
                     'DATETIME': ''
                 }
-            display_base = add_overlays(display_base, overlays, preview_metadata)
+            display_base = add_overlays(display_base, overlays, preview_metadata, weather_service=self.app.weather_service)
             
             # Auto-fit: calculate zoom to fit image in canvas
             if auto_fit:
@@ -286,8 +287,17 @@ class ImageProcessor:
                             overlay_config['opacity'] = overlay_config.get('opacity', 100)
                         
                         overlay_config['anchor'] = self.app.anchor_var.get()
-                        overlay_config['offset_x'] = self.app.offset_x_var.get()
-                        overlay_config['offset_y'] = self.app.offset_y_var.get()
+                        # Handle empty offset values (default to 0 or existing value)
+                        try:
+                            offset_x_str = self.app.offset_x_var.get()
+                            overlay_config['offset_x'] = int(offset_x_str) if offset_x_str else overlay_config.get('offset_x', 0)
+                        except (ValueError, TclError):
+                            overlay_config['offset_x'] = overlay_config.get('offset_x', 0)
+                        try:
+                            offset_y_str = self.app.offset_y_var.get()
+                            overlay_config['offset_y'] = int(offset_y_str) if offset_y_str else overlay_config.get('offset_y', 0)
+                        except (ValueError, TclError):
+                            overlay_config['offset_y'] = overlay_config.get('offset_y', 0)
                     else:
                         # Get datetime format from editor
                         mode = self.app.datetime_mode_var.get()
@@ -308,6 +318,18 @@ class ImageProcessor:
                             from .overlays.constants import DATETIME_FORMATS
                             datetime_format = DATETIME_FORMATS.get(mode, '%Y-%m-%d %H:%M:%S')
                         
+                        # Handle empty offset values for text overlays
+                        try:
+                            offset_x_str = self.app.offset_x_var.get()
+                            offset_x = int(offset_x_str) if offset_x_str else current_overlay.get('offset_x', 10)
+                        except (ValueError, TclError):
+                            offset_x = current_overlay.get('offset_x', 10)
+                        try:
+                            offset_y_str = self.app.offset_y_var.get()
+                            offset_y = int(offset_y_str) if offset_y_str else current_overlay.get('offset_y', 10)
+                        except (ValueError, TclError):
+                            offset_y = current_overlay.get('offset_y', 10)
+                        
                         overlay_config = {
                             'type': 'text',
                             'text': self.app.overlay_text.get('1.0', 'end-1c'),
@@ -315,8 +337,8 @@ class ImageProcessor:
                             'color': self.app.color_var.get(),
                             'font_size': self.app.font_size_var.get(),
                             'font_style': self.app.font_style_var.get(),
-                            'offset_x': self.app.offset_x_var.get(),
-                            'offset_y': self.app.offset_y_var.get(),
+                            'offset_x': offset_x,
+                            'offset_y': offset_y,
                             'background_enabled': self.app.background_enabled_var.get(),
                             'background_color': self.app.bg_color_var.get(),
                             'datetime_format': datetime_format
@@ -334,7 +356,7 @@ class ImageProcessor:
                     }
                     
                     # Apply overlay
-                    preview_img = add_overlays(preview_img, [overlay_config], metadata, image_cache=self.overlay_image_cache)
+                    preview_img = add_overlays(preview_img, [overlay_config], metadata, image_cache=self.overlay_image_cache, weather_service=self.app.weather_service)
             
             # Resize to fit canvas
             preview_img.thumbnail((580, 380), Image.Resampling.LANCZOS)

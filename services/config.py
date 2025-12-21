@@ -97,6 +97,15 @@ DEFAULT_CONFIG = {
     "cleanup_max_size_gb": 10.0,
     "cleanup_strategy": "oldest",
     
+    # Weather settings (OpenWeatherMap)
+    "weather": {
+        "enabled": False,  # Set to True when API key and location configured
+        "api_key": "",
+        "location": "",  # City name, e.g., "London" or "London,GB"
+        "units": "metric",  # "metric", "imperial", or "standard"
+        "cache_duration": 600  # Cache weather data for 10 minutes
+    },
+    
     # Discord alerts
     "discord": {
         "enabled": False,

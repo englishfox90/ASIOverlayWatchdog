@@ -91,6 +91,7 @@ class DiscordAlerts:
             
             if image_path and include_image and os.path.exists(image_path):
                 # Send with image attachment
+                app_logger.debug(f"Attaching image to Discord: {image_path}")
                 files = {
                     "file": (os.path.basename(image_path), open(image_path, "rb"), "image/jpeg")
                 }
@@ -108,6 +109,9 @@ class DiscordAlerts:
                 files["file"][1].close()  # Close file handle
             else:
                 # Send text-only message
+                if image_path and not os.path.exists(image_path):
+                    app_logger.warning(f"Discord image path doesn't exist: {image_path}")
+                app_logger.debug("Sending text-only Discord message")
                 response = requests.post(
                     webhook_url,
                     json=payload,

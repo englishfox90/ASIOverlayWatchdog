@@ -91,18 +91,38 @@ class TextOverlayEditor:
                                           padx=(0, SPACING['element_gap']))
         
         self.app.token_display_var = tk.StringVar()
+        # Extract only the labels (including headers which will be grayed out)
         token_labels = [label for label, _ in TOKENS]
         token_combo = ttk.Combobox(token_frame,
                                    textvariable=self.app.token_display_var,
                                    values=token_labels,
                                    state='readonly',
                                    style='Dark.TCombobox',
-                                   width=20)
+                                   width=25)  # Slightly wider for header text
         token_combo.pack(side='left', padx=(0, SPACING['element_gap']))
+        
+        # Bind selection event to prevent selecting headers
+        token_combo.bind('<<ComboboxSelected>>', self.on_token_selected)
         
         insert_btn = theme.create_secondary_button(token_frame, "Insert",
                                                    self.app.insert_token)
         insert_btn.pack(side='left')
+        
+        # Store reference for header validation
+        self.token_combo = token_combo
+    
+    def on_token_selected(self, event=None):
+        """Handle token selection - prevent selecting headers"""
+        selected_label = self.app.token_display_var.get()
+        
+        # Find the selected item in TOKENS
+        for label, token in TOKENS:
+            if label == selected_label:
+                if token is None:  # Header selected
+                    # Clear selection and show message
+                    self.app.token_display_var.set('')
+                    return
+                break
     
     def create_datetime_section(self):
         """Create DateTime format configuration"""

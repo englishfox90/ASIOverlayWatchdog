@@ -75,6 +75,10 @@ class ModernOverlayApp:
         # Initialize Discord alerts
         self.discord_alerts = DiscordAlerts(self.config.data)
         
+        # Initialize Weather Service (if configured)
+        self.weather_service = None
+        self._init_weather_service()
+        
         # Set window geometry
         geometry = self.config.get('window_geometry', '1280x1300')
         self.root.geometry(geometry)
@@ -649,6 +653,129 @@ Supports:
     def apply_settings(self):
         """Delegate to settings_manager"""
         self.settings_manager.apply_settings()
+    
+    # ===== Weather Service Methods =====
+    
+    def _init_weather_service(self):
+        """Initialize weather service from config"""
+        try:
+            from services.weather import WeatherService
+            
+            weather_config = self.config.get('weather', {})
+            api_key = weather_config.get('api_key', '')
+            location = weather_config.get('location', '')
+            units = weather_config.get('units', 'metric')
+            
+            if api_key and location:
+                self.weather_service = WeatherService(api_key, location, units)
+                app_logger.info(f"Weather service initialized: {location}, {units} units")
+            else:
+                self.weather_service = None
+                app_logger.debug("Weather service not configured (missing API key or location)")
+        except Exception as e:
+            app_logger.error(f"Failed to initialize weather service: {e}")
+            self.weather_service = None
+    
+    def test_weather_connection(self):
+        """Test weather API connection and update status"""
+        try:
+            # Get current settings from UI
+            api_key = self.weather_api_key_var.get().strip()
+            location = self.weather_location_var.get().strip()
+            units = self.weather_units_var.get()
+            
+            if not api_key:
+                self.weather_status_var.set("❌ Error: API key required")
+                return
+            
+            if not location:
+                self.weather_status_var.set("❌ Error: Location required")
+                return
+            
+            self.weather_status_var.set("🔄 Testing connection...")
+            self.root.update_idletasks()
+            
+            # Test connection
+            from services.weather import WeatherService
+            test_service = WeatherService(api_key, location, units)
+            weather_data = test_service.fetch_weather()
+            
+            if weather_data:
+                temp = weather_data['temp']
+                desc = weather_data['description']
+                city = weather_data['city']
+                self.weather_status_var.set(f"✅ Connected: {city} - {temp}, {desc}")
+                app_logger.info(f"Weather API test successful: {city}")
+            else:
+                self.weather_status_var.set("❌ Error: Failed to fetch weather data")
+                
+        except Exception as e:
+            self.weather_status_var.set(f"❌ Error: {str(e)[:50]}")
+            app_logger.error(f"Weather API test failed: {e}")
+    
+    def add_weather_icon_overlay(self):
+        """Add weather icon as an image overlay with text label (helper method)"""
+        if not self.weather_service or not self.weather_service.is_configured():
+            messagebox.showwarning("Weather Not Configured",
+                                 "Please configure weather API key and location in Settings first.")
+            return
+        
+        try:
+            # Verify weather icon can be downloaded
+            icon_path = self.weather_service.get_weather_icon_path()
+            
+            if not icon_path or not os.path.exists(icon_path):
+                messagebox.showerror("Error", "Failed to download weather icon.")
+                return
+            
+            overlays = self.overlay_manager.get_overlays_config()
+            
+            # Create text label overlay "Weather Conditions:"
+            from .overlays.constants import DEFAULT_TEXT_OVERLAY
+            text_overlay = DEFAULT_TEXT_OVERLAY.copy()
+            text_overlay['name'] = 'Weather Label'
+            text_overlay['text'] = 'Weather Conditions:'
+            text_overlay['anchor'] = 'Top-Right'
+            text_overlay['offset_x'] = 110  # Position to left of icon
+            text_overlay['offset_y'] = 20   # Vertically align near top
+            text_overlay['font_size'] = 48
+            text_overlay['font_style'] = 'bold'
+            
+            # Create image overlay with dynamic weather icon
+            # Use special 'WEATHER_ICON' placeholder that resolves at render time
+            from .overlays.constants import DEFAULT_IMAGE_OVERLAY
+            icon_overlay = DEFAULT_IMAGE_OVERLAY.copy()
+            icon_overlay['name'] = 'Weather Icon'
+            icon_overlay['image_path'] = 'WEATHER_ICON'  # Special dynamic placeholder
+            icon_overlay['width'] = 100
+            icon_overlay['height'] = 100
+            icon_overlay['anchor'] = 'Top-Right'
+            icon_overlay['offset_x'] = 0   # Right edge
+            icon_overlay['offset_y'] = 0   # Top edge
+            
+            # Add both overlays to list
+            overlays.append(text_overlay)
+            overlays.append(icon_overlay)
+            self.config.set('overlays', overlays)
+            self.overlay_manager.rebuild_overlay_list()
+            
+            # Select the icon overlay (last added)
+            new_index = len(overlays) - 1
+            self.overlay_tree.selection_set(str(new_index))
+            self.selected_overlay_index = new_index
+            self.overlay_manager.load_overlay_into_editor(icon_overlay)
+            
+            messagebox.showinfo("Success", "Weather overlays added!\n\n"
+                              "Added:\n"
+                              "• Text label: 'Weather Conditions:'\n"
+                              "• Dynamic weather icon\n\n"
+                              "✨ Icon updates with current weather conditions.\n"
+                              "🔄 Refreshes every 10 minutes automatically.\n"
+                              "🌤️ Supports all OpenWeatherMap condition icons.")
+            
+        except Exception as e:
+            app_logger.error(f"Failed to add weather icon overlay: {e}")
+            messagebox.showerror("Error", f"Failed to add weather icon: {str(e)}")
     
     # ===== Output Mode Methods (Delegated to OutputManager) =====
     
