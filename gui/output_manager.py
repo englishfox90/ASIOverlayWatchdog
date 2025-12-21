@@ -319,8 +319,12 @@ This is a test alert with your current configuration.""",
         for child in widget.winfo_children():
             self._set_widget_state_recursive(child, state)
     
-    def schedule_discord_periodic(self):
-        """Schedule periodic Discord posting"""
+    def schedule_discord_periodic(self, send_initial=False):
+        """Schedule periodic Discord posting
+        
+        Args:
+            send_initial: If True, send an initial message immediately before scheduling periodic posts
+        """
         # Cancel existing job
         if self.discord_periodic_job:
             try:
@@ -329,12 +333,16 @@ This is a test alert with your current configuration.""",
                 pass
             self.discord_periodic_job = None
         
+        # Send initial message if requested
+        if send_initial and self.app.discord_enabled_var.get() and self.app.discord_periodic_enabled_var.get():
+            self.send_discord_start_notification()
+        
         # Schedule new job if enabled
         if (self.app.discord_enabled_var.get() and 
             self.app.discord_periodic_enabled_var.get() and
             (self.app.is_capturing or (self.app.watcher and self.app.watcher.observer))):
             
-            interval_minutes = self.app.discord_periodic_interval_var.get()
+            interval_minutes = self.app.discord_interval_var.get()
             interval_ms = interval_minutes * 60 * 1000
             
             def periodic_post():
@@ -373,4 +381,75 @@ This is a test alert with your current configuration.""",
             message,
             level="info",
             image_path=image_path
+        )
+    
+    def send_discord_start_notification(self):
+        """Send initial Discord notification when capture/watching starts"""
+        if not self.discord_alerts:
+            return
+        
+        # Get latest image if available
+        image_path = None
+        if self.app.discord_include_image_var.get():
+            if self.app.last_processed_image:
+                image_path = self.app.last_processed_image
+            elif self.app.last_captured_image:
+                image_path = self.app.last_captured_image
+        
+        # Build start message
+        mode = "Camera Capture" if self.app.is_capturing else "Directory Watch"
+        
+        message = f"""**Capture Started**
+
+**Mode:** {mode}
+**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+        
+        self.discord_alerts.send_discord_message(
+            "🚀 Capture Started",
+            message,
+            level="info",
+            image_path=image_path
+        )
+        app_logger.info("Discord start notification sent")
+    
+    def check_discord_periodic_send(self, image_path):
+        """
+        Check if it's time to send a periodic Discord update.
+        This is called after each image is processed.
+        
+        Args:
+            image_path: Path to the processed image
+        """
+        # Only send if Discord is enabled and periodic posting is enabled
+        if not self.app.discord_enabled_var.get():
+            return
+        
+        if not self.app.discord_periodic_enabled_var.get():
+            return
+        
+        if not self.discord_alerts:
+            return
+        
+        # Check if we should send based on interval
+        # This is handled by the scheduled job, but we update last_processed_image
+        # so the scheduled post uses the latest image
+        self.app.last_processed_image = image_path
+    
+    def send_discord_error(self, error_text):
+        """
+        Send an error alert to Discord
+        
+        Args:
+            error_text: Error message to send
+        """
+        if not self.app.discord_enabled_var.get():
+            return
+        
+        if not self.discord_alerts:
+            return
+        
+        self.discord_alerts.send_discord_message(
+            "❌ Error Alert",
+            f"**Error occurred:**\n{error_text}\n\n**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            level="error"
         )

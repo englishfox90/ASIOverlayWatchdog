@@ -233,6 +233,9 @@ class CameraController:
             self.app.camera_status_var.set("Capturing...")
             self.set_camera_status_dot('capturing')
             
+            # Schedule Discord periodic updates with initial message
+            self.app.output_manager.schedule_discord_periodic(send_initial=True)
+            
             app_logger.info("Camera capture started")
             
         except Exception as e:

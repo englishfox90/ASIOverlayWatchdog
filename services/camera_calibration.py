@@ -22,7 +22,7 @@ class CameraCalibration:
         self.logger_callback = logger_callback
         
         # Auto-exposure settings
-        self.target_brightness = 300
+        self.target_brightness = 30
         self.max_exposure_sec = 30.0
         self.exposure_seconds = 1.0
         self.gain = 300
@@ -43,7 +43,7 @@ class CameraCalibration:
     def run_calibration(self, max_attempts=15):
         """
         Rapid auto-exposure calibration before starting normal capture
-        Uses fast exposure adjustments to reach target brightness quickly
+        Uses intelligent exposure adjustments with interpolation to reach target brightness quickly
         
         Args:
             max_attempts: Maximum calibration attempts
@@ -52,6 +52,9 @@ class CameraCalibration:
             True if calibration successful, False otherwise
         """
         self.log("Starting rapid calibration...")
+        
+        # Track exposure/brightness pairs for interpolation
+        calibration_history = []
         
         for attempt in range(max_attempts):
             try:
@@ -70,6 +73,9 @@ class CameraCalibration:
                     self.exposure_percentile
                 )
                 
+                # Store this measurement
+                calibration_history.append((self.exposure_seconds, brightness))
+                
                 self.log(f"Calibration attempt {attempt + 1}/{max_attempts}: brightness={brightness:.1f} (target={self.target_brightness})")
                 
                 # Check if we're within acceptable range (±20% of target)
@@ -77,24 +83,54 @@ class CameraCalibration:
                     self.log(f"Calibration complete! Final brightness: {brightness:.1f}")
                     return True
                 
-                # Adjust exposure based on brightness difference
-                brightness_ratio = self.target_brightness / max(brightness, 1)  # Avoid divide by zero
+                # Try interpolation if we have at least 2 points with different brightness
+                new_exposure = None
+                if len(calibration_history) >= 2:
+                    # Check if we have points on both sides of target
+                    points_below = [(exp, b) for exp, b in calibration_history if b < self.target_brightness]
+                    points_above = [(exp, b) for exp, b in calibration_history if b > self.target_brightness]
+                    
+                    if points_below and points_above:
+                        # Get the closest point on each side
+                        closest_below = max(points_below, key=lambda x: x[1])  # Highest brightness below target
+                        closest_above = min(points_above, key=lambda x: x[1])  # Lowest brightness above target
+                        
+                        exp1, bright1 = closest_below
+                        exp2, bright2 = closest_above
+                        
+                        # Linear interpolation: exposure = exp1 + (target - bright1) * (exp2 - exp1) / (bright2 - bright1)
+                        if bright2 != bright1:
+                            interpolated_exp = exp1 + (self.target_brightness - bright1) * (exp2 - exp1) / (bright2 - bright1)
+                            
+                            # Validate interpolated value is reasonable
+                            if 0.000032 <= interpolated_exp <= self.max_exposure_sec:
+                                new_exposure = interpolated_exp
+                                self.log(f"  Using interpolation: {exp1*1000:.2f}ms (b={bright1:.0f}) <-> {exp2*1000:.2f}ms (b={bright2:.0f}) => {interpolated_exp*1000:.2f}ms")
                 
-                # More aggressive adjustment during calibration (1.5x factor instead of 1.3x)
-                if brightness < self.target_brightness * 0.8:
-                    # Too dark - increase exposure significantly
-                    adjustment_factor = min(brightness_ratio * 1.5, 2.0)  # Cap at 2x increase
-                elif brightness > self.target_brightness * 1.2:
-                    # Too bright - decrease exposure significantly
-                    adjustment_factor = max(brightness_ratio * 0.7, 0.5)  # Cap at 0.5x decrease
-                else:
-                    # Close to target - fine tune
-                    adjustment_factor = brightness_ratio
-                
-                new_exposure = self.exposure_seconds * adjustment_factor
-                new_exposure = max(0.000032, min(self.max_exposure_sec, new_exposure))
-                
-                self.log(f"  Adjusting exposure: {self.exposure_seconds*1000:.2f}ms -> {new_exposure*1000:.2f}ms (factor: {adjustment_factor:.2f})")
+                # If interpolation didn't work, use adaptive adjustment
+                if new_exposure is None:
+                    brightness_ratio = self.target_brightness / max(brightness, 1)  # Avoid divide by zero
+                    
+                    # Use more conservative adjustments to avoid overshooting
+                    if brightness < self.target_brightness * 0.5:
+                        # Very dark - significant increase
+                        adjustment_factor = min(brightness_ratio * 1.2, 2.0)  # Reduced from 1.5x
+                    elif brightness < self.target_brightness * 0.8:
+                        # Somewhat dark - moderate increase
+                        adjustment_factor = min(brightness_ratio * 0.9, 1.5)  # More conservative
+                    elif brightness > self.target_brightness * 2.0:
+                        # Very bright - significant decrease
+                        adjustment_factor = max(brightness_ratio * 0.8, 0.5)  # More conservative
+                    elif brightness > self.target_brightness * 1.2:
+                        # Somewhat bright - moderate decrease
+                        adjustment_factor = max(brightness_ratio * 0.9, 0.7)  # More conservative
+                    else:
+                        # Close to target - fine tune
+                        adjustment_factor = brightness_ratio * 0.95  # Very conservative
+                    
+                    new_exposure = self.exposure_seconds * adjustment_factor
+                    new_exposure = max(0.000032, min(self.max_exposure_sec, new_exposure))
+                    self.log(f"  Adjusting exposure: {self.exposure_seconds*1000:.2f}ms -> {new_exposure*1000:.2f}ms (factor: {adjustment_factor:.2f})")
                 
                 self.exposure_seconds = new_exposure
                 self.camera.set_control_value(self.asi.ASI_EXPOSURE, int(new_exposure * 1000000))

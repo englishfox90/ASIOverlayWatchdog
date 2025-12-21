@@ -227,8 +227,11 @@ def add_overlays(image_input, overlays, metadata):
                     # Fall back to default font
                     font = ImageFont.load_default()
             
-            # Calculate text size
-            text_width, text_height = get_text_bbox(draw, text, font)
+            # Calculate text bounding box for proper padding
+            # Get bbox relative to (0, 0) to find actual text dimensions including descenders
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
             
             # Calculate position
             x, y = calculate_position(img.size, (text_width, text_height), anchor, x_offset, y_offset)
@@ -236,11 +239,13 @@ def add_overlays(image_input, overlays, metadata):
             # Draw solid background box if enabled
             if draw_background:
                 padding = 5
+                # Get bbox at actual drawing position for accurate background box
+                text_bbox = draw.textbbox((x, y), text, font=font)
                 box_coords = [
-                    x - padding,
-                    y - padding,
-                    x + text_width + padding,
-                    y + text_height + padding
+                    text_bbox[0] - padding,  # left
+                    text_bbox[1] - padding,  # top
+                    text_bbox[2] + padding,  # right
+                    text_bbox[3] + padding   # bottom (includes descenders)
                 ]
                 draw.rectangle(box_coords, fill=(0, 0, 0))
             

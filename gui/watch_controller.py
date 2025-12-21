@@ -68,6 +68,10 @@ class WatchController:
             # Update UI
             self.app.start_watch_button.config(state='disabled')
             self.app.stop_watch_button.config(state='normal')
+            
+            # Schedule Discord periodic updates with initial message
+            self.app.output_manager.schedule_discord_periodic(send_initial=True)
+            
             app_logger.info(f"Started watching: {watch_dir}")
             
         except Exception as e:
