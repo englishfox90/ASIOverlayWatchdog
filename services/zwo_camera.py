@@ -264,11 +264,37 @@ class ZWOCamera:
             self.log(f"  Available controls: {len(controls)}")
             
             self.log("Configuring camera settings...")
-            # Set initial camera settings
-            self.camera.set_control_value(self.asi.ASI_GAIN, self.gain)
-            self.log(f"  Gain: {self.gain}")
-            self.camera.set_control_value(self.asi.ASI_EXPOSURE, int(self.exposure_seconds * 1000000))
-            self.log(f"  Exposure: {self.exposure_seconds}s ({self.exposure_seconds * 1000}ms)")
+            # Set initial camera settings with validation
+            # SDK best practice: validate values are within camera's supported ranges
+            controls = self.camera.get_controls()
+            
+            # Set gain with range validation
+            gain_ctrl = next((c for c in controls.values() if c['ControlType'] == self.asi.ASI_GAIN), None)
+            if gain_ctrl:
+                validated_gain = max(gain_ctrl['MinValue'], min(gain_ctrl['MaxValue'], self.gain))
+                if validated_gain != self.gain:
+                    self.log(f"  ⚠ Gain {self.gain} out of range [{gain_ctrl['MinValue']}-{gain_ctrl['MaxValue']}], using {validated_gain}")
+                    self.gain = validated_gain
+                self.camera.set_control_value(self.asi.ASI_GAIN, self.gain)
+                self.log(f"  Gain: {self.gain} (range: {gain_ctrl['MinValue']}-{gain_ctrl['MaxValue']})")
+            else:
+                self.camera.set_control_value(self.asi.ASI_GAIN, self.gain)
+                self.log(f"  Gain: {self.gain}")
+            
+            # Set exposure with range validation
+            exposure_us = int(self.exposure_seconds * 1000000)
+            exp_ctrl = next((c for c in controls.values() if c['ControlType'] == self.asi.ASI_EXPOSURE), None)
+            if exp_ctrl:
+                validated_exp = max(exp_ctrl['MinValue'], min(exp_ctrl['MaxValue'], exposure_us))
+                if validated_exp != exposure_us:
+                    self.log(f"  ⚠ Exposure {exposure_us}µs out of range [{exp_ctrl['MinValue']}-{exp_ctrl['MaxValue']}], using {validated_exp}µs")
+                    exposure_us = validated_exp
+                    self.exposure_seconds = exposure_us / 1000000.0
+                self.camera.set_control_value(self.asi.ASI_EXPOSURE, exposure_us)
+                self.log(f"  Exposure: {self.exposure_seconds}s ({self.exposure_seconds * 1000}ms, range: {exp_ctrl['MinValue']/1000000:.6f}s-{exp_ctrl['MaxValue']/1000000:.1f}s)")
+            else:
+                self.camera.set_control_value(self.asi.ASI_EXPOSURE, exposure_us)
+                self.log(f"  Exposure: {self.exposure_seconds}s ({self.exposure_seconds * 1000}ms)")
             
             # Configure white balance based on mode
             if self.wb_mode == 'asi_auto':
@@ -307,6 +333,11 @@ class ZWOCamera:
             if self.flip == 2 or self.flip == 3:
                 self.camera.set_control_value(self.asi.ASI_FLIP, 2)  # Vertical
             
+            # Set ROI to full frame (SDK best practice: always set ROI explicitly)
+            self.camera.set_roi(start_x=0, start_y=0, width=camera_info['MaxWidth'], 
+                               height=camera_info['MaxHeight'], bins=1, image_type=self.asi.ASI_IMG_RAW8)
+            self.log(f"  ROI: Full frame {camera_info['MaxWidth']}x{camera_info['MaxHeight']}, 1x1 binning")
+            
             # Set image format to RAW8
             self.camera.set_image_type(self.asi.ASI_IMG_RAW8)
             
@@ -344,11 +375,12 @@ class ZWOCamera:
             # Get camera info
             camera_info = self.camera.get_camera_property()
             
+            # Set ROI to full frame (SDK best practice: always set ROI explicitly)
+            self.camera.set_roi(start_x=0, start_y=0, width=camera_info['MaxWidth'], 
+                               height=camera_info['MaxHeight'], bins=1, image_type=self.asi.ASI_IMG_RAW8)
+            
             # Set image format
             self.camera.set_image_type(self.asi.ASI_IMG_RAW8)
-            
-            # Set ROI to full frame (if needed during reconnection)
-            # This is usually done in connect_camera, but helpful for reconnections
             
             # Set camera controls
             self.camera.set_control_value(self.asi.ASI_GAIN, self.gain)
@@ -455,6 +487,7 @@ class ZWOCamera:
             self.camera.start_exposure()
             
             # Wait for exposure to complete
+            # SDK best practice: timeout should be exposure time + reasonable buffer
             timeout = self.exposure_seconds + 5.0
             start_time = time.time()
             self.exposure_start_time = start_time
@@ -464,13 +497,23 @@ class ZWOCamera:
                 if status == self.asi.ASI_EXP_SUCCESS:
                     break
                 elif status == self.asi.ASI_EXP_FAILED:
-                    raise Exception("Exposure failed")
+                    raise Exception("Exposure failed (camera returned ASI_EXP_FAILED status)")
+                elif status == self.asi.ASI_EXP_IDLE:
+                    # Camera not exposing - shouldn't happen after start_exposure
+                    raise Exception("Exposure error: camera returned to IDLE state unexpectedly")
+                # status == ASI_EXP_WORKING: exposure in progress, continue waiting
                 
                 # Update remaining time for UI (no logging)
                 elapsed = time.time() - start_time
                 self.exposure_remaining = max(0, self.exposure_seconds - elapsed)
                 
                 time.sleep(0.05)  # 50ms update rate for smoother countdown
+            
+            # Check if we timed out
+            if time.time() - start_time >= timeout:
+                self.exposure_remaining = 0.0
+                self.exposure_start_time = None
+                raise Exception(f"Exposure timeout: camera did not complete {self.exposure_seconds}s exposure within {timeout}s")
             
             # Reset exposure tracking
             self.exposure_remaining = 0.0
@@ -703,6 +746,18 @@ class ZWOCamera:
                         self.on_frame_callback(img, metadata)
                     
                     self.log(f"Captured frame: {metadata['FILENAME']}")
+                    
+                    # Reset error counter on successful capture
+                    consecutive_errors = 0
+                    
+                    # Check for dropped frames (helps diagnose USB bandwidth issues)
+                    try:
+                        dropped = self.camera.get_dropped_frames()
+                        if dropped > 0:
+                            self.log(f"⚠ USB performance warning: {dropped} dropped frames detected")
+                            self.log("  Consider: reducing bandwidth_overload, lowering frame rate, or checking USB connection")
+                    except Exception:
+                        pass  # Not all cameras/modes support dropped frame reporting
                     
                     # Wait for next capture interval
                     if self.is_capturing:  # Check again in case stopped during capture
