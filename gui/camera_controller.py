@@ -17,6 +17,8 @@ class CameraController:
     
     def detect_cameras(self):
         """Detect connected ZWO cameras (non-blocking)"""
+        app_logger.info("=== Camera Detection Initiated ===")
+        
         # Show spinner
         self.app.capture_tab.show_detection_spinner()
         self.app.capture_tab.clear_detection_error()
@@ -27,66 +29,80 @@ class CameraController:
             
             # Validate SDK path first
             if not sdk_path:
+                app_logger.error("Detection failed: SDK path not specified")
                 self.app.root.after(0, lambda: self._on_detection_complete([], "SDK path not specified"))
                 return
             
             if not os.path.exists(sdk_path):
+                app_logger.error(f"Detection failed: SDK file not found at: {sdk_path}")
                 self.app.root.after(0, lambda: self._on_detection_complete([], f"SDK file not found: {sdk_path}"))
                 return
             
             try:
                 import zwoasi as asi
+                app_logger.info("zwoasi module imported successfully")
                 app_logger.info("Starting camera detection...")
                 
                 # Initialize SDK
                 try:
-                    app_logger.debug(f"Initializing ASI SDK: {sdk_path}")
+                    app_logger.debug(f"Initializing ASI SDK from: {sdk_path}")
                     asi.init(sdk_path)
-                    app_logger.info(f"ASI SDK initialized: {sdk_path}")
+                    app_logger.info(f"✓ ASI SDK initialized successfully: {sdk_path}")
                 except Exception as init_error:
                     # SDK already initialized or initialization failed
                     if "already" not in str(init_error).lower():
                         error_msg = f"SDK initialization failed: {str(init_error)}"
                         app_logger.error(error_msg)
+                        import traceback
+                        app_logger.debug(f"Stack trace: {traceback.format_exc()}")
                         self.app.root.after(0, lambda: self._on_detection_complete([], error_msg))
                         return
                     else:
-                        app_logger.debug("SDK already initialized")
+                        app_logger.debug("SDK already initialized (reusing existing instance)")
                 
-                app_logger.debug("Querying number of cameras...")
+                app_logger.debug("Querying SDK for number of connected cameras...")
                 num_cameras = asi.get_num_cameras()
-                app_logger.info(f"SDK reports {num_cameras} camera(s)")
+                app_logger.info(f"SDK reports {num_cameras} camera(s) connected")
                 
                 if num_cameras == 0:
+                    app_logger.warning("⚠ No cameras detected")
+                    app_logger.info("Troubleshooting: 1) Check USB cable, 2) Verify camera power, 3) Check USB drivers")
                     self.app.root.after(0, lambda: self._on_detection_complete([], "No cameras detected. Check USB connection."))
                     return
                 
+                app_logger.info(f"Enumerating {num_cameras} camera(s)...")
                 camera_list = []
                 for i in range(num_cameras):
                     try:
-                        app_logger.debug(f"Opening camera {i}...")
+                        app_logger.debug(f"Opening camera {i} to retrieve properties...")
                         cam = asi.Camera(i)
                         info = cam.get_camera_property()
                         camera_name = f"{info['Name']} (ID: {info['CameraID']})"
                         camera_list.append(camera_name)
-                        app_logger.info(f"Found camera: {camera_name}")
+                        app_logger.info(f"✓ Camera {i}: {camera_name}")
+                        app_logger.debug(f"  Resolution: {info['MaxWidth']}x{info['MaxHeight']}, Pixel Size: {info['PixelSize']}µm")
                     except Exception as cam_error:
-                        app_logger.warning(f"Error getting camera {i} info: {cam_error}")
+                        app_logger.warning(f"⚠ Error accessing camera {i}: {cam_error}")
+                        import traceback
+                        app_logger.debug(f"Stack trace: {traceback.format_exc()}")
                         continue
                 
                 if camera_list:
+                    app_logger.info(f"✓ Camera detection complete: {len(camera_list)} camera(s) found")
                     self.app.root.after(0, lambda: self._on_detection_complete(camera_list, None))
                 else:
+                    app_logger.warning("Detection found cameras but could not access any")
                     self.app.root.after(0, lambda: self._on_detection_complete([], "No valid cameras found"))
                 
             except Exception as e:
                 error_msg = f"Detection error: {str(e)}"
-                app_logger.error(f"Camera detection failed: {error_msg}")
+                app_logger.error(f"✗ Camera detection failed: {error_msg}")
                 import traceback
-                app_logger.debug(traceback.format_exc())
+                app_logger.debug(f"Stack trace: {traceback.format_exc()}")
                 self.app.root.after(0, lambda: self._on_detection_complete([], error_msg))
         
         # Start detection thread
+        app_logger.debug("Starting detection thread...")
         detection_thread = threading.Thread(target=detect_thread, daemon=True)
         detection_thread.start()
         
@@ -95,12 +111,14 @@ class CameraController:
             detection_thread.join(timeout=10.0)
             if detection_thread.is_alive():
                 # Thread still running after timeout
-                app_logger.error("Camera detection timed out after 10 seconds")
+                app_logger.error("✗ Camera detection timed out after 10 seconds")
+                app_logger.warning("Possible causes: 1) Camera in use by another app, 2) USB driver issue, 3) Camera hardware problem")
                 self.app.root.after(0, lambda: self._on_detection_complete(
                     [], 
                     "Detection timed out. Camera may be in use or SDK issue. Check logs."
                 ))
         
+        app_logger.debug("Starting timeout monitor (10s)...")
         threading.Thread(target=timeout_monitor, daemon=True).start()
     
     def _on_detection_complete(self, camera_list, error_msg):
@@ -111,35 +129,42 @@ class CameraController:
         if error_msg:
             # Show inline error with retry option
             self.app.capture_tab.show_detection_error(error_msg)
-            app_logger.error(f"Camera detection failed: {error_msg}")
+            app_logger.error(f"✗ Camera detection failed: {error_msg}")
             self.app.camera_combo['values'] = []
             self.app.start_capture_button.config(state='disabled', cursor='')
             
             # Log file location hint for troubleshooting
-            log_location = app_logger.get_log_location()
-            app_logger.info(f"For detailed diagnostics, check log file: {log_location}")
+            try:
+                log_location = app_logger.handlers[0].baseFilename if app_logger.handlers else "Unknown"
+                app_logger.info(f"For detailed diagnostics, check log file: {log_location}")
+            except:
+                pass
             app_logger.info("Click 'Detect Cameras' to try again")
         else:
             # Success
+            app_logger.info(f"Populating camera list with {len(camera_list)} camera(s)")
             self.app.camera_combo['values'] = camera_list
             if camera_list:
                 self.app.camera_combo.current(0)
                 self.app.selected_camera_index = 0
+                app_logger.debug("Selected first camera by default")
             
             # Try to restore previously selected camera
             saved_index = self.app.config.get('zwo_selected_camera', 0)
             if saved_index < len(camera_list):
                 self.app.camera_combo.current(saved_index)
                 self.app.selected_camera_index = saved_index
-                app_logger.info(f"Restored camera selection: index {saved_index}")
+                app_logger.info(f"Restored previous camera selection: index {saved_index}")
             
             if camera_list:
                 self.app.start_capture_button.config(state='normal', cursor='hand2')
                 self.app.capture_tab.clear_detection_error()
-                app_logger.info(f"Detected {len(camera_list)} camera(s)")
+                app_logger.info(f"✓ Camera detection successful: {len(camera_list)} camera(s) ready")
     
     def start_camera_capture(self):
         """Start ZWO camera capture"""
+        app_logger.info("=== Starting Camera Capture ===")
+        
         try:
             # Ensure output servers are started if configured
             self.app.ensure_output_mode_started()
@@ -151,12 +176,17 @@ class CameraController:
             
             # Validate camera selection
             if not self.app.camera_combo.get():
-                app_logger.error("No camera selected")
+                app_logger.error("Cannot start capture: No camera selected")
                 self.app.status_header.set_status_color('error')
                 return
             
+            selected_camera = self.app.camera_combo.get()
+            app_logger.info(f"Selected camera: {selected_camera}")
+            app_logger.info(f"Camera index: {self.app.selected_camera_index}")
+            
             # Get settings
             sdk_path = self.app.sdk_path_var.get()
+            app_logger.info(f"SDK path: {sdk_path}")
             
             # Handle exposure unit conversion
             exposure_value = self.app.exposure_var.get()
@@ -177,6 +207,12 @@ class CameraController:
             target_brightness = self.app.target_brightness_var.get()
             bayer_pattern = self.app.bayer_pattern_var.get()
             
+            # Log configuration
+            app_logger.info(f"Camera settings: Exposure={exposure_ms}ms, Gain={gain}, WB(R={wb_r}, B={wb_b})")
+            app_logger.info(f"  Auto-exposure: {auto_exp}, Max={max_exp_sec}s, Target brightness={target_brightness}")
+            app_logger.info(f"  Bayer pattern: {bayer_pattern}, Flip: {self.app.flip_var.get()}, Offset: {offset}")
+            app_logger.info(f"  Capture interval: {interval}s")
+            
             # Load white balance config
             wb_config = self.app.config.get('white_balance', {
                 'mode': 'asi_auto',
@@ -185,8 +221,23 @@ class CameraController:
                 'gray_world_low_pct': 5,
                 'gray_world_high_pct': 95
             })
+            app_logger.info(f"White balance mode: {wb_config.get('mode', 'asi_auto')}")
+            
+            # Log schedule configuration
+            scheduled_enabled = self.app.config.get('scheduled_capture_enabled', False)
+            if scheduled_enabled:
+                scheduled_start = self.app.config.get('scheduled_start_time', '17:00')
+                scheduled_end = self.app.config.get('scheduled_end_time', '09:00')
+                app_logger.info(f"Scheduled capture enabled: {scheduled_start} - {scheduled_end}")
+            else:
+                app_logger.info("Scheduled capture disabled: continuous operation")
             
             # Initialize camera
+            app_logger.info("Initializing ZWOCamera instance...")
+            
+            # Get saved camera name from config for multi-camera stability
+            saved_camera_name = self.app.config.get('zwo_selected_camera_name', None)
+            
             self.zwo_camera = ZWOCamera(
                 sdk_path=sdk_path,
                 camera_index=self.app.selected_camera_index,
@@ -205,22 +256,27 @@ class CameraController:
                 scheduled_capture_enabled=self.app.config.get('scheduled_capture_enabled', False),
                 scheduled_start_time=self.app.config.get('scheduled_start_time', '17:00'),
                 scheduled_end_time=self.app.config.get('scheduled_end_time', '09:00'),
-                status_callback=self.app.update_camera_status_for_schedule
+                status_callback=self.app.update_camera_status_for_schedule,
+                camera_name=saved_camera_name,
+                config_callback=lambda key, value: self._save_camera_config(key, value)
             )
             
             # Set target brightness
             self.zwo_camera.target_brightness = target_brightness
             
+            app_logger.info(f"Connecting to camera at index {self.app.selected_camera_index}...")
             if not self.zwo_camera.connect_camera(self.app.selected_camera_index):
-                raise Exception("Failed to connect to camera")
+                raise Exception("Failed to connect to camera (see above logs for details)")
             
             # Set capture interval
             self.zwo_camera.set_capture_interval(interval)
+            app_logger.info(f"Set capture interval to {interval}s")
             
             # Set error callback for disconnect recovery
             self.zwo_camera.on_error_callback = self.on_camera_error
             
             # Start capture using built-in capture loop
+            app_logger.info("Starting capture loop...")
             self.zwo_camera.start_capture(
                 on_frame_callback=self.on_camera_frame,
                 on_log_callback=lambda msg: app_logger.info(msg)
@@ -237,11 +293,14 @@ class CameraController:
             # Schedule Discord periodic updates with initial message
             self.app.output_manager.schedule_discord_periodic(send_initial=True)
             
-            app_logger.info("Camera capture started")
+            app_logger.info("✓ Camera capture started successfully")
             
         except Exception as e:
             self.app.is_capturing = False
-            app_logger.error(f"Failed to start camera: {e}")
+            app_logger.error(f"✗ Failed to start camera capture: {e}")
+            import traceback
+            app_logger.debug(f"Stack trace: {traceback.format_exc()}")
+            app_logger.info("Troubleshooting: Check logs above for specific error details")
             self.app.camera_status_var.set(f"Error: {str(e)[:50]}...")
             self.set_camera_status_dot('error')
             self.app.status_header.set_status_color('error')
@@ -250,26 +309,31 @@ class CameraController:
     
     def stop_camera_capture(self):
         """Stop camera capture with proper cleanup and error handling"""
+        app_logger.info("=== Stopping Camera Capture ===")
         self.app.is_capturing = False
         
         if self.zwo_camera:
             try:
-                app_logger.info("Stopping camera capture...")
+                app_logger.info("Initiating camera disconnect sequence...")
                 
                 # Disconnect camera gracefully (includes stop_capture call)
                 self.zwo_camera.disconnect_camera()
                 
                 # Wait briefly for cleanup to complete
                 import time
+                app_logger.debug("Waiting for cleanup to complete...")
                 time.sleep(0.2)
                 
-                app_logger.info("Camera disconnected successfully")
+                app_logger.info("✓ Camera disconnected successfully")
                 
             except Exception as e:
-                app_logger.error(f"Error during camera disconnect: {e}")
+                app_logger.error(f"✗ Error during camera disconnect: {e}")
+                import traceback
+                app_logger.debug(f"Stack trace: {traceback.format_exc()}")
             finally:
                 # Always clear reference even if disconnect failed
                 self.zwo_camera = None
+                app_logger.debug("Camera controller reference cleared")
         
         # Only enable start button if camera is selected
         if self.app.camera_combo.get():
@@ -308,7 +372,9 @@ class CameraController:
     
     def on_camera_error(self, error_msg):
         """Handle camera disconnection/error from capture loop"""
-        app_logger.error(f"Camera error callback: {error_msg}")
+        app_logger.error(f"✗ Camera error received: {error_msg}")
+        app_logger.warning("Camera appears to have disconnected or encountered critical error")
+        app_logger.info("Manual restart may be required - check camera USB connection and power")
         
         # Update UI on main thread
         def update_ui():
@@ -338,14 +404,18 @@ class CameraController:
         """Handle camera selection"""
         selection = self.app.camera_combo.current()
         if selection >= 0:
+            camera_name = self.app.camera_combo.get()
             self.app.selected_camera_index = selection
+            # Save both index (for backward compatibility) and name (for multi-camera stability)
             self.app.config.set('zwo_selected_camera', selection)
+            self.app.config.set('zwo_selected_camera_name', camera_name)
             self.app.config.save()
             self.app.start_capture_button.config(state='normal', cursor='hand2')
             self.app.capture_tab.clear_detection_error()
-            app_logger.info(f"Selected camera index: {selection}")
+            app_logger.info(f"Camera selected: Index {selection} - {camera_name}")
         else:
             self.app.start_capture_button.config(state='disabled', cursor='')
+            app_logger.warning("Invalid camera selection")
     
     def update_live_settings(self):
         """Update camera settings during active capture without restarting"""
@@ -498,3 +568,8 @@ class CameraController:
         
         # Save to config
         self.app.settings_manager.save_config()
+    
+    def _save_camera_config(self, key, value):
+        """Helper method to save camera config from ZWOCamera callbacks"""
+        self.app.config.set(key, value)
+        self.app.config.save()

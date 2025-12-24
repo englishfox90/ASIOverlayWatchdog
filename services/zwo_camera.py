@@ -20,9 +20,12 @@ class ZWOCamera:
                  auto_exposure=False, max_exposure_sec=30.0, auto_wb=False,
                  wb_mode='asi_auto', wb_config=None, bayer_pattern='BGGR',
                  scheduled_capture_enabled=False, scheduled_start_time="17:00",
-                 scheduled_end_time="09:00", status_callback=None):
+                 scheduled_end_time="09:00", status_callback=None, camera_name=None,
+                 config_callback=None):
         self.sdk_path = sdk_path
         self.camera_index = camera_index
+        self.camera_name = camera_name  # Persistent camera identifier
+        self.config_callback = config_callback  # Callback to save config
         self.camera = None
         self.asi = None
         self.cameras = []
@@ -105,75 +108,154 @@ class ZWOCamera:
     
     def initialize_sdk(self):
         """Initialize the ZWO ASI SDK"""
+        self.log("=== Initializing ZWO ASI SDK ===")
         try:
             import zwoasi as asi
             self.asi = asi
+            self.log("zwoasi module imported successfully")
             
             if self.sdk_path and os.path.exists(self.sdk_path):
+                self.log(f"Attempting SDK init with configured path: {self.sdk_path}")
                 asi.init(self.sdk_path)
-                self.log(f"ZWO SDK initialized from: {self.sdk_path}")
+                self.log(f"✓ ZWO SDK initialized successfully from: {self.sdk_path}")
             else:
                 # Try default locations
+                self.log("SDK path not configured or not found, trying default location")
                 if os.path.exists('ASICamera2.dll'):
+                    self.log("Found ASICamera2.dll in application directory")
                     asi.init('ASICamera2.dll')
-                    self.log("ZWO SDK initialized from: ASICamera2.dll")
+                    self.log("✓ ZWO SDK initialized from: ASICamera2.dll")
                 else:
-                    self.log("ERROR: ASICamera2.dll not found. Please configure SDK path.")
+                    self.log("ERROR: ASICamera2.dll not found in application directory")
+                    self.log("Please configure SDK path in Capture tab settings")
                     return False
             
             return True
         
-        except ImportError:
-            self.log("ERROR: zwoasi library not installed. Run: pip install zwoasi")
+        except ImportError as e:
+            self.log(f"ERROR: zwoasi library not installed: {e}")
+            self.log("Run: pip install zwoasi")
             return False
         except Exception as e:
             self.log(f"ERROR initializing ZWO SDK: {e}")
+            import traceback
+            self.log(f"Stack trace: {traceback.format_exc()}")
             return False
     
     def detect_cameras(self):
         """Detect connected ZWO cameras"""
+        self.log("=== Starting Camera Detection ===")
+        
         if not self.asi:
+            self.log("SDK not initialized, initializing now...")
             if not self.initialize_sdk():
+                self.log("Camera detection failed: SDK initialization failed")
                 return []
         
         try:
+            self.log("Querying SDK for number of connected cameras...")
             num_cameras = self.asi.get_num_cameras()
             self.cameras = []
             
             if num_cameras == 0:
-                self.log("No ZWO cameras detected")
+                self.log("⚠ No ZWO cameras detected by SDK")
+                self.log("Check: 1) USB cable connected, 2) Camera powered, 3) USB drivers installed")
                 return []
             
-            self.log(f"Found {num_cameras} ZWO camera(s)")
+            self.log(f"✓ Found {num_cameras} ZWO camera(s) connected")
+            self.log("Enumerating camera details...")
             
             for i in range(num_cameras):
-                camera_info = self.asi.list_cameras()[i]
-                self.cameras.append({
-                    'index': i,
-                    'name': camera_info
-                })
-                self.log(f"  Camera {i}: {camera_info}")
+                try:
+                    camera_info = self.asi.list_cameras()[i]
+                    self.cameras.append({
+                        'index': i,
+                        'name': camera_info
+                    })
+                    self.log(f"  ✓ Camera {i}: {camera_info}")
+                except Exception as cam_err:
+                    self.log(f"  ⚠ Warning: Could not get info for camera {i}: {cam_err}")
             
+            self.log(f"Camera detection complete: {len(self.cameras)} camera(s) enumerated")
             return self.cameras
         
         except Exception as e:
-            self.log(f"ERROR detecting cameras: {e}")
+            self.log(f"ERROR during camera detection: {e}")
+            import traceback
+            self.log(f"Stack trace: {traceback.format_exc()}")
             return []
+    
+    def reconnect_camera_safe(self):
+        """
+        Safely reconnect to camera by re-detecting available cameras first.
+        This is necessary after disconnection (e.g., during off-peak hours) 
+        because camera indices may change.
+        Returns True if successful, False otherwise.
+        """
+        self.log("=== Safe Camera Reconnection ===")
+        
+        # Re-detect cameras to get current valid indices
+        self.log("Re-detecting cameras to find valid indices...")
+        detected = self.detect_cameras()
+        
+        if not detected:
+            self.log("✗ No cameras detected during reconnection attempt")
+            return False
+        
+        # Try to find camera by stored name (most reliable with multiple cameras)
+        target_index = None
+        
+        if self.camera_name:
+            self.log(f"Looking for camera by name: {self.camera_name}")
+            for cam in detected:
+                if self.camera_name in cam['name']:
+                    target_index = cam['index']
+                    self.log(f"✓ Found camera '{self.camera_name}' at new index {target_index}")
+                    break
+            
+            if target_index is None:
+                self.log(f"⚠ Warning: Could not find camera '{self.camera_name}' by name")
+        
+        # If we couldn't find by name, use the first available camera
+        if target_index is None:
+            target_index = detected[0]['index']
+            self.log(f"Using first available camera at index {target_index}: {detected[0]['name']}")
+        
+        # Update camera_index for future use
+        self.camera_index = target_index
+        
+        # Connect to the camera
+        return self.connect_camera(target_index)
     
     def connect_camera(self, camera_index=0):
         """Connect to a specific camera"""
+        self.log(f"=== Connecting to Camera (Index: {camera_index}) ===")
+        
         if not self.asi:
+            self.log("SDK not initialized, initializing now...")
             if not self.initialize_sdk():
+                self.log("Connection failed: SDK initialization failed")
                 return False
         
         try:
             if self.camera:
+                self.log("Existing camera connection detected, disconnecting first...")
                 self.disconnect_camera()
             
+            self.log(f"Opening camera at index {camera_index}...")
             self.camera = self.asi.Camera(camera_index)
             camera_info = self.camera.get_camera_property()
             
-            self.log(f"Connected to: {camera_info['Name']}")
+            # Store camera name for future reconnection
+            self.camera_name = camera_info['Name']
+            
+            # Save camera name to config for persistence across restarts
+            if self.config_callback:
+                self.config_callback('zwo_selected_camera_name', self.camera_name)
+                self.log(f"Saved camera name to config: {self.camera_name}")
+            
+            self.log(f"✓ Connected to camera: {camera_info['Name']}")
+            self.log(f"  Camera ID: {camera_info.get('CameraID', 'N/A')}")
             self.log(f"  Max Resolution: {camera_info['MaxWidth']}x{camera_info['MaxHeight']}")
             self.log(f"  Pixel Size: {camera_info['PixelSize']} µm")
             
@@ -181,9 +263,12 @@ class ZWOCamera:
             controls = self.camera.get_controls()
             self.log(f"  Available controls: {len(controls)}")
             
+            self.log("Configuring camera settings...")
             # Set initial camera settings
             self.camera.set_control_value(self.asi.ASI_GAIN, self.gain)
+            self.log(f"  Gain: {self.gain}")
             self.camera.set_control_value(self.asi.ASI_EXPOSURE, int(self.exposure_seconds * 1000000))
+            self.log(f"  Exposure: {self.exposure_seconds}s ({self.exposure_seconds * 1000}ms)")
             
             # Configure white balance based on mode
             if self.wb_mode == 'asi_auto':
@@ -226,6 +311,7 @@ class ZWOCamera:
             self.camera.set_image_type(self.asi.ASI_IMG_RAW8)
             
             # Initialize calibration manager
+            self.log("Initializing calibration manager...")
             self.calibration_manager = CameraCalibration(self.camera, self.asi, self.log)
             self.calibration_manager.update_settings(
                 exposure_seconds=self.exposure_seconds,
@@ -238,10 +324,15 @@ class ZWOCamera:
                 clipping_prevention=self.clipping_prevention
             )
             
+            self.log(f"✓ Camera connection successful")
+            if self.scheduled_capture_enabled:
+                self.log(f"Scheduled capture enabled: {self.scheduled_start_time} - {self.scheduled_end_time}")
             return True
         
         except Exception as e:
-            self.log(f"ERROR connecting to camera: {e}")
+            self.log(f"✗ ERROR connecting to camera: {e}")
+            import traceback
+            self.log(f"Stack trace: {traceback.format_exc()}")
             return False
     
     def _configure_camera(self):
@@ -302,7 +393,10 @@ class ZWOCamera:
         """Disconnect from camera gracefully (idempotent - safe to call multiple times)"""
         with self._cleanup_lock:
             if not self.camera:
+                self.log("Disconnect called but camera already disconnected")
                 return  # Already disconnected
+            
+            self.log("=== Disconnecting Camera ===")
             
             try:
                 # Stop capture first if active
@@ -312,23 +406,28 @@ class ZWOCamera:
                 
                 # Try to stop video capture if it was started
                 try:
+                    self.log("Stopping video capture...")
                     self.camera.stop_video_capture()
+                    self.log("Video capture stopped")
                 except Exception as e:
-                    # May not have been started, ignore
-                    pass
+                    self.log(f"Video capture stop skipped (may not have been started): {e}")
                 
                 # Close camera connection
                 try:
+                    self.log("Closing camera connection...")
                     self.camera.close()
-                    self.log("Camera disconnected gracefully")
+                    self.log("✓ Camera disconnected successfully")
                 except Exception as e:
-                    self.log(f"Warning during camera close: {e}")
+                    self.log(f"⚠ Warning during camera close: {e}")
                     
             except Exception as e:
-                self.log(f"Error disconnecting camera: {e}")
+                self.log(f"✗ ERROR during camera disconnect: {e}")
+                import traceback
+                self.log(f"Stack trace: {traceback.format_exc()}")
             finally:
                 # Always clear camera reference even if close failed
                 self.camera = None
+                self.log("Camera reference cleared")
     
     def capture_single_frame(self):
         """Capture a single frame and return image + metadata"""
@@ -483,7 +582,12 @@ class ZWOCamera:
     
     def capture_loop(self):
         """Background capture loop with automatic recovery and scheduled capture support"""
-        self.log("Capture loop started")
+        self.log("=== Capture Loop Started ===")
+        if self.scheduled_capture_enabled:
+            self.log(f"Scheduled capture enabled: {self.scheduled_start_time} - {self.scheduled_end_time}")
+        else:
+            self.log("Scheduled capture disabled: will run continuously")
+        
         consecutive_errors = 0
         max_reconnect_attempts = 5
         last_schedule_log = None  # Track last schedule status to avoid log spam
@@ -509,7 +613,8 @@ class ZWOCamera:
                         # Outside scheduled window - disconnect camera to reduce load
                         current_status = "outside_window"
                         if last_schedule_log != current_status:
-                            self.log(f"Outside scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Disconnecting camera...")
+                            self.log(f"⏸ Outside scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time})")
+                            self.log("Entering off-peak mode: disconnecting camera to reduce hardware load...")
                             last_schedule_log = current_status
                             
                             # Disconnect camera to reduce load during off-peak hours
@@ -520,10 +625,12 @@ class ZWOCamera:
                                     self.is_capturing = False
                                     
                                     # Disconnect camera gracefully
+                                    self.log("Stopping video capture for off-peak disconnect...")
                                     self.camera.stop_video_capture()
+                                    self.log("Closing camera connection...")
                                     self.camera.close()
                                     self.camera = None
-                                    self.log("Camera disconnected during off-peak hours")
+                                    self.log("✓ Camera disconnected for off-peak hours (reducing hardware load)")
                                     
                                     # Restore capturing flag for reconnection logic
                                     self.is_capturing = was_capturing
@@ -538,7 +645,8 @@ class ZWOCamera:
                     else:
                         # Within window - reconnect camera if needed
                         if last_schedule_log == "outside_window":
-                            self.log(f"Entered scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time}). Reconnecting camera...")
+                            self.log(f"▶ Entered scheduled capture window ({self.scheduled_start_time} - {self.scheduled_end_time})")
+                            self.log("Transitioning to active capture mode: reconnecting camera...")
                             last_schedule_log = "inside_window"
                             
                             # Update UI status
@@ -547,11 +655,13 @@ class ZWOCamera:
                             
                             # Reconnect camera for scheduled window
                             if not self.camera:
-                                if not self.connect_camera(self.camera_index):
-                                    self.log("ERROR: Failed to reconnect camera for scheduled window")
+                                self.log("Attempting to reconnect camera (re-detecting cameras)...")
+                                if not self.reconnect_camera_safe():
+                                    self.log("✗ ERROR: Failed to reconnect camera for scheduled window")
+                                    self.log("Will retry in 5 seconds...")
                                     time.sleep(5)  # Wait before retrying
                                     continue
-                                self.log("Camera reconnected for scheduled captures")
+                                self.log("✓ Camera reconnected successfully for scheduled captures")
                     
                     # Check if camera is still connected
                     if not self.camera:
@@ -580,42 +690,59 @@ class ZWOCamera:
                 
                 except Exception as e:
                     consecutive_errors += 1
-                    self.log(f"ERROR in capture loop: {e} (attempt {consecutive_errors}/{max_reconnect_attempts})")
+                    self.log(f"✗ ERROR in capture loop: {e}")
+                    self.log(f"Consecutive errors: {consecutive_errors}/{max_reconnect_attempts}")
+                    import traceback
+                    self.log(f"Stack trace: {traceback.format_exc()}")
                     
                     # Try to recover from camera disconnect
                     if consecutive_errors <= max_reconnect_attempts:
-                        self.log(f"Attempting to reconnect camera...")
+                        self.log(f"Initiating reconnection attempt {consecutive_errors}/{max_reconnect_attempts}...")
                         try:
                             # Clean up existing camera first
                             if self.camera:
+                                self.log("Cleaning up existing camera connection...")
                                 try:
                                     self.camera.stop_video_capture()
-                                except:
-                                    pass
+                                    self.log("Stopped video capture")
+                                except Exception as stop_err:
+                                    self.log(f"Video capture already stopped: {stop_err}")
                                 try:
                                     self.camera.close()
-                                except:
-                                    pass
+                                    self.log("Closed camera")
+                                except Exception as close_err:
+                                    self.log(f"Camera already closed: {close_err}")
                                 finally:
                                     self.camera = None
+                                    self.log("Camera reference cleared")
                             
-                            # Reinitialize camera
+                            # Reinitialize camera using safe reconnection
+                            self.log("Waiting 0.5s before reconnection attempt...")
                             time.sleep(0.5)  # Brief delay before reconnecting
-                            self.camera = self.asi.Camera(self.camera_index)
-                            self._configure_camera()
-                            self.log("Camera reconnected successfully")
-                            consecutive_errors = 0  # Reset counter on successful reconnection
-                            time.sleep(1.0)
-                            continue
+                            
+                            # Use safe reconnection method that re-detects cameras
+                            if self.reconnect_camera_safe():
+                                self.log("✓ Camera reconnected successfully")
+                                consecutive_errors = 0  # Reset counter on successful reconnection
+                                self.log("Waiting 1s before resuming capture...")
+                                time.sleep(1.0)
+                                continue
+                            else:
+                                raise Exception("Failed to reconnect camera")
                         except Exception as reconnect_error:
-                            self.log(f"Reconnection failed: {reconnect_error}")
+                            self.log(f"✗ Reconnection attempt failed: {reconnect_error}")
+                            import traceback
+                            self.log(f"Stack trace: {traceback.format_exc()}")
                             # Exponential backoff: 2, 4, 8, 16, 32 seconds
                             backoff_time = min(2 ** consecutive_errors, 32)
-                            self.log(f"Waiting {backoff_time}s before retry...")
+                            self.log(f"Using exponential backoff: waiting {backoff_time}s before retry {consecutive_errors + 1}/{max_reconnect_attempts}...")
                             time.sleep(backoff_time)
                     else:
                         # Max attempts reached - stop capture
-                        self.log(f"ERROR: Maximum reconnection attempts ({max_reconnect_attempts}) reached. Stopping capture.")
+                        self.log(f"✗ CRITICAL: Maximum reconnection attempts ({max_reconnect_attempts}) reached")
+                        self.log("Camera appears to be disconnected or unresponsive")
+                        self.log("Stopping capture loop. Manual intervention required.")
+                        self.log("Troubleshooting: 1) Check USB cable, 2) Check camera power, 3) Check USB drivers, 4) Restart application")
                         self.is_capturing = False
                         # Notify via callback that capture failed
                         if hasattr(self, 'on_error_callback') and self.on_error_callback:

@@ -56,6 +56,14 @@ def setup_logging():
     
     Log location: %LOCALAPPDATA%\ASIOverlayWatchDog\Logs\watchdog.log
     """
+    # CRITICAL: Silence noisy third-party loggers FIRST
+    # These libraries spam DEBUG messages that pollute our logs
+    for logger_name in ['urllib3', 'PIL', 'requests', 
+                       'urllib3.connectionpool', 'PIL.PngImagePlugin']:
+        noisy_logger = logging.getLogger(logger_name)
+        noisy_logger.setLevel(logging.CRITICAL)  # Only log critical errors
+        noisy_logger.propagate = False  # Don't send to root logger
+    
     # Get log directory
     log_dir = get_log_dir()
     log_file = os.path.join(log_dir, 'watchdog.log')

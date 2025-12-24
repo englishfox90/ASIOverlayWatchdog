@@ -45,27 +45,27 @@ class AppLogger:
     
     def _setup_file_logging(self):
         """Set up rotating file handler for 7-day logs"""
-        # Create logger (use root logger to catch all messages)
+        # CRITICAL: Completely silence third-party loggers FIRST
+        # Set to CRITICAL (50) - only log fatal errors, nothing else
+        for logger_name in ['urllib3', 'PIL', 'requests', 
+                           'urllib3.connectionpool', 'PIL.PngImagePlugin']:
+            third_party_logger = logging.getLogger(logger_name)
+            third_party_logger.setLevel(logging.CRITICAL)  # Highest level - silence everything
+            third_party_logger.propagate = False  # Don't let messages bubble up
+        
+        # Create dedicated logger for our app (not root logger)
         self.file_logger = logging.getLogger('ASIOverlayWatchDog')
         self.file_logger.setLevel(logging.DEBUG)
         
         # Prevent propagation to root logger to avoid duplicate messages
-        # (main.py sets up root logger via logging_config.py)
         self.file_logger.propagate = False
         
-        # Check if handlers already exist (prevent duplicates on re-import)
-        # Remove any existing watchdog.log handlers to avoid conflicts
+        # Remove any existing handlers to avoid duplicates
         for handler in list(self.file_logger.handlers):
-            if hasattr(handler, 'baseFilename') and 'watchdog.log' in str(handler.baseFilename):
-                self.file_logger.removeHandler(handler)
-                handler.close()
+            self.file_logger.removeHandler(handler)
+            handler.close()
         
-        # If there are still other handlers, just use the first one
-        if self.file_logger.handlers:
-            self.file_handler = self.file_logger.handlers[0]
-            return
-        
-        # Daily rotating file handler (keeps last 7 days)
+        # Always create our own file handler
         log_file = self.log_dir / 'watchdog.log'
         handler = logging.handlers.TimedRotatingFileHandler(
             log_file,
@@ -75,8 +75,9 @@ class AppLogger:
             encoding='utf-8'
         )
         
-        # Format: 2025-01-15 14:32:15 - INFO - Message
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        # Format: [2025-12-22 18:30:43] INFO - Message
+        formatter = logging.Formatter('[%(asctime)s] %(levelname)-8s - %(message)s', 
+                                     datefmt='%Y-%m-%d %H:%M:%S')
         handler.setFormatter(formatter)
         
         self.file_logger.addHandler(handler)
