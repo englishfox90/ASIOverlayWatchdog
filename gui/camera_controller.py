@@ -70,17 +70,21 @@ class CameraController:
                     self.app.root.after(0, lambda: self._on_detection_complete([], "No cameras detected. Check USB connection."))
                     return
                 
-                app_logger.info(f"Listing {num_cameras} camera(s) by index (non-invasive detection)...")
+                app_logger.info(f"Enumerating {num_cameras} camera(s) using SDK list_cameras() API...")
                 camera_list = []
                 
-                # CRITICAL: Do NOT open cameras during detection - this interrupts active captures!
-                # Instead, just list by index. User will see full name after selecting and starting.
+                # CRITICAL: Use asi.list_cameras() which retrieves camera info WITHOUT opening them!
+                # This prevents interference with cameras already in use by other applications
                 for i in range(num_cameras):
-                    camera_list.append(f"Camera {i}")
-                    app_logger.info(f"✓ Camera {i} available")
+                    try:
+                        camera_name = asi.list_cameras()[i]
+                        camera_list.append(f"{camera_name} (Index: {i})")
+                        app_logger.info(f"✓ Camera {i}: {camera_name}")
+                    except Exception as cam_error:
+                        app_logger.warning(f"⚠ Could not retrieve name for camera {i}: {cam_error}")
+                        camera_list.append(f"Camera {i}")
                 
-                app_logger.info("ℹ Camera names will be displayed after connection (prevents interference)")
-                app_logger.info("ℹ Select camera index for the pier camera you want to use")
+                app_logger.info(f"✓ Camera detection complete: {len(camera_list)} camera(s) listed safely")
                 
                 if camera_list:
                     app_logger.info(f"✓ Camera detection complete: {len(camera_list)} camera(s) found")
