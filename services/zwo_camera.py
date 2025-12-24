@@ -404,13 +404,9 @@ class ZWOCamera:
                     self.log("Stopping active capture before disconnect...")
                     self.stop_capture()
                 
-                # Try to stop video capture if it was started
-                try:
-                    self.log("Stopping video capture...")
-                    self.camera.stop_video_capture()
-                    self.log("Video capture stopped")
-                except Exception as e:
-                    self.log(f"Video capture stop skipped (may not have been started): {e}")
+                # Note: We use snapshot mode (start_exposure/get_data_after_exposure)
+                # NOT video mode (start_video_capture/get_video_data), so no need to stop video capture
+                # Calling stop_video_capture when not in video mode can cause undefined behavior
                 
                 # Close camera connection
                 try:
@@ -625,8 +621,7 @@ class ZWOCamera:
                                     self.is_capturing = False
                                     
                                     # Disconnect camera gracefully
-                                    self.log("Stopping video capture for off-peak disconnect...")
-                                    self.camera.stop_video_capture()
+                                    # Note: We use snapshot mode, not video mode - no need to stop_video_capture
                                     self.log("Closing camera connection...")
                                     self.camera.close()
                                     self.camera = None
@@ -702,11 +697,7 @@ class ZWOCamera:
                             # Clean up existing camera first
                             if self.camera:
                                 self.log("Cleaning up existing camera connection...")
-                                try:
-                                    self.camera.stop_video_capture()
-                                    self.log("Stopped video capture")
-                                except Exception as stop_err:
-                                    self.log(f"Video capture already stopped: {stop_err}")
+                                # Note: We use snapshot mode, not video mode - no need to stop_video_capture
                                 try:
                                     self.camera.close()
                                     self.log("Closed camera")
@@ -751,11 +742,9 @@ class ZWOCamera:
         finally:
             # Ensure camera is properly stopped on all exit paths (normal, error, or thread interrupt)
             self.log("Capture loop exiting - cleaning up...")
-            if self.camera:
-                try:
-                    self.camera.stop_video_capture()
-                except Exception as e:
-                    self.log(f"Error stopping video capture in cleanup: {e}")
+            # Note: We use snapshot mode (start_exposure/get_data_after_exposure)
+            # NOT video mode (start_video_capture/get_video_data)
+            # Camera cleanup is handled by disconnect_camera() which is called by stop_capture()
         
         self.log("Capture loop stopped")
     
