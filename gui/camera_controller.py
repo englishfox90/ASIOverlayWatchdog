@@ -70,35 +70,17 @@ class CameraController:
                     self.app.root.after(0, lambda: self._on_detection_complete([], "No cameras detected. Check USB connection."))
                     return
                 
-                app_logger.info(f"Enumerating {num_cameras} camera(s)...")
+                app_logger.info(f"Listing {num_cameras} camera(s) by index (non-invasive detection)...")
                 camera_list = []
+                
+                # CRITICAL: Do NOT open cameras during detection - this interrupts active captures!
+                # Instead, just list by index. User will see full name after selecting and starting.
                 for i in range(num_cameras):
-                    cam = None
-                    try:
-                        app_logger.debug(f"Opening camera {i} to retrieve properties...")
-                        cam = asi.Camera(i)
-                        info = cam.get_camera_property()
-                        camera_name = f"{info['Name']} (ID: {info['CameraID']})"
-                        camera_list.append(camera_name)
-                        app_logger.info(f"✓ Camera {i}: {camera_name}")
-                        app_logger.debug(f"  Resolution: {info['MaxWidth']}x{info['MaxHeight']}, Pixel Size: {info['PixelSize']}µm")
-                    except Exception as cam_error:
-                        # Check if camera is already in use by another application
-                        if "in use" in str(cam_error).lower() or "already opened" in str(cam_error).lower():
-                            app_logger.info(f"ℹ Camera {i} is already in use by another application (skipping)")
-                        else:
-                            app_logger.warning(f"⚠ Error accessing camera {i}: {cam_error}")
-                            import traceback
-                            app_logger.debug(f"Stack trace: {traceback.format_exc()}")
-                    finally:
-                        # CRITICAL: Always close camera immediately after reading properties
-                        # This prevents interfering with cameras already connected to other apps
-                        if cam is not None:
-                            try:
-                                cam.close()
-                                app_logger.debug(f"Camera {i} closed safely")
-                            except Exception as close_error:
-                                app_logger.debug(f"Note: Camera {i} close returned: {close_error}")
+                    camera_list.append(f"Camera {i}")
+                    app_logger.info(f"✓ Camera {i} available")
+                
+                app_logger.info("ℹ Camera names will be displayed after connection (prevents interference)")
+                app_logger.info("ℹ Select camera index for the pier camera you want to use")
                 
                 if camera_list:
                     app_logger.info(f"✓ Camera detection complete: {len(camera_list)} camera(s) found")
@@ -300,13 +282,16 @@ class CameraController:
             self.app.first_image_posted_to_discord = False  # Reset flag for new capture session
             self.app.start_capture_button.config(state='disabled', cursor='')
             self.app.stop_capture_button.config(state='normal', cursor='hand2')
-            self.app.camera_status_var.set("Capturing...")
+            
+            # Show camera name in status (retrieved during connection)
+            camera_name = getattr(self.zwo_camera, 'camera_name', f'Camera {self.app.selected_camera_index}')
+            self.app.camera_status_var.set(f"Capturing - {camera_name}")
             self.set_camera_status_dot('capturing')
             
             # Schedule Discord periodic updates with initial message
             self.app.output_manager.schedule_discord_periodic(send_initial=True)
             
-            app_logger.info("✓ Camera capture started successfully")
+            app_logger.info(f"✓ Camera capture started successfully: {camera_name}")
             
         except Exception as e:
             self.app.is_capturing = False
