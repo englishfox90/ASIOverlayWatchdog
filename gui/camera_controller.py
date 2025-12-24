@@ -148,12 +148,26 @@ class CameraController:
                 self.app.selected_camera_index = 0
                 app_logger.debug("Selected first camera by default")
             
-            # Try to restore previously selected camera
+            # Try to restore previously selected camera (prefer name match for stability)
+            saved_camera_name = self.app.config.get('zwo_selected_camera_name', '')
             saved_index = self.app.config.get('zwo_selected_camera', 0)
-            if saved_index < len(camera_list):
+            
+            # First try to match by name (most reliable with multiple cameras)
+            matched_by_name = False
+            if saved_camera_name:
+                for idx, camera in enumerate(camera_list):
+                    if saved_camera_name == camera:  # Exact match: "ASI676MC (Index: 0)"
+                        self.app.camera_combo.current(idx)
+                        self.app.selected_camera_index = idx
+                        app_logger.info(f"✓ Restored camera by name: {saved_camera_name}")
+                        matched_by_name = True
+                        break
+            
+            # Fallback to index if name match fails (handles camera list changes)
+            if not matched_by_name and saved_index < len(camera_list):
                 self.app.camera_combo.current(saved_index)
                 self.app.selected_camera_index = saved_index
-                app_logger.info(f"Restored previous camera selection: index {saved_index}")
+                app_logger.info(f"Restored camera by index: {saved_index} ({camera_list[saved_index]})")
             
             if camera_list:
                 self.app.start_capture_button.config(state='normal', cursor='hand2')
