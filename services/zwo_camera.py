@@ -142,6 +142,43 @@ class ZWOCamera:
             self.log(f"Stack trace: {traceback.format_exc()}")
             return False
     
+    def reset_sdk_completely(self):
+        """
+        Completely reset the SDK state (nuclear option).
+        Use this when SDK gets into an inconsistent state.
+        Returns True if successful, False otherwise.
+        """
+        self.log("=== Complete SDK Reset ===")
+        
+        try:
+            # Close camera if connected
+            if self.camera:
+                self.log("Disconnecting camera before SDK reset...")
+                self.disconnect_camera()
+            
+            # Clear SDK reference
+            self.log("Clearing SDK reference...")
+            self.asi = None
+            
+            # Wait for cleanup
+            import time
+            time.sleep(1.0)
+            
+            # Reinitialize SDK
+            self.log("Reinitializing SDK...")
+            if not self.initialize_sdk():
+                self.log("✗ SDK reinitialization failed")
+                return False
+            
+            self.log("✓ SDK reset complete")
+            return True
+            
+        except Exception as e:
+            self.log(f"✗ ERROR during SDK reset: {e}")
+            import traceback
+            self.log(f"Stack trace: {traceback.format_exc()}")
+            return False
+    
     def detect_cameras(self):
         """Detect connected ZWO cameras"""
         self.log("=== Starting Camera Detection ===")
@@ -194,13 +231,27 @@ class ZWOCamera:
         """
         self.log("=== Safe Camera Reconnection ===")
         
-        # Re-detect cameras to get current valid indices
+        # First attempt: Normal reconnection
         self.log("Re-detecting cameras to find valid indices...")
         detected = self.detect_cameras()
         
         if not detected:
             self.log("✗ No cameras detected during reconnection attempt")
-            return False
+            self.log("Attempting SDK reinitialization as fallback...")
+            
+            # Try reinitializing SDK to clear stale state
+            self.asi = None
+            if not self.initialize_sdk():
+                self.log("✗ SDK reinitialization failed")
+                return False
+            
+            # Try detection again after SDK reset
+            detected = self.detect_cameras()
+            if not detected:
+                self.log("✗ No cameras detected even after SDK reset")
+                return False
+            else:
+                self.log("✓ Cameras detected after SDK reset")
         
         # Try to find camera by stored name (most reliable with multiple cameras)
         target_index = None
@@ -224,8 +275,41 @@ class ZWOCamera:
         # Update camera_index for future use
         self.camera_index = target_index
         
-        # Connect to the camera
-        return self.connect_camera(target_index)
+        # Attempt to connect to the camera
+        self.log(f"Attempting to connect to camera at index {target_index}...")
+        connection_success = self.connect_camera(target_index)
+        
+        # If connection failed, try complete SDK reset as last resort
+        if not connection_success:
+            self.log("⚠ Initial connection failed, attempting complete SDK reset...")
+            if self.reset_sdk_completely():
+                self.log("Retrying camera detection after SDK reset...")
+                detected = self.detect_cameras()
+                if detected:
+                    # Find camera again after reset
+                    target_index = None
+                    if self.camera_name:
+                        for cam in detected:
+                            if self.camera_name in cam['name']:
+                                target_index = cam['index']
+                                break
+                    if target_index is None:
+                        target_index = detected[0]['index']
+                    
+                    self.camera_index = target_index
+                    self.log(f"Retrying connection to camera at index {target_index}...")
+                    connection_success = self.connect_camera(target_index)
+                    
+                    if connection_success:
+                        self.log("✓ Connection successful after SDK reset")
+                    else:
+                        self.log("✗ Connection still failed after SDK reset")
+                else:
+                    self.log("✗ No cameras detected after SDK reset")
+            else:
+                self.log("✗ SDK reset failed")
+        
+        return connection_success
     
     def connect_camera(self, camera_index=0):
         """Connect to a specific camera"""
@@ -242,8 +326,27 @@ class ZWOCamera:
                 self.log("Existing camera connection detected, disconnecting first...")
                 self.disconnect_camera()
             
+            # Add a small delay to allow SDK cleanup after disconnect
+            # This helps prevent "Invalid ID" errors when reconnecting
+            import time
+            time.sleep(0.2)
+            
             self.log(f"Opening camera at index {camera_index}...")
-            self.camera = self.asi.Camera(camera_index)
+            
+            # Try to open the camera with retry logic for transient SDK errors
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    self.camera = self.asi.Camera(camera_index)
+                    break  # Success - exit retry loop
+                except Exception as e:
+                    if attempt < max_attempts:
+                        self.log(f"⚠ Attempt {attempt}/{max_attempts} failed: {e}")
+                        self.log(f"Waiting 0.5s before retry...")
+                        time.sleep(0.5)
+                    else:
+                        # Final attempt failed - re-raise the exception
+                        raise
             camera_info = self.camera.get_camera_property()
             
             # Store camera name for future reconnection
@@ -364,6 +467,27 @@ class ZWOCamera:
             self.log(f"✗ ERROR connecting to camera: {e}")
             import traceback
             self.log(f"Stack trace: {traceback.format_exc()}")
+            
+            # Add diagnostic information for "Invalid ID" errors
+            if "Invalid ID" in str(e):
+                self.log("=== Diagnostic Information ===")
+                self.log(f"Attempted camera index: {camera_index}")
+                self.log("This error typically occurs when:")
+                self.log("  1. Camera was not properly closed by another process")
+                self.log("  2. SDK is in an inconsistent state")
+                self.log("  3. Camera index changed (hot plug event)")
+                self.log("Recommended action: Try stopping/restarting the application")
+                
+                # Try to get current camera list for diagnostics
+                try:
+                    num_cameras = self.asi.get_num_cameras()
+                    self.log(f"Current SDK state: {num_cameras} camera(s) reported by SDK")
+                    listed_cameras = self.asi.list_cameras()
+                    for idx, name in enumerate(listed_cameras):
+                        self.log(f"  Camera {idx}: {name}")
+                except Exception as diag_err:
+                    self.log(f"  Could not query camera list for diagnostics: {diag_err}")
+            
             return False
     
     def _configure_camera(self):
