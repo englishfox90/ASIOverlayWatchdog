@@ -19,14 +19,16 @@ class WeatherService:
     - Downloads weather icons
     """
     
-    def __init__(self, api_key, location, units='metric'):
+    def __init__(self, api_key, location, units='metric', latitude=None, longitude=None):
         """
         Initialize weather service
         
         Args:
             api_key: OpenWeatherMap API key
-            location: City name (e.g., "London", "London,GB")
+            location: City name fallback (e.g., "London", "London,GB")
             units: Temperature units ('metric', 'imperial', 'standard')
+            latitude: Direct latitude coordinate (preferred over location)
+            longitude: Direct longitude coordinate (preferred over location)
         """
         self.api_key = api_key
         self.location = location
@@ -38,26 +40,44 @@ class WeatherService:
         self.cache_time = None
         self.cache_duration = 600  # 10 minutes (free tier: 1000 calls/day = ~1 call/90s)
         
-        # Coordinates (resolved from city name)
+        # Coordinates - use provided values if valid, otherwise resolve from city name
         self.lat = None
         self.lon = None
         
+        # Set coordinates directly if provided and valid
+        if latitude is not None and longitude is not None:
+            try:
+                lat_float = float(latitude) if isinstance(latitude, str) else latitude
+                lon_float = float(longitude) if isinstance(longitude, str) else longitude
+                if -90 <= lat_float <= 90 and -180 <= lon_float <= 180:
+                    self.lat = lat_float
+                    self.lon = lon_float
+                    app_logger.info(f"Weather using direct coordinates: ({self.lat}, {self.lon})")
+            except (ValueError, TypeError):
+                pass  # Invalid coordinates, will fall back to location lookup
+        
     def is_configured(self):
         """Check if weather service is properly configured"""
-        return bool(self.api_key and self.location)
+        # Configured if we have API key AND (coordinates OR location)
+        has_coords = self.lat is not None and self.lon is not None
+        has_location = bool(self.location)
+        return bool(self.api_key and (has_coords or has_location))
     
     def resolve_location(self):
         """
         Convert city name to coordinates using OpenWeatherMap geocoding
+        Only needed if coordinates weren't provided directly.
         
         Returns:
             bool: True if successful, False otherwise
         """
-        if not self.is_configured():
-            return False
+        # If coordinates already set (from constructor), no need to resolve
+        if self.lat is not None and self.lon is not None:
+            return True
         
-        if self.lat and self.lon:
-            return True  # Already resolved
+        # Need location to resolve
+        if not self.api_key or not self.location:
+            return False
         
         try:
             # Use current weather API with city name (built-in geocoding)

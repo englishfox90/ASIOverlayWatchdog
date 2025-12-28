@@ -440,6 +440,10 @@ class SettingsTab:
                 bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
                 width=12, anchor='w').pack(side='left')
         
+        # OpenWeatherMap label
+        tk.Label(api_row, text="(OpenWeatherMap)", font=FONTS['tiny'],
+                bg=COLORS['bg_card'], fg=COLORS['text_muted']).pack(side='right', padx=(5, 0))
+        
         if not hasattr(self.app, 'weather_api_key_var'):
             self.app.weather_api_key_var = tk.StringVar()
         api_entry = ttk.Entry(api_row, textvariable=self.app.weather_api_key_var,
@@ -455,7 +459,7 @@ class SettingsTab:
                                    bootstyle="primary-round-toggle")
         show_btn.pack(side='left')
         
-        # === Row 3: Location (full width) ===
+        # === Row 3: Location OR Coordinates (all on one row) ===
         loc_row = tk.Frame(container, bg=COLORS['bg_card'])
         loc_row.pack(fill='x', pady=(0, 2))
         
@@ -466,15 +470,39 @@ class SettingsTab:
         if not hasattr(self.app, 'weather_location_var'):
             self.app.weather_location_var = tk.StringVar()
         location_entry = ttk.Entry(loc_row, textvariable=self.app.weather_location_var,
-                                   font=FONTS['body'], style='Dark.TEntry')
-        location_entry.pack(side='left', fill='x', expand=True)
+                                   font=FONTS['body'], style='Dark.TEntry', width=18)
+        location_entry.pack(side='left', padx=(0, 10))
         
-        # Location hint
+        # Separator
+        tk.Label(loc_row, text="or", font=FONTS['small'],
+                bg=COLORS['bg_card'], fg=COLORS['text_muted']).pack(side='left', padx=(0, 10))
+        
+        # Latitude
+        tk.Label(loc_row, text="Lat:", font=FONTS['small'],
+                bg=COLORS['bg_card'], fg=COLORS['text_muted']).pack(side='left')
+        
+        if not hasattr(self.app, 'weather_lat_var'):
+            self.app.weather_lat_var = tk.StringVar()
+        lat_entry = ttk.Entry(loc_row, textvariable=self.app.weather_lat_var,
+                              font=FONTS['body'], style='Dark.TEntry', width=10)
+        lat_entry.pack(side='left', padx=(2, 8))
+        
+        # Longitude
+        tk.Label(loc_row, text="Lon:", font=FONTS['small'],
+                bg=COLORS['bg_card'], fg=COLORS['text_muted']).pack(side='left')
+        
+        if not hasattr(self.app, 'weather_lon_var'):
+            self.app.weather_lon_var = tk.StringVar()
+        lon_entry = ttk.Entry(loc_row, textvariable=self.app.weather_lon_var,
+                              font=FONTS['body'], style='Dark.TEntry', width=10)
+        lon_entry.pack(side='left', padx=(2, 0))
+        
+        # Hint row
         hint_row = tk.Frame(container, bg=COLORS['bg_card'])
         hint_row.pack(fill='x', pady=(0, 8))
         tk.Label(hint_row, text="", width=12).pack(side='left')  # Spacer
         tk.Label(hint_row, 
-                text="e.g., London, London,GB, New York,US",
+                text="City name (e.g., London,GB) or coordinates • Lat/Lon preferred if both provided",
                 font=FONTS['tiny'], bg=COLORS['bg_card'],
                 fg=COLORS['text_muted']).pack(side='left')
         

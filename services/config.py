@@ -101,7 +101,9 @@ DEFAULT_CONFIG = {
     "weather": {
         "enabled": False,  # Set to True when API key and location configured
         "api_key": "",
-        "location": "",  # City name, e.g., "London" or "London,GB"
+        "location": "",  # City name fallback, e.g., "London" or "London,GB"
+        "latitude": "",  # Preferred: direct coordinates (e.g., "51.5074")
+        "longitude": "",  # Preferred: direct coordinates (e.g., "-0.1278")
         "units": "metric",  # "metric", "imperial", or "standard"
         "cache_duration": 600  # Cache weather data for 10 minutes
     },

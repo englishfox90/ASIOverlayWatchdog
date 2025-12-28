@@ -681,14 +681,25 @@ Supports:
             weather_config = self.config.get('weather', {})
             api_key = weather_config.get('api_key', '')
             location = weather_config.get('location', '')
+            latitude = weather_config.get('latitude', '')
+            longitude = weather_config.get('longitude', '')
             units = weather_config.get('units', 'metric')
             
-            if api_key and location:
-                self.weather_service = WeatherService(api_key, location, units)
-                app_logger.info(f"Weather service initialized: {location}, {units} units")
+            # Need API key AND (coordinates OR location)
+            has_coords = bool(latitude and longitude)
+            has_location = bool(location)
+            
+            if api_key and (has_coords or has_location):
+                self.weather_service = WeatherService(
+                    api_key, location, units,
+                    latitude=latitude if latitude else None,
+                    longitude=longitude if longitude else None
+                )
+                loc_info = f"({latitude}, {longitude})" if has_coords else location
+                app_logger.info(f"Weather service initialized: {loc_info}, {units} units")
             else:
                 self.weather_service = None
-                app_logger.debug("Weather service not configured (missing API key or location)")
+                app_logger.debug("Weather service not configured (missing API key or location/coordinates)")
         except Exception as e:
             app_logger.error(f"Failed to initialize weather service: {e}")
             self.weather_service = None
@@ -765,22 +776,47 @@ Supports:
             # Get current settings from UI
             api_key = self.weather_api_key_var.get().strip()
             location = self.weather_location_var.get().strip()
+            latitude = self.weather_lat_var.get().strip() if hasattr(self, 'weather_lat_var') else ''
+            longitude = self.weather_lon_var.get().strip() if hasattr(self, 'weather_lon_var') else ''
             units = self.weather_units_var.get()
             
             if not api_key:
                 self.weather_status_var.set("❌ Error: API key required")
                 return
             
-            if not location:
-                self.weather_status_var.set("❌ Error: Location required")
+            # Need either coordinates or location
+            has_coords = bool(latitude and longitude)
+            has_location = bool(location)
+            
+            if not has_coords and not has_location:
+                self.weather_status_var.set("❌ Error: Coordinates or location required")
                 return
+            
+            # Validate coordinates if provided
+            if has_coords:
+                try:
+                    lat_float = float(latitude)
+                    lon_float = float(longitude)
+                    if not (-90 <= lat_float <= 90):
+                        self.weather_status_var.set("❌ Error: Latitude must be -90 to 90")
+                        return
+                    if not (-180 <= lon_float <= 180):
+                        self.weather_status_var.set("❌ Error: Longitude must be -180 to 180")
+                        return
+                except ValueError:
+                    self.weather_status_var.set("❌ Error: Invalid coordinate format")
+                    return
             
             self.weather_status_var.set("🔄 Testing connection...")
             self.root.update_idletasks()
             
             # Test connection
             from services.weather import WeatherService
-            test_service = WeatherService(api_key, location, units)
+            test_service = WeatherService(
+                api_key, location, units,
+                latitude=latitude if latitude else None,
+                longitude=longitude if longitude else None
+            )
             weather_data = test_service.fetch_weather()
             
             if weather_data:

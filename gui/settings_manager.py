@@ -171,11 +171,21 @@ class SettingsManager:
             self.app.weather_api_key_var.set(weather_config.get('api_key', ''))
         if hasattr(self.app, 'weather_location_var'):
             self.app.weather_location_var.set(weather_config.get('location', ''))
+        if hasattr(self.app, 'weather_lat_var'):
+            self.app.weather_lat_var.set(weather_config.get('latitude', ''))
+        if hasattr(self.app, 'weather_lon_var'):
+            self.app.weather_lon_var.set(weather_config.get('longitude', ''))
         if hasattr(self.app, 'weather_units_var'):
             self.app.weather_units_var.set(weather_config.get('units', 'metric'))
         if hasattr(self.app, 'weather_status_var'):
             if weather_config.get('enabled'):
-                self.app.weather_status_var.set(f"✓ Configured: {weather_config.get('location', '')}")
+                # Show coords if available, otherwise location
+                lat = weather_config.get('latitude', '')
+                lon = weather_config.get('longitude', '')
+                if lat and lon:
+                    self.app.weather_status_var.set(f"✓ Configured: ({lat}, {lon})")
+                else:
+                    self.app.weather_status_var.set(f"✓ Configured: {weather_config.get('location', '')}")
             else:
                 self.app.weather_status_var.set("Not configured")
         
@@ -272,10 +282,34 @@ class SettingsManager:
         # Save weather settings
         api_key = self.app.weather_api_key_var.get() if hasattr(self.app, 'weather_api_key_var') else ''
         location = self.app.weather_location_var.get() if hasattr(self.app, 'weather_location_var') else ''
+        latitude = self.app.weather_lat_var.get() if hasattr(self.app, 'weather_lat_var') else ''
+        longitude = self.app.weather_lon_var.get() if hasattr(self.app, 'weather_lon_var') else ''
+        
+        # Validate coordinates if provided
+        lat_valid, lon_valid = False, False
+        if latitude:
+            try:
+                lat_float = float(latitude)
+                lat_valid = -90 <= lat_float <= 90
+            except ValueError:
+                lat_valid = False
+        if longitude:
+            try:
+                lon_float = float(longitude)
+                lon_valid = -180 <= lon_float <= 180
+            except ValueError:
+                lon_valid = False
+        
+        # Enabled if API key AND (valid coords OR location)
+        has_valid_coords = lat_valid and lon_valid
+        is_enabled = bool(api_key and (has_valid_coords or location))
+        
         self.app.config.set('weather', {
-            'enabled': bool(api_key and location),
+            'enabled': is_enabled,
             'api_key': api_key,
             'location': location,
+            'latitude': latitude if lat_valid else '',
+            'longitude': longitude if lon_valid else '',
             'units': self.app.weather_units_var.get() if hasattr(self.app, 'weather_units_var') else 'metric',
             'cache_duration': 600
         })
