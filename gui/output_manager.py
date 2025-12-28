@@ -10,6 +10,7 @@ from services.logger import app_logger
 from services.web_output import WebOutputServer
 from services.rtsp_output import RTSPStreamServer
 from services.discord_alerts import DiscordAlerts
+from services.camera_utils import is_within_scheduled_window
 from .theme import SPACING
 
 
@@ -127,27 +128,46 @@ class OutputManager:
                 app_logger.info("Starting RTSP server automatically (configured as output mode)")
                 self.apply_output_mode()
     
-    def push_to_output_servers(self, image_path, processed_img):
-        """Push processed image to active output servers"""
+    def push_to_output_servers(self, image_path, processed_img=None):
+        """Push processed image to active output servers
+        
+        Args:
+            image_path: Path to the saved image file
+            processed_img: Optional PIL Image. If None, will load from image_path
+        """
         try:
-            # Convert PIL Image to bytes for web server
-            if self.web_server and self.web_server.running:
-                img_bytes = io.BytesIO()
-                # Use configured output format and quality for web server
-                output_format = self.app.output_format_var.get().upper()
-                if output_format == 'JPG' or output_format == 'JPEG':
-                    quality = int(round(self.app.jpg_quality_var.get()))
-                    processed_img.save(img_bytes, format='JPEG', quality=quality, optimize=True)
-                    content_type = 'image/jpeg'
-                else:
-                    processed_img.save(img_bytes, format='PNG', optimize=True)
-                    content_type = 'image/png'
-                
-                self.web_server.update_image(image_path, img_bytes.getvalue(), content_type=content_type)
+            # Load image from file if not provided (PERF-001: avoid keeping in memory)
+            if processed_img is None:
+                from PIL import Image
+                processed_img = Image.open(image_path)
+                should_close = True
+            else:
+                should_close = False
             
-            # Push PIL Image to RTSP server
-            if self.rtsp_server and self.rtsp_server.running:
-                self.rtsp_server.update_image(processed_img)
+            try:
+                # Convert PIL Image to bytes for web server
+                if self.web_server and self.web_server.running:
+                    img_bytes = io.BytesIO()
+                    # Use configured output format and quality for web server
+                    output_format = self.app.output_format_var.get().upper()
+                    if output_format == 'JPG' or output_format == 'JPEG':
+                        quality = int(round(self.app.jpg_quality_var.get()))
+                        processed_img.save(img_bytes, format='JPEG', quality=quality, optimize=True)
+                        content_type = 'image/jpeg'
+                    else:
+                        processed_img.save(img_bytes, format='PNG', optimize=True)
+                        content_type = 'image/png'
+                    
+                    self.web_server.update_image(image_path, img_bytes.getvalue(), content_type=content_type)
+                
+                # Push PIL Image to RTSP server
+                if self.rtsp_server and self.rtsp_server.running:
+                    self.rtsp_server.update_image(processed_img)
+            finally:
+                # Close image if we loaded it
+                if should_close and hasattr(processed_img, 'close'):
+                    processed_img.close()
+                    
         except Exception as e:
             app_logger.error(f"Error pushing to output servers: {e}")
     
@@ -368,6 +388,16 @@ This is a test alert with your current configuration.""",
         if not self.discord_alerts:
             app_logger.warning("Discord alerts not initialized")
             return
+        
+        # Check if scheduled capture is enabled and we're in off-peak hours
+        scheduled_enabled = self.app.config.get('scheduled_capture_enabled', False)
+        if scheduled_enabled:
+            scheduled_start = self.app.config.get('scheduled_start_time', '17:00')
+            scheduled_end = self.app.config.get('scheduled_end_time', '09:00')
+            
+            if not is_within_scheduled_window(scheduled_enabled, scheduled_start, scheduled_end):
+                app_logger.info("Skipping Discord periodic update - outside scheduled capture hours")
+                return
         
         # Get latest image if available
         image_path = None

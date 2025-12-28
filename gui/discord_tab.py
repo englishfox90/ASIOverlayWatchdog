@@ -3,7 +3,7 @@ Discord alerts tab - webhook configuration and alert settings
 """
 import tkinter as tk
 import ttkbootstrap as ttk
-from .theme import COLORS, FONTS, SPACING
+from .theme import COLORS, FONTS, SPACING, create_scrollable_frame
 from . import theme
 
 
@@ -22,15 +22,19 @@ class DiscordTab:
     
     def create_ui(self):
         """Create Discord tab UI"""
-        # Main container
-        container = tk.Frame(self.tab, bg=COLORS['bg_primary'])
+        # Create scrollable frame for content
+        scroll_container, scrollable_content = create_scrollable_frame(self.tab)
+        scroll_container.pack(fill='both', expand=True)
+        
+        # Content frame with padding
+        container = tk.Frame(scrollable_content, bg=COLORS['bg_primary'])
         container.pack(fill='both', expand=True,
                       padx=SPACING['card_margin_x'],
                       pady=SPACING['card_margin_y'])
         
         # Card 1: Connection Settings
         connection_card = theme.create_card(container, "Connection Settings")
-        connection_card.master.pack(fill='x', pady=(0, SPACING['section_gap']))
+        connection_card.master.pack(fill='both', expand=True, pady=(0, SPACING['section_gap']))
         
         # Webhook URL
         url_frame = tk.Frame(connection_card, bg=COLORS['bg_card'])

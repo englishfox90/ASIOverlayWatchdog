@@ -4,6 +4,7 @@ File system watcher using watchdog
 import os
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from .processor import process_image
@@ -15,10 +16,13 @@ class ImageFileHandler(FileSystemEventHandler):
     """Handler for image file events"""
     
     def __init__(self, config, on_image_processed=None):
+        super().__init__()  # Initialize parent class
         self.config = config
         self.on_image_processed = on_image_processed
         self.processing = set()  # Track files being processed
         self.lock = threading.Lock()
+        # Thread pool for concurrent file processing (REL-002 fix)
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="file_processor")
     
     def update_status(self, message):
         """Update status via callback"""
@@ -133,8 +137,10 @@ class ImageFileHandler(FileSystemEventHandler):
     def shutdown(self):
         """Cleanup thread pool (called when stopping watcher)"""
         try:
-            self.executor.shutdown(wait=False)
-            app_logger.debug("File processing thread pool shut down")
+            if hasattr(self, 'executor') and self.executor:
+                # Use wait=True to allow current tasks to complete gracefully
+                self.executor.shutdown(wait=True)
+                app_logger.debug("File processing thread pool shut down")
         except Exception as e:
             app_logger.debug(f"Error shutting down thread pool: {e}")
 

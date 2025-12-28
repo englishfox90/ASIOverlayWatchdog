@@ -60,13 +60,37 @@ class CameraCalibration:
         
         for attempt in range(max_attempts):
             try:
-                # Capture test frame
-                self.camera.start_video_capture()
-                data = self.camera.capture_video_frame()
-                self.camera.stop_video_capture()
+                # REL-003: Use snapshot mode (consistent with capture_loop)
+                # Start exposure
+                self.camera.start_exposure()
+                
+                # Wait for exposure to complete
+                import time
+                timeout = self.exposure_seconds + 2.0
+                start_time = time.time()
+                
+                while time.time() - start_time < timeout:
+                    status = self.camera.get_exposure_status()
+                    if status == self.asi.ASI_EXP_SUCCESS:
+                        break
+                    elif status == self.asi.ASI_EXP_FAILED:
+                        raise Exception("Calibration exposure failed")
+                    time.sleep(0.05)
+                
+                # Check for timeout
+                if time.time() - start_time >= timeout:
+                    raise Exception(f"Calibration exposure timeout ({timeout}s)")
+                
+                # Get the captured data
+                data = self.camera.get_data_after_exposure()
+                
+                # Get camera dimensions for reshaping
+                camera_info = self.camera.get_camera_property()
+                width = camera_info['MaxWidth']
+                height = camera_info['MaxHeight']
                 
                 # Convert to numpy array for brightness calculation
-                img_array = np.array(data)
+                img_array = np.frombuffer(data, dtype=np.uint8).reshape((height, width))
                 
                 # Calculate brightness
                 brightness = calculate_brightness(

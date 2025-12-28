@@ -22,12 +22,15 @@ ASIOverlayWatchDog/
 │       ├── overlay_list.py # Treeview-based list
 │       ├── text_editor.py # Text overlay editor
 │       └── preview.py     # Canvas preview
-├── services/               # Core processing modules (6 files)
+├── services/               # Core processing modules
 │   ├── config.py          # JSON persistence with merge pattern
 │   ├── logger.py          # Thread-safe queue-based logging
 │   ├── processor.py       # Image overlay engine
 │   ├── watcher.py         # Directory monitoring
-│   ├── zwo_camera.py      # ZWO ASI SDK wrapper
+│   ├── zwo_camera.py      # ZWO ASI camera core (675 lines - exception granted)
+│   ├── camera_connection.py # SDK init, detection, connect/reconnect
+│   ├── camera_calibration.py # Auto-exposure algorithms
+│   ├── camera_utils.py    # Shared camera utilities
 │   └── cleanup.py         # Disk space management
 ├── docs/                   # Documentation (6 files)
 ├── archive/                # Legacy code (gui_modern.py, gui_new.py)

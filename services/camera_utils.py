@@ -132,3 +132,99 @@ def check_clipping(img_array, clipping_threshold=245):
     is_clipping = clipped_percent > 5.0  # Consider clipping if more than 5% of pixels are clipped
     
     return clipped_percent, is_clipping
+
+
+def debayer_raw_image(raw_data, width, height, bayer_pattern='BGGR'):
+    """
+    Convert raw Bayer data to RGB using OpenCV (or fallback).
+    
+    Args:
+        raw_data: Raw byte data from camera
+        width: Image width
+        height: Image height
+        bayer_pattern: Bayer pattern string (RGGB, BGGR, GRBG, GBRG)
+        
+    Returns:
+        RGB numpy array (height, width, 3)
+    """
+    img_array = np.frombuffer(raw_data, dtype=np.uint8).reshape((height, width))
+    
+    try:
+        import cv2
+        bayer_map = {
+            'RGGB': cv2.COLOR_BayerRG2RGB,
+            'BGGR': cv2.COLOR_BayerBG2RGB,
+            'GRBG': cv2.COLOR_BayerGR2RGB,
+            'GBRG': cv2.COLOR_BayerGB2RGB
+        }
+        bayer_code = bayer_map.get(bayer_pattern, cv2.COLOR_BayerBG2RGB)
+        return cv2.cvtColor(img_array, bayer_code)
+    except ImportError:
+        return simple_debayer_rggb(img_array, width, height)
+
+
+def apply_white_balance(img_rgb, wb_config):
+    """
+    Apply software white balance adjustments to RGB image.
+    
+    Args:
+        img_rgb: RGB numpy array
+        wb_config: Dict with white balance settings
+        
+    Returns:
+        Adjusted RGB numpy array
+    """
+    if not wb_config:
+        return img_rgb
+    
+    wb_mode = wb_config.get('mode', 'asi_auto')
+    
+    try:
+        import cv2
+        
+        if wb_mode == 'gray_world':
+            from services.color_balance import apply_gray_world_robust
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            img_bgr = apply_gray_world_robust(
+                img_bgr,
+                low_pct=wb_config.get('gray_world_low_pct', 5),
+                high_pct=wb_config.get('gray_world_high_pct', 95)
+            )
+            return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        
+        elif wb_mode == 'manual' and wb_config.get('apply_software_gains', False):
+            from services.color_balance import apply_manual_gains
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            img_bgr = apply_manual_gains(
+                img_bgr,
+                red_gain=wb_config.get('manual_red_gain', 1.0),
+                blue_gain=wb_config.get('manual_blue_gain', 1.0)
+            )
+            return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    
+    except ImportError:
+        pass
+    
+    return img_rgb
+
+
+def calculate_image_stats(img_array):
+    """
+    Calculate image statistics for metadata.
+    
+    Args:
+        img_array: Image as numpy array
+        
+    Returns:
+        Dict with brightness, min, max, std_dev, percentiles
+    """
+    return {
+        'mean': np.mean(img_array),
+        'median': np.median(img_array),
+        'min': int(np.min(img_array)),
+        'max': int(np.max(img_array)),
+        'std_dev': np.std(img_array),
+        'p25': np.percentile(img_array, 25),
+        'p75': np.percentile(img_array, 75),
+        'p95': np.percentile(img_array, 95),
+    }

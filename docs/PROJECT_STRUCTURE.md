@@ -26,8 +26,16 @@ Backend processing and hardware integration:
 - `logger.py` - Thread-safe queue-based logging system
 - `processor.py` - Image overlay engine (PIL Image input/file path dual support)
 - `watcher.py` - watchdog-based directory monitoring with file stability checks
-- `zwo_camera.py` - ZWO ASI SDK wrapper with debayering and auto-exposure
 - `cleanup.py` - Disk space management (never deletes folders, only files)
+
+**ZWO Camera Modules** (split for maintainability):
+- `zwo_camera.py` (675 lines) - Core ZWOCamera class, capture loop (**exception to 550-line limit**)
+- `camera_connection.py` (505 lines) - SDK initialization, camera detection, connection/reconnection
+- `camera_calibration.py` (330 lines) - Auto-exposure calibration algorithms
+- `camera_utils.py` (230 lines) - Shared utilities (debayer, white balance, stats)
+
+> ⚠️ **Note**: `zwo_camera.py` exceeds the 550-line limit due to tightly-coupled capture loop state.
+> **New camera functionality must be added to companion modules, not zwo_camera.py.**
 
 **Design Philosophy**: Reusable, testable modules with clear single responsibilities
 
@@ -141,6 +149,11 @@ Potential areas for expansion:
 4. **Preserve backward compatibility**: Old `config.json` files should still load
 5. **Test both capture modes**: Changes should work for watch and camera modes
 6. **Update documentation**: Keep README files current with code changes
+7. **Respect 550-line limit**: Files should not exceed 550 lines (soft target: 500)
+8. **Do NOT inflate zwo_camera.py**: New camera logic goes in companion modules:
+   - Connection/SDK → `camera_connection.py`
+   - Calibration/auto-exposure → `camera_calibration.py`
+   - Utilities/helpers → `camera_utils.py`
 
 ## Version History
 

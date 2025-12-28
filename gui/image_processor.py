@@ -19,9 +19,20 @@ class ImageProcessor:
         self.app = app        # Preview caching to avoid re-reading from disk
         self.preview_cache = None
         self.preview_cache_path = None
-        # Cache for overlay images
+        # Cache for overlay images with size limit
         self.overlay_image_cache = {}
-        self.preview_update_pending = False    
+        self.overlay_cache_max_size = 10  # Limit cache to 10 images
+        self.preview_update_pending = False
+    
+    def _cleanup_overlay_cache(self):
+        """Remove oldest entries from overlay cache if it exceeds size limit"""
+        if len(self.overlay_image_cache) > self.overlay_cache_max_size:
+            # Remove excess entries (FIFO)
+            excess = len(self.overlay_image_cache) - self.overlay_cache_max_size
+            keys_to_remove = list(self.overlay_image_cache.keys())[:excess]
+            for key in keys_to_remove:
+                del self.overlay_image_cache[key]
+            app_logger.debug(f"Cleaned up overlay cache: removed {excess} entries")    
     def process_and_save_image(self, img, metadata):
         """Process image with overlays and save"""
         try:
@@ -54,9 +65,11 @@ class ImageProcessor:
                 from PIL import ImageEnhance
                 import numpy as np
                 
-                # Analyze image brightness
-                img_array = np.array(img.convert('L'))  # Convert to grayscale for analysis
+                # PERF-001: Analyze brightness using view (no copy)
+                gray_img = img.convert('L')  # Grayscale for analysis
+                img_array = np.asarray(gray_img)  # View, not copy
                 mean_brightness = np.mean(img_array)
+                del gray_img  # Release grayscale image early
                 
                 # Calculate adaptive enhancement factor
                 # Target brightness: 128 (mid-gray)
@@ -122,6 +135,14 @@ class ImageProcessor:
                 img.save(output_path, 'JPEG', quality=jpg_quality)
             
             self.app.last_processed_image = output_path
+            
+            # Clean up old preview image to prevent memory accumulation
+            if hasattr(self.app, 'preview_image') and self.app.preview_image:
+                try:
+                    del self.app.preview_image
+                except:
+                    pass
+            
             # Store the ORIGINAL image before brightness/saturation for preview
             # Preview will apply adjustments on top of this clean base
             if resize_percent < 100:
@@ -136,8 +157,11 @@ class ImageProcessor:
             
             app_logger.info(f"Saved: {os.path.basename(output_path)}")
             
-            # Push to output servers if active
-            self.app._push_to_output_servers(output_path, img)
+            # Push to output servers if active (read from saved file, not in-memory img)
+            self.app._push_to_output_servers(output_path)
+            
+            # Clean up the processed image object (we only need the file path now)
+            del img
             
             # Check if Discord periodic update should be sent
             self.app.check_discord_periodic_send(output_path)
@@ -145,6 +169,9 @@ class ImageProcessor:
             # Auto-refresh preview if enabled
             if self.app.auto_refresh_var.get():
                 self.app.root.after(0, lambda: self.refresh_preview(auto_fit=True))
+            
+            # Periodically cleanup overlay cache to prevent memory growth
+            self._cleanup_overlay_cache()
             
         except Exception as e:
             app_logger.error(f"Processing failed: {e}")
@@ -234,10 +261,21 @@ class ImageProcessor:
             new_size = (int(display_base.width * zoom), int(display_base.height * zoom))
             display_img = display_base.resize(new_size, Image.Resampling.LANCZOS)
             
+            # Clean up old preview photo to prevent memory leak
+            if hasattr(self.app, 'preview_photo') and self.app.preview_photo:
+                try:
+                    del self.app.preview_photo
+                except:
+                    pass
+            
             self.app.preview_photo = ImageTk.PhotoImage(display_img)
             self.app.preview_canvas.delete('all')
             self.app.preview_canvas.create_image(0, 0, anchor='nw', image=self.app.preview_photo)
             self.app.preview_canvas.config(scrollregion=self.app.preview_canvas.bbox('all'))
+            
+            # Clean up temporary images
+            del display_img
+            del display_base
         except Exception as e:
             app_logger.error(f"Preview refresh failed: {e}")
     
@@ -361,11 +399,21 @@ class ImageProcessor:
             # Resize to fit canvas
             preview_img.thumbnail((580, 380), Image.Resampling.LANCZOS)
             
+            # Clean up old overlay preview photo to prevent memory leak
+            if hasattr(self.app, 'overlay_preview_photo') and self.app.overlay_preview_photo:
+                try:
+                    del self.app.overlay_preview_photo
+                except:
+                    pass
+            
             # Display in canvas
             photo = ImageTk.PhotoImage(preview_img)
             self.app.overlay_preview_canvas.delete('all')
             self.app.overlay_preview_canvas.create_image(290, 190, image=photo, anchor='center')
             self.app.overlay_preview_photo = photo  # Keep reference
+            
+            # Clean up temporary image
+            del preview_img
             
         except Exception as e:
             app_logger.error(f"Preview update failed: {e}")

@@ -6,6 +6,7 @@ import os
 import threading
 from services.logger import app_logger
 from services.zwo_camera import ZWOCamera
+from .camera_settings import CameraSettings
 
 
 class CameraController:
@@ -197,93 +198,49 @@ class CameraController:
             app_logger.info(f"Selected camera: {selected_camera}")
             app_logger.info(f"Camera index: {self.app.selected_camera_index}")
             
-            # Get settings
+            # Get settings using CameraSettings dataclass (MAINT-002)
             sdk_path = self.app.sdk_path_var.get()
             app_logger.info(f"SDK path: {sdk_path}")
             
-            # Handle exposure unit conversion
-            exposure_value = self.app.exposure_var.get()
-            if self.app.exposure_unit_var.get() == 's':
-                exposure_ms = exposure_value * 1000.0
-            else:
-                exposure_ms = exposure_value
-            
-            gain = self.app.gain_var.get()
-            wb_r = self.app.wb_r_var.get()
-            wb_b = self.app.wb_b_var.get()
-            offset = self.app.offset_var.get()
-            flip_map = {'None': 0, 'Horizontal': 1, 'Vertical': 2, 'Both': 3}
-            flip = flip_map.get(self.app.flip_var.get(), 0)
-            interval = self.app.interval_var.get()
-            auto_exp = self.app.auto_exposure_var.get()
-            max_exp_sec = self.app.max_exposure_var.get()  # Already in seconds from UI
-            target_brightness = self.app.target_brightness_var.get()
-            bayer_pattern = self.app.bayer_pattern_var.get()
-            
-            # Log configuration
-            app_logger.info(f"Camera settings: Exposure={exposure_ms}ms, Gain={gain}, WB(R={wb_r}, B={wb_b})")
-            app_logger.info(f"  Auto-exposure: {auto_exp}, Max={max_exp_sec}s, Target brightness={target_brightness}")
-            app_logger.info(f"  Bayer pattern: {bayer_pattern}, Flip: {self.app.flip_var.get()}, Offset: {offset}")
-            app_logger.info(f"  Capture interval: {interval}s")
-            
-            # Load white balance config
-            wb_config = self.app.config.get('white_balance', {
-                'mode': 'asi_auto',
-                'manual_red_gain': 1.0,
-                'manual_blue_gain': 1.0,
-                'gray_world_low_pct': 5,
-                'gray_world_high_pct': 95
-            })
-            app_logger.info(f"White balance mode: {wb_config.get('mode', 'asi_auto')}")
-            
-            # Log schedule configuration
-            scheduled_enabled = self.app.config.get('scheduled_capture_enabled', False)
-            if scheduled_enabled:
-                scheduled_start = self.app.config.get('scheduled_start_time', '17:00')
-                scheduled_end = self.app.config.get('scheduled_end_time', '09:00')
-                app_logger.info(f"Scheduled capture enabled: {scheduled_start} - {scheduled_end}")
-            else:
-                app_logger.info("Scheduled capture disabled: continuous operation")
+            settings = CameraSettings.from_app(self.app)
+            settings.log_summary(app_logger)
             
             # Initialize camera
             app_logger.info("Initializing ZWOCamera instance...")
             
-            # Get saved camera name from config for multi-camera stability
-            saved_camera_name = self.app.config.get('zwo_selected_camera_name', None)
-            
             self.zwo_camera = ZWOCamera(
                 sdk_path=sdk_path,
                 camera_index=self.app.selected_camera_index,
-                exposure_sec=exposure_ms / 1000.0,  # Convert to seconds
-                gain=gain,
-                white_balance_r=wb_r,
-                white_balance_b=wb_b,
-                offset=offset,
-                flip=flip,
-                auto_exposure=auto_exp,
-                max_exposure_sec=max_exp_sec,  # Already in seconds
+                exposure_sec=settings.exposure_sec,
+                gain=settings.gain,
+                white_balance_r=settings.wb_r,
+                white_balance_b=settings.wb_b,
+                offset=settings.offset,
+                flip=settings.flip,
+                auto_exposure=settings.auto_exposure,
+                max_exposure_sec=settings.max_exposure_sec,
                 auto_wb=False,  # Legacy parameter, WB now controlled by wb_mode
-                wb_mode=wb_config.get('mode', 'asi_auto'),
-                wb_config=wb_config,
-                bayer_pattern=bayer_pattern,
-                scheduled_capture_enabled=self.app.config.get('scheduled_capture_enabled', False),
-                scheduled_start_time=self.app.config.get('scheduled_start_time', '17:00'),
-                scheduled_end_time=self.app.config.get('scheduled_end_time', '09:00'),
+                wb_mode=settings.wb_config.get('mode', 'asi_auto'),
+                wb_config=settings.wb_config,
+                bayer_pattern=settings.bayer_pattern,
+                scheduled_capture_enabled=settings.scheduled_capture_enabled,
+                scheduled_start_time=settings.scheduled_start_time,
+                scheduled_end_time=settings.scheduled_end_time,
                 status_callback=self.app.update_camera_status_for_schedule,
-                camera_name=saved_camera_name,
+                camera_name=settings.saved_camera_name,
                 config_callback=lambda key, value: self._save_camera_config(key, value)
             )
             
             # Set target brightness
-            self.zwo_camera.target_brightness = target_brightness
+            self.zwo_camera.target_brightness = settings.target_brightness
             
             app_logger.info(f"Connecting to camera at index {self.app.selected_camera_index}...")
             if not self.zwo_camera.connect_camera(self.app.selected_camera_index):
                 raise Exception("Failed to connect to camera (see above logs for details)")
             
             # Set capture interval
-            self.zwo_camera.set_capture_interval(interval)
-            app_logger.info(f"Set capture interval to {interval}s")
+            self.zwo_camera.set_capture_interval(settings.interval)
+            app_logger.info(f"Set capture interval to {settings.interval}s")
             
             # Set error callback for disconnect recovery
             self.zwo_camera.on_error_callback = self.on_camera_error
@@ -365,12 +322,14 @@ class CameraController:
     def on_camera_frame(self, img, metadata):
         """Callback when camera captures a frame"""
         try:
-            self.app.last_captured_image = img.copy()
+            # PERF-001: Store reference directly - image processor will work on it
+            # The mini preview will make its own small copy for display
+            self.app.last_captured_image = img
             
-            # Update live preview
+            # Update live preview (makes thumbnail copy internally)
             self.app.root.after(0, self.app.status_manager.update_mini_preview, img)
             
-            # Process image
+            # Process image - processor works on original, then we're done with it
             self.app.image_processor.process_and_save_image(img, metadata)
             
             # Increment counter

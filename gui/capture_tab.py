@@ -5,7 +5,7 @@ Production-polished UI with consistent dark theme styling
 import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.tooltip import ToolTip
-from .theme import COLORS, FONTS, SPACING, LAYOUT, configure_dark_input_styles, create_primary_button, create_secondary_button, create_destructive_button, create_card
+from .theme import COLORS, FONTS, SPACING, LAYOUT, configure_dark_input_styles, create_primary_button, create_secondary_button, create_destructive_button, create_card, create_scrollable_frame
 
 
 class CaptureTab:
@@ -26,9 +26,13 @@ class CaptureTab:
     
     def create_ui(self):
         """Create the capture tab UI with production polish"""
-        # Main container - full width with header-matched padding
-        container = tk.Frame(self.tab, bg=COLORS['bg_primary'])
-        container.pack(fill='both', expand=True, padx=16, pady=12)
+        # Create scrollable frame for content
+        scroll_container, scrollable_content = create_scrollable_frame(self.tab)
+        scroll_container.pack(fill='both', expand=True)
+        
+        # Content frame with padding
+        container = tk.Frame(scrollable_content, bg=COLORS['bg_primary'])
+        container.pack(fill='both', expand=True, padx=SPACING['card_margin_x'], pady=SPACING['card_margin_y'])
         
         # Mode selection - horizontal segmented control
         self.create_mode_selector(container)
@@ -66,7 +70,7 @@ class CaptureTab:
         self.camera_mode_btn.pack(side='left')
         
         # Pack the card container
-        mode_content.master.pack(fill='x', pady=(0, SPACING['section_gap']))
+        mode_content.master.pack(fill='both', expand=True, pady=(0, SPACING['section_gap']))
     
     def update_mode_button_styling(self):
         """Update mode button styling based on current mode (call after config load)"""
@@ -179,7 +183,7 @@ class CaptureTab:
         self.app.stop_watch_button.pack(side='left')
         
         # Pack the card container
-        watch_content.master.pack(fill='x', pady=(0, SPACING['section_gap']))
+        watch_content.master.pack(fill='both', expand=True, pady=(0, SPACING['section_gap']))
     
     def create_camera_section(self, parent):
         """Create ZWO camera settings section with 2-column grid layout"""
@@ -213,7 +217,7 @@ class CaptureTab:
         self.app.stop_capture_button.pack(side='left')
         
         # Pack the card container
-        camera_content.master.pack(fill='x', pady=(0, SPACING['section_gap']))
+        camera_content.master.pack(fill='both', expand=True, pady=(0, SPACING['section_gap']))
     
     def create_sdk_section(self, parent):
         """Create SDK path and camera detection section with inline status"""
@@ -295,11 +299,16 @@ class CaptureTab:
     def create_camera_params_grid(self, parent):
         """Create camera parameters in 2-column grid layout"""
         grid_container = tk.Frame(parent, bg=COLORS['bg_card'])
-        grid_container.pack(fill='x', pady=(SPACING['section_gap'], 0))
+        grid_container.pack(fill='both', expand=True, pady=(SPACING['section_gap'], 0))
+        
+        # Configure grid to be responsive
+        grid_container.grid_columnconfigure(0, weight=1, minsize=300)
+        grid_container.grid_columnconfigure(1, weight=1, minsize=300)
+        grid_container.grid_rowconfigure(0, weight=1)
         
         # Left column - Core Camera Controls
         left_col = tk.Frame(grid_container, bg=COLORS['bg_card'])
-        left_col.pack(side='left', fill='both', expand=True, padx=(0, 24))
+        left_col.grid(row=0, column=0, sticky='nsew', padx=(0, SPACING['element_gap']))
         
         # Exposure with unit selector
         exp_row = tk.Frame(left_col, bg=COLORS['bg_card'])
@@ -464,7 +473,7 @@ class CaptureTab:
         
         # Right column - Auto Exposure & White Balance
         right_col = tk.Frame(grid_container, bg=COLORS['bg_primary'])
-        right_col.pack(side='right', fill='both', expand=True)
+        right_col.grid(row=0, column=1, sticky='nsew', padx=(SPACING['element_gap'], 0))
         
         # Auto Exposure section
         auto_frame = tk.Frame(right_col, bg=COLORS['bg_primary'])

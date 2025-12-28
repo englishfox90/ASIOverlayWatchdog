@@ -5,7 +5,7 @@ Modern dark theme with consistent styling matching Capture tab
 import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.tooltip import ToolTip
-from .theme import COLORS, FONTS, SPACING, LAYOUT, configure_dark_input_styles, create_card, create_secondary_button, create_primary_button
+from .theme import COLORS, FONTS, SPACING, LAYOUT, configure_dark_input_styles, create_card, create_secondary_button, create_primary_button, create_scrollable_frame
 
 
 class SettingsTab:
@@ -24,30 +24,34 @@ class SettingsTab:
     
     def create_ui(self):
         """Create the settings tab UI with full-width layout"""
-        # Main container - full width with same margins as Capture tab
-        container = tk.Frame(self.tab, bg=COLORS['bg_primary'])
-        container.pack(fill='both', expand=True, 
-                      padx=SPACING['card_margin_x'], 
+        # Create scrollable frame for content
+        scroll_container, scrollable_content = create_scrollable_frame(self.tab)
+        scroll_container.pack(fill='both', expand=True)
+        
+        # Content frame with padding
+        container = tk.Frame(scrollable_content, bg=COLORS['bg_primary'])
+        container.pack(fill='both', expand=True,
+                      padx=SPACING['card_margin_x'],
                       pady=SPACING['card_margin_y'])
         
         # Output Mode Card - NEW: Select File/Webserver/RTSP streaming
         output_mode_card_frame = create_card(container, title="Output Mode")
-        output_mode_card_frame.master.pack(fill='x', pady=(0, SPACING['section_gap']))
+        output_mode_card_frame.master.pack(fill='both', expand=True, pady=(0, SPACING['section_gap']))
         self.create_output_mode_selector(output_mode_card_frame)
         
         # Weather Settings Card - NEW: OpenWeatherMap API integration
         weather_card = create_card(container, title="Weather Settings (Optional)")
-        weather_card.master.pack(fill='x', pady=(0, SPACING['section_gap']))
+        weather_card.master.pack(fill='both', expand=True, pady=(0, SPACING['section_gap']))
         self.create_weather_settings(weather_card)
         
         # Image Processing Card - full width
         processing_card = create_card(container, title="Image Processing")
-        processing_card.master.pack(fill='x', pady=(0, SPACING['section_gap']))
+        processing_card.master.pack(fill='both', expand=True, pady=(0, SPACING['section_gap']))
         self.create_processing_settings(processing_card)
         
         # Cleanup Settings Card - full width
         cleanup_card = create_card(container, title="Cleanup Settings")
-        cleanup_card.master.pack(fill='x', pady=(0, SPACING['section_gap']))
+        cleanup_card.master.pack(fill='both', expand=True, pady=(0, SPACING['section_gap']))
         self.create_cleanup_settings(cleanup_card)
         
         # Apply button - right-aligned with card edge

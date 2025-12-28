@@ -2,6 +2,7 @@
 Centralized theme configuration for ASIOverlayWatchDog
 All UI components should import from this module for consistent styling
 """
+import tkinter as tk
 import ttkbootstrap as ttk
 
 # ===== COLOR PALETTE =====
@@ -235,3 +236,61 @@ def create_card(parent, title=None):
                 height=1).pack(fill='x', pady=(8, 0))
     
     return content
+
+
+def create_scrollable_frame(parent):
+    """
+    Create a scrollable frame with vertical scrollbar for tab content.
+    
+    Args:
+        parent: Parent widget (typically the tab frame)
+    
+    Returns:
+        tuple: (container_frame, scrollable_content_frame)
+            - container_frame: The outer frame to pack into parent
+            - scrollable_content_frame: The inner frame where content should be added
+    """
+    # Container frame
+    container = ttk.Frame(parent)
+    
+    # Create canvas and scrollbar
+    canvas = tk.Canvas(container, bg=COLORS['bg_primary'], highlightthickness=0)
+    scrollbar = ttk.Scrollbar(container, orient='vertical', command=canvas.yview, bootstyle="round")
+    
+    # Create scrollable frame inside canvas
+    scrollable_frame = ttk.Frame(canvas)
+    
+    # Configure scrolling
+    def on_frame_configure(event=None):
+        canvas.configure(scrollregion=canvas.bbox('all'))
+    
+    def on_canvas_configure(event):
+        # When canvas is resized, make the inner frame match its width
+        canvas_width = event.width
+        canvas.itemconfig(canvas_window, width=canvas_width)
+    
+    scrollable_frame.bind('<Configure>', on_frame_configure)
+    canvas.bind('<Configure>', on_canvas_configure)
+    
+    canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor='nw')
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    # Pack canvas and scrollbar
+    canvas.pack(side='left', fill='both', expand=True)
+    scrollbar.pack(side='right', fill='y')
+    
+    # Enable mousewheel scrolling
+    def on_mousewheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+    
+    def bind_mousewheel(event):
+        canvas.bind_all('<MouseWheel>', on_mousewheel)
+    
+    def unbind_mousewheel(event):
+        canvas.unbind_all('<MouseWheel>')
+    
+    # Bind mousewheel only when mouse is over this canvas
+    canvas.bind('<Enter>', bind_mousewheel)
+    canvas.bind('<Leave>', unbind_mousewheel)
+    
+    return container, scrollable_frame

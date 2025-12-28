@@ -6,6 +6,7 @@ Provides endpoints for NINA and other remote applications to fetch latest frame.
 import os
 import io
 import json
+import hashlib
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -21,9 +22,31 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
     latest_image_path = None
     latest_image_data = None
     latest_image_content_type = 'image/jpeg'  # Default to JPEG
+    latest_image_etag = None  # PERF-002: ETag for caching support
     latest_metadata = {}
     server_start_time = None
     image_count = 0
+    
+    @classmethod
+    def update_image(cls, image_data: bytes, content_type: str, path: str = None, metadata: dict = None):
+        """
+        Update the latest image with ETag generation.
+        PERF-002: Centralized image update with caching support.
+        
+        Args:
+            image_data: Raw image bytes
+            content_type: MIME type (e.g., 'image/jpeg')
+            path: Optional file path for logging
+            metadata: Optional metadata dict
+        """
+        cls.latest_image_data = image_data
+        cls.latest_image_content_type = content_type
+        cls.latest_image_path = path
+        if metadata:
+            cls.latest_metadata = metadata
+        # Generate ETag from content hash for cache validation
+        cls.latest_image_etag = hashlib.md5(image_data).hexdigest()
+        cls.image_count += 1
     
     def log_message(self, format, *args):
         """Override to use our logger instead of stderr."""
@@ -61,22 +84,36 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         self.end_headers()
     
     def _serve_image(self):
-        """Serve the latest processed image."""
+        """Serve the latest processed image with ETag caching support."""
         if not self.latest_image_data:
             self.send_error(404, "No image available yet")
             return
         
         try:
+            # PERF-002: Check If-None-Match header for ETag-based caching
+            client_etag = self.headers.get('If-None-Match')
+            if client_etag and client_etag == self.latest_image_etag:
+                # Client has current version - return 304 Not Modified
+                self.send_response(304)
+                self.send_header("ETag", self.latest_image_etag)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                app_logger.debug(f"Served 304 Not Modified (ETag match)")
+                return
+            
             self.send_response(200)
             self.send_header("Content-Type", self.latest_image_content_type)
             self.send_header("Content-Length", len(self.latest_image_data))
-            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            # Include ETag for cache validation
+            if self.latest_image_etag:
+                self.send_header("ETag", self.latest_image_etag)
+            self.send_header("Cache-Control", "no-cache, must-revalidate")  # Allow conditional requests
             self.send_header("Pragma", "no-cache")
             self.send_header("Expires", "0")
             # CORS headers for cross-origin requests (portals, web apps)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, If-None-Match")
             self.end_headers()
             self.wfile.write(self.latest_image_data)
             app_logger.debug(f"Served image: {len(self.latest_image_data)} bytes ({self.latest_image_content_type})")
@@ -216,11 +253,13 @@ class WebOutputServer:
             return
         
         try:
-            ImageHTTPHandler.latest_image_path = image_path
-            ImageHTTPHandler.latest_image_data = image_data_bytes
-            ImageHTTPHandler.latest_image_content_type = content_type
-            ImageHTTPHandler.latest_metadata = metadata or {}
-            ImageHTTPHandler.image_count += 1
+            # PERF-002: Use centralized update method with ETag generation
+            ImageHTTPHandler.update_image(
+                image_data=image_data_bytes,
+                content_type=content_type,
+                path=image_path,
+                metadata=metadata
+            )
             app_logger.debug(f"Web server updated with new image: {os.path.basename(image_path)} ({len(image_data_bytes)} bytes, {content_type})")
         except Exception as e:
             app_logger.error(f"Error updating web server image: {e}")

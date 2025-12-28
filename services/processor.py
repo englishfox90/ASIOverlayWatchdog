@@ -3,9 +3,82 @@ Image processing and metadata parsing
 """
 import os
 import re
+import tempfile
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from services.logger import app_logger
+
+
+def is_safe_path(path: str) -> bool:
+    """
+    Check if path is safe (no directory traversal attacks).
+    SEC-003 fix: Prevents loading files from unintended directories.
+    
+    Args:
+        path: File path to validate
+        
+    Returns:
+        True if path is safe, False if potentially malicious
+    """
+    if not path:
+        return False
+    
+    # Allow special dynamic placeholders
+    if path == 'WEATHER_ICON':
+        return True
+    
+    # Normalize the path to resolve any . or .. components
+    normalized = os.path.normpath(path)
+    
+    # Check for directory traversal patterns
+    # After normpath, '..' should not appear in a safe path
+    if '..' in normalized:
+        return False
+    
+    return True
+
+
+def save_image_atomic(img, output_path: str, format_name: str, **save_kwargs) -> None:
+    """
+    Save image atomically to prevent corruption on crash/power loss.
+    REL-001 fix: Uses temp file + rename pattern for atomic writes.
+    
+    Args:
+        img: PIL Image to save
+        output_path: Final destination path
+        format_name: Image format (JPEG, PNG, etc.)
+        **save_kwargs: Additional arguments for PIL save()
+    """
+    output_dir = os.path.dirname(output_path)
+    
+    # Ensure output directory exists
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+    
+    # Create temp file in same directory for atomic rename
+    fd, temp_path = tempfile.mkstemp(
+        suffix='.tmp',
+        dir=output_dir if output_dir else '.',
+        prefix='.saving_'
+    )
+    
+    try:
+        os.close(fd)  # Close the file descriptor, PIL will reopen
+        
+        # Save to temp file
+        img.save(temp_path, format_name, **save_kwargs)
+        
+        # Atomic rename (os.replace is atomic on same filesystem)
+        os.replace(temp_path, output_path)
+        
+    except Exception:
+        # Clean up temp file on error
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass  # Best effort cleanup
+        raise
 
 
 def parse_sidecar_file(sidecar_path):
@@ -252,6 +325,11 @@ def add_image_overlay(base_img, overlay, image_cache=None, weather_service=None)
         image_path = overlay.get('image_path', '')
         if not image_path:
             print(f"Image overlay has no image_path: {overlay}")
+            return base_img
+        
+        # SEC-003: Validate path before loading (prevent directory traversal)
+        if not is_safe_path(image_path):
+            app_logger.warning(f"Blocked potentially unsafe image overlay path: {image_path}")
             return base_img
         
         # Handle dynamic weather icon
@@ -573,11 +651,11 @@ def process_image(image_path, config, metadata_dict=None):
         # Get output mode configuration
         output_mode = config.get('output', {}).get('mode', 'file')
         
-        # Save processed image with format-specific options
+        # Save processed image with format-specific options (REL-001: atomic writes)
         if output_format.upper() in ['JPG', 'JPEG']:
             # Convert RGBA to RGB for JPG (JPG doesn't support transparency)
             if processed_img.mode == 'RGBA':
-                # Create white background
+                # Create black background (better for astrophotography)
                 rgb_img = Image.new('RGB', processed_img.size, (0, 0, 0))
                 rgb_img.paste(processed_img, mask=processed_img.split()[3])  # Use alpha channel as mask
                 processed_img = rgb_img
@@ -585,9 +663,9 @@ def process_image(image_path, config, metadata_dict=None):
                 processed_img = processed_img.convert('RGB')
             
             jpg_quality = config.get('jpg_quality', 85)
-            processed_img.save(output_path, 'JPEG', quality=jpg_quality, optimize=True)
+            save_image_atomic(processed_img, output_path, 'JPEG', quality=jpg_quality, optimize=True)
         else:
-            processed_img.save(output_path)
+            save_image_atomic(processed_img, output_path, output_format.upper())
         
         # Return processed image and path for output mode handlers
         # processed_img is returned so webserver/RTSP can use it without reloading

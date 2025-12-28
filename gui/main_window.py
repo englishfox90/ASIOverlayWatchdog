@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import ttkbootstrap as ttk
 import os
+import gc
 from datetime import datetime
 
 from services.config import Config
@@ -79,10 +80,10 @@ class ModernOverlayApp:
         self.weather_service = None
         self._init_weather_service()
         
-        # Set window geometry
-        geometry = self.config.get('window_geometry', '1280x1300')
-        self.root.geometry(geometry)
-        self.root.minsize(1024, 1300)
+        # Set window geometry with validation
+        geometry = self.config.get('window_geometry', '1400x1300')
+        self._set_window_geometry(geometry)
+        self.root.minsize(1100, 1300)
         
         # Save geometry on close
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -133,6 +134,9 @@ class ModernOverlayApp:
         
         # Start status updates
         self.status_manager.update_status_header()
+        
+        # Start periodic garbage collection (every 5 minutes)
+        self.schedule_garbage_collection()
     
     def create_gui(self):
         """Create the modern tabbed GUI layout"""
@@ -244,6 +248,19 @@ Supports:
 • Automated cleanup"""
         
         messagebox.showinfo("About", about_text)
+    
+    def schedule_garbage_collection(self):
+        """Schedule periodic garbage collection to prevent memory leaks"""
+        try:
+            # Force garbage collection
+            collected = gc.collect()
+            if collected > 0:
+                app_logger.debug(f"Garbage collection: freed {collected} objects")
+        except Exception as e:
+            app_logger.debug(f"Garbage collection error: {e}")
+        finally:
+            # Schedule next collection in 5 minutes (300000 ms)
+            self.root.after(300000, self.schedule_garbage_collection)
     
     # ===== EVENT HANDLERS =====
     
@@ -676,6 +693,72 @@ Supports:
             app_logger.error(f"Failed to initialize weather service: {e}")
             self.weather_service = None
     
+    def _set_window_geometry(self, geometry):
+        """
+        Set window geometry with validation.
+        Centers the window if saved position is invalid or off-screen.
+        
+        Args:
+            geometry: Geometry string in format 'WIDTHxHEIGHT+X+Y' or 'WIDTHxHEIGHT'
+        """
+        try:
+            # Parse geometry string
+            if '+' in geometry or '-' in geometry:
+                # Has position info: WIDTHxHEIGHT+X+Y
+                size_part = geometry.split('+')[0].split('-')[0]
+                width, height = map(int, size_part.split('x'))
+                
+                # Extract x, y coordinates (handle negative positions)
+                parts = geometry.replace('-', '+-').split('+')
+                x = int(parts[1]) if len(parts) > 1 else 0
+                y = int(parts[2]) if len(parts) > 2 else 0
+            else:
+                # Only size: WIDTHxHEIGHT
+                width, height = map(int, geometry.split('x'))
+                x, y = None, None
+            
+            # Get screen dimensions
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            
+            # Validate dimensions
+            if width < 800 or height < 600:
+                app_logger.warning(f"Invalid window size {width}x{height}, using defaults")
+                width, height = 1280, 1300
+                x, y = None, None
+            
+            # Check if position is valid (title bar visible)
+            position_valid = True
+            if x is not None and y is not None:
+                # Check if window would be off-screen or title bar not visible
+                title_bar_height = 30  # Approximate title bar height
+                
+                if (x < -width + 100 or  # Too far left
+                    y < -title_bar_height or  # Title bar above screen
+                    x > screen_width - 100 or  # Too far right
+                    y > screen_height - title_bar_height):  # Too far down
+                    position_valid = False
+                    app_logger.info(f"Window position {x},{y} is off-screen, centering")
+            
+            # Set geometry
+            if x is None or y is None or not position_valid:
+                # Center the window
+                x = (screen_width - width) // 2
+                y = (screen_height - height) // 2
+                app_logger.debug(f"Centering window at {x},{y}")
+            
+            self.root.geometry(f"{width}x{height}+{x}+{y}")
+            
+        except (ValueError, IndexError) as e:
+            # Invalid geometry string, use defaults and center
+            app_logger.warning(f"Invalid geometry string '{geometry}': {e}")
+            width, height = 1280, 1300
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            x = (screen_width - width) // 2
+            y = (screen_height - height) // 2
+            self.root.geometry(f"{width}x{height}+{x}+{y}")
+    
     def test_weather_connection(self):
         """Test weather API connection and update status"""
         try:
@@ -791,7 +874,7 @@ Supports:
         """Delegate to output_manager"""
         self.output_manager.ensure_output_mode_started()
     
-    def _push_to_output_servers(self, image_path, processed_img):
+    def _push_to_output_servers(self, image_path, processed_img=None):
         """Delegate to output_manager"""
         self.output_manager.push_to_output_servers(image_path, processed_img)
     

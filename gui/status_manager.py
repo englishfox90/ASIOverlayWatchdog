@@ -86,15 +86,24 @@ class StatusManager:
     def update_mini_preview(self, img):
         """Update mini preview in header"""
         try:
+            # Clean up old image references to prevent memory leak
+            if hasattr(self.app, 'mini_preview_image') and self.app.mini_preview_image:
+                try:
+                    del self.app.mini_preview_image
+                except:
+                    pass
+            
             # Apply auto brightness if enabled
-            preview_img = img.copy()
+            # PERF-001: Only copy when we need to modify for brightness adjustment
             if self.app.auto_brightness_var.get():
                 from PIL import ImageEnhance
                 import numpy as np
                 
-                # Analyze brightness
-                img_array = np.array(preview_img.convert('L'))
+                # Analyze brightness using view (no copy) on grayscale conversion
+                gray_img = img.convert('L')
+                img_array = np.asarray(gray_img)  # View, not copy
                 mean_brightness = np.mean(img_array)
+                del gray_img  # Release grayscale image
                 target_brightness = 128
                 auto_factor = target_brightness / max(mean_brightness, 10)
                 auto_factor = max(0.5, min(auto_factor, 4.0))
@@ -103,16 +112,28 @@ class StatusManager:
                 manual_factor = self.app.brightness_var.get()
                 final_factor = auto_factor * manual_factor
                 
+                # Now we need a copy to apply brightness enhancement
+                preview_img = img.copy()
                 enhancer = ImageEnhance.Brightness(preview_img)
                 preview_img = enhancer.enhance(final_factor)
+            else:
+                # No brightness adjustment - work directly with original for thumbnail
+                preview_img = img
             
-            # Resize to fit
-            thumb = preview_img
+            # Resize to fit - thumbnail() modifies in-place, so copy if we haven't already
+            if preview_img is img:
+                thumb = img.copy()
+            else:
+                thumb = preview_img
             thumb.thumbnail((200, 200), Image.Resampling.LANCZOS)
             
             photo = ImageTk.PhotoImage(thumb)
             self.app.mini_preview_label.config(image=photo, text='')
             self.app.mini_preview_image = photo  # Keep reference
+            
+            # Clean up temporary images
+            del thumb
+            del preview_img
             
             # Update histogram
             self.update_histogram(img)
@@ -123,8 +144,8 @@ class StatusManager:
     def update_histogram(self, img):
         """Update RGB histogram"""
         try:
-            # Get RGB data
-            img_array = np.array(img)
+            # PERF-001: Use asarray for view (no copy) - histogram is read-only
+            img_array = np.asarray(img)
             
             # Calculate histograms
             hist_r = np.histogram(img_array[:, :, 0], bins=256, range=(0, 256))[0]
