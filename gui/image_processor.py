@@ -7,7 +7,7 @@ import random
 from datetime import datetime
 from tkinter import TclError
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageTk
-from services.processor import add_overlays
+from services.processor import add_overlays, auto_stretch_image
 from services.logger import app_logger
 import traceback
 
@@ -59,6 +59,12 @@ class ImageProcessor:
                 new_width = int(img.width * resize_percent / 100)
                 new_height = int(img.height * resize_percent / 100)
                 img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # Apply auto-stretch (MTF) if enabled - BEFORE brightness/saturation/overlays
+            auto_stretch_config = self.app.config.get('auto_stretch', {})
+            if auto_stretch_config.get('enabled', False):
+                img = auto_stretch_image(img, auto_stretch_config)
+                app_logger.debug("Applied auto-stretch to camera capture")
             
             # Apply auto brightness if enabled (with proper analysis)
             if auto_brightness:
