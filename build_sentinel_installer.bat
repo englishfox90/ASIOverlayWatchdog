@@ -85,7 +85,7 @@ echo   1. Test the installer
 echo   2. Distribute the installer to users
 echo.
 echo User data will be stored in:
-echo   %%LOCALAPPDATA%%\PFR\Sentinel
+echo   %%LOCALAPPDATA%%\PFRSentinel
 echo   (Config, logs with 7-day automatic rotation)
 echo.
 

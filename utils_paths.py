@@ -9,7 +9,7 @@ import sys
 try:
     from app_config import APP_DATA_FOLDER
 except ImportError:
-    APP_DATA_FOLDER = "PFR\\Sentinel"  # Fallback
+    APP_DATA_FOLDER = "PFRSentinel"  # Fallback
 
 
 def resource_path(relative_path):
