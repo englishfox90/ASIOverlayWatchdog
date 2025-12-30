@@ -9,7 +9,7 @@ APP_DISPLAY_NAME = "PFR Sentinel"  # Display name (shown to users)
 APP_SUBTITLE = "Live Camera Monitoring & Overlay System for Observatories"
 APP_DESCRIPTION = "Astrophotography image overlay and monitoring application"
 APP_AUTHOR = "Paul Fox-Reeks"
-APP_URL = "https://github.com/englishfox90/PFR-Sentinel"
+APP_URL = "https://github.com/englishfox90/PFRSentinel"
 
 # Directory names (used for AppData paths)
 APP_DATA_FOLDER = "PFRSentinel"  # %LOCALAPPDATA%\PFRSentinel
