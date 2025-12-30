@@ -262,15 +262,9 @@ class ImageOverlayEditor:
         try:
             # Create overlay_images directory if it doesn't exist
             if not self.overlay_images_dir:
-                # Get app data directory
-                try:
-                    import appdirs
-                    from app_config import APP_NAME, APP_AUTHOR
-                    data_dir = appdirs.user_data_dir(APP_NAME, APP_AUTHOR)
-                except ImportError:
-                    # Fallback if appdirs not available - use local directory
-                    print("Warning: appdirs module not found, using local storage")
-                    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "overlay_images")
+                # Get app data directory (consistent with config.py pattern)
+                from app_config import APP_DATA_FOLDER
+                data_dir = os.path.join(os.getenv('LOCALAPPDATA'), APP_DATA_FOLDER)
                 
                 self.overlay_images_dir = os.path.join(data_dir, "overlay_images")
             

@@ -1,5 +1,5 @@
 """
-Modern GUI package for AllSky Overlay Watchdog
+Modern GUI package for PFR Sentinel
 """
 from .main_window import ModernOverlayApp
 

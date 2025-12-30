@@ -156,6 +156,9 @@ class Config:
         
         self.config_path = config_path
         self.data = self.load()
+        
+        # Always attempt to clean up old ASIOverlayWatchDog directory if it exists
+        self._cleanup_old_directory()
     
     def _migrate_from_old_location(self, old_dir, new_dir, new_config_path):
         """Migrate config and data from old ASIOverlayWatchDog location to new PFR\\Sentinel location"""
@@ -187,6 +190,25 @@ class Config:
             # Don't migrate Images/ folder (can be large) or Logs/ (not critical)
             # User can manually copy if needed
             
+            # Update SDK path in migrated config if it points to old location
+            if os.path.exists(new_config_path):
+                try:
+                    with open(new_config_path, 'r') as f:
+                        import json
+                        migrated_config = json.load(f)
+                    
+                    sdk_path = migrated_config.get('sdk_path', '')
+                    if 'ASIOverlayWatchDog' in sdk_path:
+                        # Update to new PFRSentinel path
+                        new_sdk_path = sdk_path.replace('ASIOverlayWatchDog', 'PFRSentinel')
+                        migrated_config['sdk_path'] = new_sdk_path
+                        
+                        with open(new_config_path, 'w') as f:
+                            json.dump(migrated_config, f, indent=4)
+                        print(f"  ✓ Updated SDK path: {sdk_path} -> {new_sdk_path}")
+                except Exception as e:
+                    print(f"  ⚠ Could not update SDK path: {e}")
+            
             # Remove old directory after successful migration
             try:
                 shutil.rmtree(old_dir)
@@ -202,6 +224,21 @@ class Config:
             print(f"  {old_dir}")
             print(f"to:")
             print(f"  {new_dir}")
+    
+    def _cleanup_old_directory(self):
+        """Attempt to remove old ASIOverlayWatchDog directory if it still exists"""
+        import shutil
+        from services.logger import app_logger
+        
+        old_dir = os.path.join(os.getenv('LOCALAPPDATA'), 'ASIOverlayWatchDog')
+        if os.path.exists(old_dir):
+            try:
+                shutil.rmtree(old_dir)
+                app_logger.info(f"Cleaned up old directory: {old_dir}")
+            except PermissionError as e:
+                app_logger.warning(f"Could not remove old directory (files may be in use): {old_dir}")
+            except Exception as e:
+                app_logger.warning(f"Could not remove old directory {old_dir}: {e}")
     
     def load(self):
         """Load configuration from JSON file or return defaults"""

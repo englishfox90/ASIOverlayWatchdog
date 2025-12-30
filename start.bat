@@ -1,7 +1,7 @@
 @echo off
-REM AllSky Overlay Watchdog Startup Script
+REM PFR Sentinel Startup Script
 
-echo Starting AllSky Overlay Watchdog...
+echo Starting PFR Sentinel...
 echo.
 
 REM Check if virtual environment exists
