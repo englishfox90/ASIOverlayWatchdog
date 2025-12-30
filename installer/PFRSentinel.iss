@@ -20,7 +20,7 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autopf}\{#MyAppName}
+DefaultDirName={autopf}\PFRSentinel
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 ; Output directory for installer (absolute path to avoid nesting)
