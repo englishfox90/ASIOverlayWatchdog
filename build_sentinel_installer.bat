@@ -21,7 +21,7 @@ echo [2/2] Creating installer...
 
 REM Sync version from version.py to version.iss
 echo Synchronizing version...
-python update_version.py
+python scripts\update_version.py
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Version synchronization failed!
     pause
