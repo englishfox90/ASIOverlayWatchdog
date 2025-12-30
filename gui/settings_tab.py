@@ -227,41 +227,96 @@ class SettingsTab:
         grid.columnconfigure(1, weight=1)
         
         row = 0
-        tk.Label(grid, text="Host:", font=FONTS['body'],
-                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
-                width=LAYOUT['label_width'], anchor='w').grid(
-            row=row, column=0, sticky='w', pady=(0, SPACING['row_gap']))
         
-        if not hasattr(self.app, 'webserver_host_var'):
-            self.app.webserver_host_var = tk.StringVar(value='127.0.0.1')
-        host_entry = ttk.Entry(grid, textvariable=self.app.webserver_host_var,
-                              font=FONTS['body'], style='Dark.TEntry', width=20)
-        host_entry.grid(row=row, column=1, sticky='w', pady=(0, SPACING['row_gap']))
-        
-        row += 1
-        tk.Label(grid, text="Port:", font=FONTS['body'],
-                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
-                width=LAYOUT['label_width'], anchor='w').grid(
-            row=row, column=0, sticky='w', pady=(0, SPACING['row_gap']))
-        
-        if not hasattr(self.app, 'webserver_port_var'):
-            self.app.webserver_port_var = tk.IntVar(value=8080)
-        port_spin = ttk.Spinbox(grid, from_=1024, to=65535,
-                               textvariable=self.app.webserver_port_var,
-                               font=FONTS['body'], style='Dark.TSpinbox', width=10)
-        port_spin.grid(row=row, column=1, sticky='w', pady=(0, SPACING['row_gap']))
-        
-        row += 1
+        # Image Path (always visible)
         tk.Label(grid, text="Image Path:", font=FONTS['body'],
                 bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
                 width=LAYOUT['label_width'], anchor='w').grid(
-            row=row, column=0, sticky='w')
+            row=row, column=0, sticky='w', pady=(0, SPACING['row_gap']))
         
         if not hasattr(self.app, 'webserver_path_var'):
             self.app.webserver_path_var = tk.StringVar(value='/latest')
         path_entry = ttk.Entry(grid, textvariable=self.app.webserver_path_var,
                               font=FONTS['body'], style='Dark.TEntry', width=20)
-        path_entry.grid(row=row, column=1, sticky='w')
+        path_entry.grid(row=row, column=1, sticky='w', pady=(0, SPACING['row_gap']))
+        
+        row += 1
+        
+        # Advanced Settings toggle
+        if not hasattr(self.app, 'webserver_advanced_var'):
+            self.app.webserver_advanced_var = tk.BooleanVar(value=False)
+        
+        advanced_check = ttk.Checkbutton(
+            grid, 
+            text="⚙️ Show Advanced Settings (IP & Port)",
+            variable=self.app.webserver_advanced_var,
+            command=self._toggle_webserver_advanced,
+            bootstyle="primary-round-toggle"
+        )
+        advanced_check.grid(row=row, column=0, columnspan=2, sticky='w', pady=(SPACING['element_gap'], SPACING['row_gap']))
+        
+        row += 1
+        
+        # Advanced settings frame (hidden by default)
+        self.webserver_advanced_frame = tk.Frame(grid, bg=COLORS['bg_card'])
+        self.webserver_advanced_frame.grid(row=row, column=0, columnspan=2, sticky='ew')
+        self.webserver_advanced_frame.grid_remove()  # Hidden by default
+        
+        # Create advanced settings content
+        adv_grid = tk.Frame(self.webserver_advanced_frame, bg=COLORS['bg_card'])
+        adv_grid.pack(fill='x')
+        adv_grid.columnconfigure(1, weight=1)
+        
+        # Warning label
+        warning_frame = tk.Frame(adv_grid, bg=COLORS['bg_card'])
+        warning_frame.grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, SPACING['row_gap']))
+        
+        tk.Label(warning_frame, text="⚠️",
+                font=FONTS['body'], bg=COLORS['bg_card'], fg=COLORS['status_connecting']).pack(side='left')
+        tk.Label(warning_frame, 
+                text=" Changing IP/Port may cause conflicts. Use 0.0.0.0 for all interfaces.",
+                font=FONTS['small'], bg=COLORS['bg_card'], fg=COLORS['status_connecting']).pack(side='left')
+        
+        # Host setting
+        tk.Label(adv_grid, text="Bind IP:", font=FONTS['body'],
+                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
+                width=LAYOUT['label_width'], anchor='w').grid(
+            row=1, column=0, sticky='w', pady=(0, SPACING['row_gap']))
+        
+        if not hasattr(self.app, 'webserver_host_var'):
+            self.app.webserver_host_var = tk.StringVar(value='127.0.0.1')
+        
+        host_frame = tk.Frame(adv_grid, bg=COLORS['bg_card'])
+        host_frame.grid(row=1, column=1, sticky='w', pady=(0, SPACING['row_gap']))
+        
+        host_entry = ttk.Entry(host_frame, textvariable=self.app.webserver_host_var,
+                              font=FONTS['body'], style='Dark.TEntry', width=15)
+        host_entry.pack(side='left')
+        host_entry.bind('<FocusOut>', self._on_webserver_advanced_change)
+        
+        tk.Label(host_frame, text="(127.0.0.1 = local only)",
+                font=FONTS['tiny'], bg=COLORS['bg_card'], fg=COLORS['text_muted']).pack(side='left', padx=(5, 0))
+        
+        # Port setting
+        tk.Label(adv_grid, text="Port:", font=FONTS['body'],
+                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
+                width=LAYOUT['label_width'], anchor='w').grid(
+            row=2, column=0, sticky='w')
+        
+        if not hasattr(self.app, 'webserver_port_var'):
+            self.app.webserver_port_var = tk.IntVar(value=8080)
+        
+        port_frame = tk.Frame(adv_grid, bg=COLORS['bg_card'])
+        port_frame.grid(row=2, column=1, sticky='w')
+        
+        port_spin = ttk.Spinbox(port_frame, from_=1024, to=65535,
+                               textvariable=self.app.webserver_port_var,
+                               font=FONTS['body'], style='Dark.TSpinbox', width=8)
+        port_spin.pack(side='left')
+        port_spin.bind('<FocusOut>', self._on_webserver_advanced_change)
+        
+        tk.Label(port_frame, text="(1024-65535)",
+                font=FONTS['tiny'], bg=COLORS['bg_card'], fg=COLORS['text_muted']).pack(side='left', padx=(5, 0))
         
         # RTSP settings (hidden by default)
         self.app.rtsp_frame = tk.Frame(parent, bg=COLORS['bg_card'])
@@ -792,6 +847,32 @@ class SettingsTab:
         else:
             self.app.cleanup_size_spinbox.config(state='disabled')
             self.app.cleanup_strategy_combo.config(state='disabled')
+    
+    def _toggle_webserver_advanced(self):
+        """Toggle visibility of advanced webserver settings (IP/Port)"""
+        if self.app.webserver_advanced_var.get():
+            # Show warning when enabling advanced settings
+            from tkinter import messagebox
+            messagebox.showwarning(
+                "Advanced Settings Warning",
+                "⚠️ Changing the web server IP or port may cause issues:\n\n"
+                "• Port conflicts with other applications\n"
+                "• Firewall blocking connections\n"
+                "• Services unable to connect\n\n"
+                "IP Options:\n"
+                "• 127.0.0.1 - Local machine only (default, safest)\n"
+                "• 0.0.0.0 - All network interfaces (allows remote access)\n"
+                "• Specific IP - Bind to a specific interface\n\n"
+                "After making changes, click 'Apply All Settings'.\n"
+                "The web server will restart with the new settings."
+            )
+            self.webserver_advanced_frame.grid()
+        else:
+            self.webserver_advanced_frame.grid_remove()
+    
+    def _on_webserver_advanced_change(self, event=None):
+        """Placeholder for future validation if needed"""
+        pass
     
     def _check_ffmpeg_available(self):
         """Check if ffmpeg is available in PATH"""

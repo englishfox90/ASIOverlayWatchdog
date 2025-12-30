@@ -51,19 +51,21 @@ class OutputManager:
         # Hide copy button by default
         self.app.output_mode_copy_btn.pack_forget()
         
-        # Show/hide file settings based on mode
+        # Hide all mode-specific frames first
+        self.app.file_frame.pack_forget()
+        self.app.webserver_frame.pack_forget()
+        self.app.rtsp_frame.pack_forget()
+        
+        # Show the appropriate frame for selected mode
         if mode == 'file':
             self.app.file_frame.pack(fill='x', pady=(0, SPACING['section_gap']))
-        else:
-            self.app.file_frame.pack_forget()
-        
-        # Start server for selected mode
-        if mode == 'webserver':
+            self.app.output_mode_status_var.set("Mode: File (Saving to output directory)")
+        elif mode == 'webserver':
+            self.app.webserver_frame.pack(fill='x', pady=(0, SPACING['section_gap']))
             self._start_web_server()
         elif mode == 'rtsp':
+            self.app.rtsp_frame.pack(fill='x', pady=(0, SPACING['section_gap']))
             self._start_rtsp_server()
-        else:  # file mode
-            self.app.output_mode_status_var.set("Mode: File (Saving to output directory)")
     
     def _start_web_server(self):
         """Start web server with current settings"""
