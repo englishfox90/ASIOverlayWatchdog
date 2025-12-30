@@ -37,7 +37,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 ; Uninstall
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; Setup icon
-SetupIconFile=..\app_icon.ico
+SetupIconFile=..\assets\app_icon.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

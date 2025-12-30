@@ -1,6 +1,6 @@
 @echo off
 REM Build and package ASIOverlayWatchDog for release
-REM This script creates a portable ZIP ready for distribution
+REM This script runs tests then creates a portable ZIP ready for distribution
 
 echo ========================================
 echo ASIOverlayWatchDog Release Builder
@@ -18,16 +18,28 @@ if not exist "venv\Scripts\activate.bat" (
 )
 
 REM Activate venv
-echo [1/5] Activating virtual environment...
+echo [1/6] Activating virtual environment...
 call venv\Scripts\activate.bat
 
+REM Run tests first
+echo [2/6] Running test suite...
+python -m pytest tests/ -v -m "not requires_camera" --tb=short
+if errorlevel 1 (
+    echo.
+    echo ERROR: Tests failed! Fix failing tests before building release.
+    pause
+    exit /b 1
+)
+echo Tests passed!
+echo.
+
 REM Clean previous builds
-echo [2/5] Cleaning previous builds...
+echo [3/6] Cleaning previous builds...
 if exist "dist" rmdir /s /q dist
 if exist "build" rmdir /s /q build
 
 REM Build with PyInstaller
-echo [3/5] Building with PyInstaller...
+echo [4/6] Building with PyInstaller...
 pyinstaller --clean ASIOverlayWatchDog.spec
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed!
@@ -48,13 +60,13 @@ for /f "tokens=3 delims= " %%a in ('findstr "__version__" version.py') do set VE
 set VERSION=%VERSION_RAW:"=%
 
 REM Create portable ZIP
-echo [4/5] Creating portable ZIP...
+echo [5/6] Creating portable ZIP...
 cd dist
 powershell -Command "Compress-Archive -Path ASIOverlayWatchDog -DestinationPath ..\releases\ASIOverlayWatchDog-v%VERSION%-Portable.zip -Force"
 cd ..
 
 REM Done
-echo [5/5] Build complete!
+echo [6/6] Build complete!
 echo.
 echo ========================================
 echo Release package created:

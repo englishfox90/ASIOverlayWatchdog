@@ -46,7 +46,7 @@ except Exception as e:
 added_files = [
     ('ASICamera2.dll', '.'),  # ZWO ASI SDK library
     ('version.py', '.'),       # Version file
-    ('app_icon.ico', '.'),     # Application icon
+    ('assets/app_icon.ico', '.'),     # Application icon
 ]
 
 # Hidden imports (modules not automatically detected)
@@ -171,7 +171,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='app_icon.ico',  # Application icon
+    icon='assets/app_icon.ico',  # Application icon
 )
 
 coll = COLLECT(

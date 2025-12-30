@@ -1,0 +1,327 @@
+diff --git a/gui/image_processor.py b/gui/image_processor.py
+index 42e2ca5..665a306 100644
+--- a/gui/image_processor.py
++++ b/gui/image_processor.py
+@@ -21,7 +21,117 @@ class ImageProcessor:
+         self.preview_cache_path = None
+         # Cache for overlay images
+         self.overlay_image_cache = {}
+-        self.preview_update_pending = False    
++        self.preview_update_pending = False
++
++    def apply_auto_stretch(self, img):
++        """
++        Apply automatic stretch optimized for astrophotography.
++
++        This performs a full auto-stretch PER CHANNEL with:
++        1. Shadow clipping - removes noise floor using median - 2.8*MAD per channel
++        2. Highlight protection - clips at 1.0 (preserves stars)
++        3. MTF stretch - brings midtones to target (~0.25) per channel
++
++        Per-channel processing ensures proper color balance.
++
++        Args:
++            img: PIL Image to process
++
++        Returns:
++            Processed PIL Image
++        """
++        import numpy as np
++
++        # Convert to numpy array (0-1 range)
++        img_array = np.array(img, dtype=np.float32) / 255.0
++
++        # Handle grayscale images
++        if len(img_array.shape) == 2:
++            img_array = self._stretch_channel(img_array)
++            result_uint8 = (img_array * 255).astype(np.uint8)
++            return Image.fromarray(result_uint8, mode=img.mode)
++
++        # Process each channel separately for proper color balance
++        result = np.zeros_like(img_array)
++        channel_names = ['R', 'G', 'B']
++
++        for i in range(min(3, img_array.shape[2])):
++            channel = img_array[:, :, i]
++            result[:, :, i] = self._stretch_channel(channel, channel_names[i])
++
++        # Copy alpha channel if present
++        if img_array.shape[2] == 4:
++            result[:, :, 3] = img_array[:, :, 3]
++
++        # Convert back to PIL Image
++        result_uint8 = (result * 255).astype(np.uint8)
++        return Image.fromarray(result_uint8, mode=img.mode)
++
++    def _stretch_channel(self, channel, name=''):
++        """
++        Apply auto-stretch to a single channel.
++
++        Args:
++            channel: 2D numpy array (0-1 range)
++            name: Channel name for logging
++
++        Returns:
++            Stretched channel as 2D numpy array
++        """
++        import numpy as np
++
++        # Step 1: Calculate shadow clipping point using Median and MAD
++        median = np.median(channel)
++        mad = np.median(np.abs(channel - median))
++
++        # Prevent over-clipping for uniform images: ensure minimum MAD
++        # and cap shadow clip to not exceed a fraction of median
++        mad = max(mad, 0.001)
++        shadow_clip = max(0.0, median - 2.8 * mad)
++        # Safety: don't clip more than 80% of the median value
++        shadow_clip = min(shadow_clip, median * 0.8)
++        highlight_clip = 1.0
++
++        if name:
++            app_logger.debug(f"Auto-stretch {name}: median={median:.4f}, MAD={mad:.4f}, shadow={shadow_clip:.4f}")
++
++        # Step 2: Rescale (shadow/highlight clipping)
++        if highlight_clip > shadow_clip:
++            channel = (channel - shadow_clip) / (highlight_clip - shadow_clip)
++            channel = np.clip(channel, 0.0, 1.0)
++
++        # Step 3: Apply MTF to bring median to target
++        current_median = np.median(channel)
++        target = 0.25
++
++        if abs(current_median - target) < 0.01 or current_median < 0.0001:
++            return channel
++
++        # Calculate MTF balance parameter 'm'
++        numerator = current_median * (target - 1)
++        denominator = 2 * target * current_median - current_median - target
++
++        if abs(denominator) > 0.0001:
++            m = numerator / denominator
++            m = np.clip(m, 0.0001, 0.9999)
++        else:
++            return channel
++
++        if name:
++            app_logger.debug(f"MTF {name}: median={current_median:.3f}, m={m:.3f}")
++
++        # Apply MTF: (m-1)*x / ((2m-1)*x - m)
++        mtf_num = (m - 1.0) * channel
++        mtf_den = (2.0 * m - 1.0) * channel - m
++
++        with np.errstate(divide='ignore', invalid='ignore'):
++            result = np.where(
++                np.abs(mtf_den) > 0.0001,
++                mtf_num / mtf_den,
++                channel
++            )
++
++        return np.clip(result, 0.0, 1.0)    
+     def process_and_save_image(self, img, metadata):
+         """Process image with overlays and save"""
+         try:
+@@ -31,8 +141,6 @@ class ImageProcessor:
+             output_format = self.app.output_format_var.get()
+             jpg_quality = self.app.jpg_quality_var.get()
+             resize_percent = self.app.resize_percent_var.get()
+-            auto_brightness = self.app.auto_brightness_var.get()
+-            brightness_factor = self.app.brightness_var.get() if auto_brightness else None
+             timestamp_corner = self.app.timestamp_corner_var.get()
+             filename_pattern = self.app.filename_pattern_var.get()
+             
+@@ -49,31 +157,10 @@ class ImageProcessor:
+                 new_height = int(img.height * resize_percent / 100)
+                 img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+             
+-            # Apply auto brightness if enabled (with proper analysis)
+-            if auto_brightness:
+-                from PIL import ImageEnhance
+-                import numpy as np
+-                
+-                # Analyze image brightness
+-                img_array = np.array(img.convert('L'))  # Convert to grayscale for analysis
+-                mean_brightness = np.mean(img_array)
+-                
+-                # Calculate adaptive enhancement factor
+-                # Target brightness: 128 (mid-gray)
+-                target_brightness = 128
+-                auto_factor = target_brightness / max(mean_brightness, 10)  # Avoid division by zero
+-                
+-                # Clamp factor to reasonable range (0.5 - 4.0)
+-                auto_factor = max(0.5, min(auto_factor, 4.0))
+-                
+-                # Apply manual brightness factor as additional adjustment
+-                manual_factor = brightness_factor if brightness_factor else 1.0
+-                final_factor = auto_factor * manual_factor
+-                
+-                enhancer = ImageEnhance.Brightness(img)
+-                img = enhancer.enhance(final_factor)
+-                
+-                app_logger.debug(f"Auto brightness: mean={mean_brightness:.1f}, auto={auto_factor:.2f}, manual={manual_factor:.2f}, final={final_factor:.2f}")
++            # Apply Auto Stretch if enabled
++            if self.app.auto_stretch_var.get():
++                img = self.apply_auto_stretch(img)
++                app_logger.debug("Auto stretch applied")
+             
+             # Apply saturation adjustment
+             saturation_factor = self.app.saturation_var.get()
+@@ -165,28 +252,14 @@ class ImageProcessor:
+                 return
+         
+         try:
+-            # Apply auto brightness and saturation adjustments (for display only)
++            # Apply auto MTF and saturation adjustments (for display only)
+             display_base = self.app.preview_image.copy()
+             from PIL import ImageEnhance
+-            
+-            # Apply brightness adjustment
+-            if self.app.auto_brightness_var.get():
+-                import numpy as np
+-                
+-                # Analyze brightness
+-                img_array = np.array(display_base.convert('L'))
+-                mean_brightness = np.mean(img_array)
+-                target_brightness = 128
+-                auto_factor = target_brightness / max(mean_brightness, 10)
+-                auto_factor = max(0.5, min(auto_factor, 4.0))
+-                
+-                # Apply manual multiplier
+-                manual_factor = self.app.brightness_var.get()
+-                final_factor = auto_factor * manual_factor
+-                
+-                enhancer = ImageEnhance.Brightness(display_base)
+-                display_base = enhancer.enhance(final_factor)
+-            
++
++            # Apply Auto Stretch if enabled
++            if self.app.auto_stretch_var.get():
++                display_base = self.apply_auto_stretch(display_base)
++
+             # Apply saturation adjustment
+             saturation_factor = self.app.saturation_var.get()
+             if saturation_factor != 1.0:
+diff --git a/gui/settings_tab.py b/gui/settings_tab.py
+index 258f4d9..268a7a7 100644
+--- a/gui/settings_tab.py
++++ b/gui/settings_tab.py
+@@ -558,77 +558,22 @@ class SettingsTab:
+                 bg=COLORS['bg_card'], fg=COLORS['text_muted']).pack(side='left')
+         
+         row += 1
+-        
+-        # Auto Brightness
+-        self.app.auto_brightness_var = tk.BooleanVar(value=False)
+-        auto_check = ttk.Checkbutton(grid, text="🔆 Auto Brightness Adjustment",
+-                                    variable=self.app.auto_brightness_var,
+-                                    command=self.app.on_auto_brightness_toggle,
++
++        # Auto Stretch (full astrophotography stretch with shadow clipping + MTF)
++        self.app.auto_stretch_var = tk.BooleanVar(value=False)
++        auto_stretch_check = ttk.Checkbutton(grid, text="🌙 Auto Stretch",
++                                    variable=self.app.auto_stretch_var,
++                                    command=self._on_auto_stretch_toggle,
+                                     bootstyle="primary-round-toggle")
+-        auto_check.grid(row=row, column=0, columnspan=3, sticky='w',
++        auto_stretch_check.grid(row=row, column=0, columnspan=3, sticky='w',
+                        pady=(0, SPACING['row_gap']))
+-        
+-        ToolTip(auto_check,
+-               text="Analyze each image's brightness and auto-enhance (dark images boosted more than bright ones)",
++
++        ToolTip(auto_stretch_check,
++               text="Automatic astrophotography stretch: shadow clipping (median - 2.8×MAD) + MTF to 0.25 target",
+                bootstyle="primary-inverse")
+         
+         row += 1
+         
+-        # Brightness Factor (manual multiplier)
+-        tk.Label(grid, text="Brightness Multiplier:", font=FONTS['body'],
+-                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
+-                width=LAYOUT['label_width'], anchor='w').grid(
+-            row=row, column=0, sticky='w', pady=(0, SPACING['row_gap']))
+-        
+-        self.app.brightness_var = tk.DoubleVar(value=1.0)
+-        
+-        factor_frame = tk.Frame(grid, bg=COLORS['bg_card'])
+-        factor_frame.grid(row=row, column=1, sticky='ew', 
+-                         pady=(0, SPACING['row_gap']), columnspan=2)
+-        
+-        self.app.brightness_scale = ttk.Scale(
+-            factor_frame,
+-            from_=0.5, to=2.0,
+-            variable=self.app.brightness_var,
+-            orient='horizontal',
+-            bootstyle="warning",
+-            state='disabled'
+-        )
+-        self.app.brightness_scale.pack(side='left', fill='x', expand=True,
+-                                       padx=(0, SPACING['row_gap']))
+-        
+-        self.app.brightness_value_label = tk.Label(
+-            factor_frame,
+-            text=f"{self.app.brightness_var.get():.2f}",
+-            font=FONTS['body_bold'],
+-            bg=COLORS['bg_card'],
+-            fg=COLORS['text_disabled'],
+-            width=6
+-        )
+-        self.app.brightness_value_label.pack(side='left')
+-        
+-        # Update label and preview when slider moves
+-        def update_brightness_label(*args):
+-            self.app.brightness_value_label.config(text=f"{self.app.brightness_var.get():.2f}")
+-            # Refresh preview if there's an image loaded
+-            if self.app.preview_image:
+-                self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
+-        
+-        # Remove any existing traces to prevent duplicates
+-        try:
+-            for trace_id in self.app.brightness_var.trace_info():
+-                self.app.brightness_var.trace_remove(*trace_id)
+-        except:
+-            pass
+-        
+-        self.app.brightness_var.trace_add('write', update_brightness_label)
+-        
+-        ToolTip(self.app.brightness_scale,
+-               text="Post-processing brightness adjustment for saved images (1.0 = no change). Does not affect camera exposure.",
+-               bootstyle="warning-inverse")
+-        
+-        row += 1
+-        
+         # Saturation Factor
+         tk.Label(grid, text="Saturation:", font=FONTS['body'],
+                 bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
+@@ -750,6 +695,11 @@ class SettingsTab:
+                text="Only 'oldest' strategy supported - deletes files by modification time (never deletes folders)",
+                bootstyle="warning-inverse")
+     
++    def _on_auto_stretch_toggle(self):
++        """Handle auto stretch toggle - refresh preview"""
++        if self.app.preview_image:
++            self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
++
+     def _on_cleanup_toggle(self):
+         """Handle cleanup enable/disable toggle"""
+         enabled = self.app.cleanup_enabled_var.get()
+
+# NOTE: Also remove on_auto_brightness_toggle() method from gui/main_window.py
+# The method to remove (around line 371-384 in original):
+#
+-    def on_auto_brightness_toggle(self):
+-        """Handle auto brightness checkbox"""
+-        enabled = self.auto_brightness_var.get()
+-        if enabled:
+-            self.brightness_scale.config(state='normal')
+-            if hasattr(self, 'brightness_value_label'):
+-                self.brightness_value_label.config(fg='#FFFFFF')
+-            app_logger.info("Auto brightness enabled - brightness factor slider active")
+-        else:
+-            self.brightness_scale.config(state='disabled')
+-            if hasattr(self, 'brightness_value_label'):
+-                self.brightness_value_label.config(fg='#888888')
+-            app_logger.info("Auto brightness disabled - brightness factor has no effect")
+-    
+     def on_tab_changed(self, event=None):
+         """Handle notebook tab change - auto-fit preview when Preview tab is selected"""

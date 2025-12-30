@@ -768,6 +768,100 @@ class SettingsTab:
         
         row += 1
         
+        # === Auto Stretch Section ===
+        # Separator
+        ttk.Separator(grid, orient='horizontal').grid(
+            row=row, column=0, columnspan=3, sticky='ew', pady=SPACING['section_gap'])
+        row += 1
+        
+        # Auto Stretch Toggle
+        self.app.auto_stretch_var = tk.BooleanVar(value=False)
+        stretch_check = ttk.Checkbutton(grid, text="✨ Auto Stretch (MTF)",
+                                       variable=self.app.auto_stretch_var,
+                                       command=self._on_auto_stretch_toggle,
+                                       bootstyle="info-round-toggle")
+        stretch_check.grid(row=row, column=0, columnspan=3, sticky='w',
+                          pady=(0, SPACING['row_gap']))
+        
+        ToolTip(stretch_check,
+               text="Apply Midtone Transfer Function stretch to enhance image contrast. "
+                    "Best for fixed-exposure captures - brings out detail without changing camera settings.",
+               bootstyle="info-inverse")
+        
+        row += 1
+        
+        # Target Median (how bright the midtones should be)
+        tk.Label(grid, text="Target Brightness:", font=FONTS['body'],
+                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
+                width=LAYOUT['label_width'], anchor='w').grid(
+            row=row, column=0, sticky='w', pady=(0, SPACING['row_gap']))
+        
+        stretch_frame = tk.Frame(grid, bg=COLORS['bg_card'])
+        stretch_frame.grid(row=row, column=1, sticky='ew', 
+                          pady=(0, SPACING['row_gap']), columnspan=2)
+        
+        self.app.stretch_median_var = tk.DoubleVar(value=0.25)
+        self.app.stretch_median_scale = ttk.Scale(
+            stretch_frame,
+            from_=0.1, to=0.5,
+            variable=self.app.stretch_median_var,
+            orient='horizontal',
+            bootstyle="info",
+            state='disabled'
+        )
+        self.app.stretch_median_scale.pack(side='left', fill='x', expand=True,
+                                           padx=(0, SPACING['row_gap']))
+        
+        self.app.stretch_median_label = tk.Label(
+            stretch_frame,
+            text=f"{int(self.app.stretch_median_var.get()*100)}%",
+            font=FONTS['body_bold'],
+            bg=COLORS['bg_card'],
+            fg=COLORS['text_disabled'],
+            width=6
+        )
+        self.app.stretch_median_label.pack(side='left')
+        
+        def update_stretch_median(*args):
+            self.app.stretch_median_label.config(
+                text=f"{int(self.app.stretch_median_var.get()*100)}%"
+            )
+            if self.app.preview_image:
+                self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
+        
+        try:
+            for trace_id in self.app.stretch_median_var.trace_info():
+                self.app.stretch_median_var.trace_remove(*trace_id)
+        except:
+            pass
+        
+        self.app.stretch_median_var.trace_add('write', update_stretch_median)
+        
+        ToolTip(self.app.stretch_median_scale,
+               text="Target brightness for midtones (10-50%). Lower = darker sky, higher = brighter details",
+               bootstyle="info-inverse")
+        
+        row += 1
+        
+        # Linked stretch checkbox
+        self.app.stretch_linked_var = tk.BooleanVar(value=True)
+        linked_check = ttk.Checkbutton(grid, text="Linked RGB channels",
+                                      variable=self.app.stretch_linked_var,
+                                      bootstyle="info-square-toggle",
+                                      state='disabled')
+        linked_check.grid(row=row, column=0, columnspan=3, sticky='w',
+                         pady=(0, SPACING['row_gap']))
+        self.app.stretch_linked_check = linked_check
+        
+        ToolTip(linked_check,
+               text="When enabled, applies same stretch to all color channels (preserves color). "
+                    "When disabled, stretches each channel independently (may shift colors).",
+               bootstyle="info-inverse")
+        
+        row += 1
+        
+        # === End Auto Stretch Section ===
+        
         # Timestamp
         self.app.timestamp_corner_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(grid, text="Add timestamp to corner",
@@ -847,6 +941,25 @@ class SettingsTab:
         else:
             self.app.cleanup_size_spinbox.config(state='disabled')
             self.app.cleanup_strategy_combo.config(state='disabled')
+    
+    def _on_auto_stretch_toggle(self):
+        """Handle auto-stretch enable/disable toggle"""
+        enabled = self.app.auto_stretch_var.get()
+        
+        if enabled:
+            # Enable stretch controls
+            self.app.stretch_median_scale.config(state='normal')
+            self.app.stretch_median_label.config(fg=COLORS['text_primary'])
+            self.app.stretch_linked_check.config(state='normal')
+        else:
+            # Disable stretch controls
+            self.app.stretch_median_scale.config(state='disabled')
+            self.app.stretch_median_label.config(fg=COLORS['text_disabled'])
+            self.app.stretch_linked_check.config(state='disabled')
+        
+        # Refresh preview if there's an image loaded
+        if self.app.preview_image:
+            self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
     
     def _toggle_webserver_advanced(self):
         """Toggle visibility of advanced webserver settings (IP/Port)"""

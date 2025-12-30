@@ -79,6 +79,13 @@ DEFAULT_CONFIG = {
     "brightness_factor": 1.0,  # Brightness multiplier (0.5 to 2.0, 1.0 = neutral)
     "saturation_factor": 1.0,  # Saturation multiplier (0.0 to 2.0, 1.0 = neutral)
     
+    # Auto Stretch settings (MTF - Midtone Transfer Function)
+    "auto_stretch": {
+        "enabled": False,
+        "target_median": 0.25,  # Target median value (0.0-1.0, default 0.25 = quarter brightness)
+        "linked_stretch": True  # Apply same stretch to all RGB channels (False = per-channel MAD clipping)
+    },
+    
     # Overlay settings
     "overlays": [
         {

@@ -50,7 +50,10 @@ class ModernOverlayApp:
         try:
             from utils_paths import resource_path
             from PIL import Image, ImageTk
-            icon_path = resource_path('app_icon.ico')
+            icon_path = resource_path('assets/app_icon.ico')
+            # Fallback to root for compatibility
+            if not os.path.exists(icon_path):
+                icon_path = resource_path('app_icon.ico')
             if os.path.exists(icon_path):
                 # Set window icon (title bar)
                 self.root.iconbitmap(icon_path)

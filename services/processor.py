@@ -6,6 +6,7 @@ import re
 import tempfile
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
+import numpy as np
 from services.logger import app_logger
 
 
@@ -496,6 +497,288 @@ def add_text_overlay(img, draw, overlay, metadata):
         return img
 
 
+def mtf_stretch(value, midtone):
+    """
+    Apply Midtone Transfer Function (MTF) stretch.
+    
+    This is the standard astrophotography stretch function (PixInsight-style) that maps 
+    pixel values through a curve controlled by the midtone parameter.
+    
+    The MTF is defined such that:
+    - MTF(0) = 0
+    - MTF(m) = 0.5  (midtone maps to middle gray)
+    - MTF(1) = 1
+    
+    Standard formula: MTF(x, m) = (m - 1) * x / ((2*m - 1) * x - m)
+    
+    Note: When m < 0.5, the stretch brightens dark values (most common in astrophotography)
+          When m > 0.5, the stretch darkens values
+          When m = 0.5, it's the identity function
+    
+    Args:
+        value: Input pixel value(s) normalized to 0-1 range (can be numpy array)
+        midtone: Midtone parameter (0 < m < 1). Lower values = more aggressive brightening.
+                 Typical values for dark astro images: 0.05-0.25
+    
+    Returns:
+        Stretched value(s) in 0-1 range
+    """
+    # Prevent division by zero and handle edge cases
+    m = np.clip(midtone, 0.0001, 0.9999)
+    x = np.clip(value, 0.0, 1.0)
+    
+    # Standard MTF formula: (m - 1) * x / ((2*m - 1) * x - m)
+    numerator = (m - 1.0) * x
+    denominator = (2.0 * m - 1.0) * x - m
+    
+    # Avoid division by zero
+    result = np.where(
+        np.abs(denominator) > 1e-10,
+        numerator / denominator,
+        x  # Return input value if denominator is too small
+    )
+    
+    return np.clip(result, 0.0, 1.0)
+
+
+def auto_stretch_image(img, config):
+    """
+    Apply automatic MTF stretch to enhance image contrast.
+    
+    This function analyzes the image histogram and applies an MTF (Midtone Transfer
+    Function) stretch to bring out detail in the shadows and midtones while protecting
+    highlights. This is the standard approach used in astrophotography software.
+    
+    Args:
+        img: PIL Image object
+        config: Dictionary with stretch settings:
+               - target_median: Target median brightness (0.0-1.0)
+               - shadows_clip: Shadow clipping point (0.0-0.5)
+               - highlights_clip: Highlight clipping point (0.5-1.0)
+               - linked_stretch: Apply same stretch to all channels
+    
+    Returns:
+        PIL Image with stretch applied
+    """
+    try:
+        # Convert to numpy array for processing
+        img_array = np.array(img).astype(np.float32) / 255.0
+        
+        # Get stretch parameters
+        target_median = config.get('target_median', 0.25)
+        linked_stretch = config.get('linked_stretch', True)
+        
+        # Clamp target to valid range
+        target_median = np.clip(target_median, 0.05, 0.95)
+        
+        # Check current image brightness - skip stretch if image is already bright
+        # MTF stretch is designed for dark astro images, not daylight scenes
+        if len(img_array.shape) == 2:
+            current_brightness = np.median(img_array)
+        else:
+            # Use luminance for color images
+            if img_array.shape[2] >= 3:
+                current_brightness = np.median(
+                    0.299 * img_array[:,:,0] + 0.587 * img_array[:,:,1] + 0.114 * img_array[:,:,2]
+                )
+            else:
+                current_brightness = np.median(img_array)
+        
+        # Skip stretch if image is already brighter than target (e.g., daylight capture)
+        if current_brightness > target_median + 0.1:
+            app_logger.debug(f"Auto-stretch skipped: image already bright (median={current_brightness:.3f} > target={target_median:.3f})")
+            return img
+        
+        app_logger.debug(f"Auto-stretch starting: current_median={current_brightness:.3f}, target={target_median:.3f}")
+        
+        # Determine if image is grayscale or color
+        if len(img_array.shape) == 2:
+            # Grayscale image
+            stretched = _stretch_channel(img_array, target_median, 'L')
+        elif img_array.shape[2] == 3:
+            # RGB image
+            if linked_stretch:
+                # Linked stretch: use luminance for single MAD-based shadow clip
+                luminance = 0.299 * img_array[:,:,0] + 0.587 * img_array[:,:,1] + 0.114 * img_array[:,:,2]
+                
+                # Calculate shadow clip from luminance using MAD
+                median_lum = np.median(luminance)
+                mad_lum = np.median(np.abs(luminance - median_lum))
+                mad_lum = max(mad_lum, 0.001)
+                shadow_clip = max(0.0, median_lum - 2.8 * mad_lum)
+                shadow_clip = min(shadow_clip, median_lum * 0.8)
+                
+                app_logger.debug(f"Auto-stretch (linked): lum_median={median_lum:.4f}, MAD={mad_lum:.4f}, shadow_clip={shadow_clip:.4f}")
+                
+                # Apply same shadow clip to all channels
+                stretched = np.zeros_like(img_array)
+                for c in range(3):
+                    channel = img_array[:,:,c]
+                    if shadow_clip > 0:
+                        channel = np.clip(channel, shadow_clip, 1.0)
+                        channel = (channel - shadow_clip) / (1.0 - shadow_clip)
+                    stretched[:,:,c] = channel
+                
+                # Calculate MTF from luminance after clipping
+                lum_clipped = 0.299 * stretched[:,:,0] + 0.587 * stretched[:,:,1] + 0.114 * stretched[:,:,2]
+                current_median = np.median(lum_clipped)
+                midtone = _calculate_mtf_midtone(current_median, target_median)
+                
+                # Apply same MTF to all channels
+                for c in range(3):
+                    stretched[:,:,c] = mtf_stretch(stretched[:,:,c], midtone)
+                    
+                app_logger.debug(f"MTF (linked): post-clip_median={current_median:.4f}, midtone={midtone:.4f}, target={target_median:.3f}")
+            else:
+                # Independent stretch per channel with MAD-based shadow clipping
+                stretched = np.zeros_like(img_array)
+                channel_names = ['R', 'G', 'B']
+                for c in range(3):
+                    stretched[:,:,c] = _stretch_channel(
+                        img_array[:,:,c], target_median, channel_names[c]
+                    )
+        elif img_array.shape[2] == 4:
+            # RGBA image - stretch RGB, preserve alpha
+            rgb = img_array[:,:,:3]
+            alpha = img_array[:,:,3]
+            
+            if linked_stretch:
+                # Linked stretch: use luminance for single MAD-based shadow clip
+                luminance = 0.299 * rgb[:,:,0] + 0.587 * rgb[:,:,1] + 0.114 * rgb[:,:,2]
+                
+                median_lum = np.median(luminance)
+                mad_lum = np.median(np.abs(luminance - median_lum))
+                mad_lum = max(mad_lum, 0.001)
+                shadow_clip = max(0.0, median_lum - 2.8 * mad_lum)
+                shadow_clip = min(shadow_clip, median_lum * 0.8)
+                
+                stretched_rgb = np.zeros_like(rgb)
+                for c in range(3):
+                    channel = rgb[:,:,c]
+                    if shadow_clip > 0:
+                        channel = np.clip(channel, shadow_clip, 1.0)
+                        channel = (channel - shadow_clip) / (1.0 - shadow_clip)
+                    stretched_rgb[:,:,c] = channel
+                
+                # Calculate MTF from luminance after clipping
+                lum_clipped = 0.299 * stretched_rgb[:,:,0] + 0.587 * stretched_rgb[:,:,1] + 0.114 * stretched_rgb[:,:,2]
+                current_median = np.median(lum_clipped)
+                midtone = _calculate_mtf_midtone(current_median, target_median)
+                
+                for c in range(3):
+                    stretched_rgb[:,:,c] = mtf_stretch(stretched_rgb[:,:,c], midtone)
+            else:
+                # Independent stretch per channel with MAD-based shadow clipping
+                stretched_rgb = np.zeros_like(rgb)
+                channel_names = ['R', 'G', 'B']
+                for c in range(3):
+                    stretched_rgb[:,:,c] = _stretch_channel(
+                        rgb[:,:,c], target_median, channel_names[c]
+                    )
+            
+            stretched = np.dstack([stretched_rgb, alpha])
+        else:
+            # Unknown format, return unchanged
+            return img
+        
+        # Convert back to uint8 and PIL Image
+        stretched_uint8 = (stretched * 255.0).astype(np.uint8)
+        return Image.fromarray(stretched_uint8, mode=img.mode)
+        
+    except Exception as e:
+        app_logger.error(f"Auto-stretch error: {e}")
+        return img
+
+
+def _stretch_channel(channel, target_median, channel_name=''):
+    """
+    Stretch a single channel to target median using MAD-based shadow clipping.
+    
+    This uses the statistical approach: shadow_clip = median - 2.8 * MAD
+    where MAD (Median Absolute Deviation) is a robust measure of noise floor.
+    
+    Args:
+        channel: 2D numpy array (0-1 range)
+        target_median: Target median value after stretch
+        channel_name: Optional name for debug logging (e.g., 'R', 'G', 'B')
+    
+    Returns:
+        Stretched channel
+    """
+    # Step 1: Calculate shadow clip using MAD (Median Absolute Deviation)
+    median = np.median(channel)
+    mad = np.median(np.abs(channel - median))
+    
+    # Ensure minimum MAD to prevent over-clipping uniform images
+    mad = max(mad, 0.001)
+    
+    # Calculate shadow clip point: median - 2.8 * MAD
+    # 2.8 sigma captures ~99.5% of noise in Gaussian distribution
+    shadow_clip = max(0.0, median - 2.8 * mad)
+    
+    # Safety: don't clip more than 80% of the median value
+    shadow_clip = min(shadow_clip, median * 0.8)
+    
+    if channel_name:
+        app_logger.debug(f"Auto-stretch {channel_name}: median={median:.4f}, MAD={mad:.4f}, shadow_clip={shadow_clip:.4f}")
+    
+    # Step 2: Apply shadow clipping and rescale to 0-1
+    if shadow_clip > 0:
+        channel = np.clip(channel, shadow_clip, 1.0)
+        channel = (channel - shadow_clip) / (1.0 - shadow_clip)
+    
+    # Step 3: Calculate current median after clipping
+    current_median = np.median(channel)
+    
+    # Skip MTF if already at target or very dark
+    if abs(current_median - target_median) < 0.01 or current_median < 0.0001:
+        return channel
+    
+    # Step 4: Calculate MTF midtone parameter and apply stretch
+    midtone = _calculate_mtf_midtone(current_median, target_median)
+    
+    if channel_name:
+        app_logger.debug(f"MTF {channel_name}: post-clip_median={current_median:.4f}, midtone={midtone:.4f}")
+    
+    return mtf_stretch(channel, midtone)
+
+
+def _calculate_mtf_midtone(current_median, target_median):
+    """
+    Calculate the MTF midtone parameter to map current_median to target_median.
+    
+    Given MTF(x, m) = (m - 1) * x / ((2*m - 1) * x - m) = y
+    Solving for m: m = x*(y - 1) / (x*(2*y - 1) - y)
+    where x = current_median, y = target_median
+    
+    Args:
+        current_median: Current median of the image/channel (0-1)
+        target_median: Desired median after stretch (0-1)
+    
+    Returns:
+        Midtone parameter for MTF function
+    """
+    # Prevent edge cases
+    x = np.clip(current_median, 0.0001, 0.9999)  # current
+    y = np.clip(target_median, 0.0001, 0.9999)   # target
+    
+    # If current is already at target, return 0.5 (identity transform)
+    if abs(x - y) < 0.001:
+        return 0.5
+    
+    # Derived midtone formula: m = x*(y - 1) / (x*(2*y - 1) - y)
+    numerator = x * (y - 1.0)
+    denominator = x * (2.0 * y - 1.0) - y
+    
+    if abs(denominator) < 1e-10:
+        return 0.5
+    
+    midtone = numerator / denominator
+    
+    # Clamp to valid range
+    return np.clip(midtone, 0.0001, 0.9999)
+
+
 def build_output_filename(pattern, metadata, output_format='PNG'):
     """
     Build output filename from pattern and metadata.
@@ -597,8 +880,27 @@ def process_image(image_path, config, metadata_dict=None):
             }
             overlays_to_apply.append(timestamp_overlay)
         
-        # Add overlays to image
-        processed_img = add_overlays(image_path, overlays_to_apply, metadata)
+        # Apply auto-stretch (MTF) BEFORE overlays for best results
+        auto_stretch_config = config.get('auto_stretch', {})
+        if auto_stretch_config.get('enabled', False):
+            # Load raw image for stretching
+            if isinstance(image_path, str):
+                raw_img = Image.open(image_path)
+            else:
+                raw_img = image_path
+            
+            # Convert to RGB if needed for stretching
+            if raw_img.mode not in ('RGB', 'RGBA', 'L'):
+                raw_img = raw_img.convert('RGB')
+            
+            # Apply MTF stretch
+            raw_img = auto_stretch_image(raw_img, auto_stretch_config)
+            
+            # Add overlays to stretched image
+            processed_img = add_overlays(raw_img, overlays_to_apply, metadata)
+        else:
+            # Add overlays to image (no stretch)
+            processed_img = add_overlays(image_path, overlays_to_apply, metadata)
         
         # Apply auto brightness if enabled (for saved images)
         if config.get('auto_brightness', False):

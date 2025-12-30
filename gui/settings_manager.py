@@ -55,6 +55,12 @@ class SettingsManager:
         # Saturation
         self.app.saturation_var.set(self.app.config.get('saturation_factor', 1.0))
         
+        # Auto Stretch (MTF) settings
+        auto_stretch = self.app.config.get('auto_stretch', {})
+        self.app.auto_stretch_var.set(auto_stretch.get('enabled', False))
+        self.app.stretch_median_var.set(auto_stretch.get('target_median', 0.25))
+        self.app.stretch_linked_var.set(auto_stretch.get('linked_stretch', True))
+        
         # Handle old timestamp corner key
         timestamp = self.app.config.get('timestamp_corner', False)
         if isinstance(timestamp, bool):
@@ -124,6 +130,7 @@ class SettingsManager:
         self.app.on_mode_change()
         self.app.camera_controller.on_auto_exposure_toggle()
         self.app.on_auto_brightness_toggle()
+        self.app.settings_tab._on_auto_stretch_toggle()  # Set initial auto-stretch UI state
         self.app.on_wb_mode_change()  # Set initial WB mode UI state
         self.app.on_scheduled_capture_toggle()  # Set initial scheduled capture UI state
         
@@ -232,6 +239,14 @@ class SettingsManager:
         self.app.config.set('auto_brightness', self.app.auto_brightness_var.get())
         self.app.config.set('brightness_factor', self.app.brightness_var.get())
         self.app.config.set('saturation_factor', self.app.saturation_var.get())
+        
+        # Auto Stretch (MTF) settings
+        self.app.config.set('auto_stretch', {
+            'enabled': self.app.auto_stretch_var.get(),
+            'target_median': self.app.stretch_median_var.get(),
+            'linked_stretch': self.app.stretch_linked_var.get()
+        })
+        
         self.app.config.set('timestamp_corner', self.app.timestamp_corner_var.get())
         self.app.config.set('cleanup_enabled', self.app.cleanup_enabled_var.get())
         self.app.config.set('cleanup_max_size_gb', self.app.cleanup_max_size_var.get())

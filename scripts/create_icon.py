@@ -118,13 +118,21 @@ def create_app_icon():
             resized = img.resize(icon_size, Image.Resampling.LANCZOS)
             icon_images.append(resized)
     
+    # Determine output path (scripts/ or project root)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.basename(script_dir) == 'scripts':
+        assets_dir = os.path.join(os.path.dirname(script_dir), 'assets')
+    else:
+        assets_dir = os.path.join(script_dir, 'assets')
+    os.makedirs(assets_dir, exist_ok=True)
+    
     # Save as .ico file (Windows icon format with multiple resolutions)
-    icon_path = 'app_icon.ico'
+    icon_path = os.path.join(assets_dir, 'app_icon.ico')
     icon_images[0].save(icon_path, format='ICO', sizes=[(img.size[0], img.size[1]) for img in icon_images])
     print(f"✓ Created {icon_path} with {len(icon_images)} resolutions")
     
     # Also save as PNG for reference/other uses
-    png_path = 'app_icon.png'
+    png_path = os.path.join(assets_dir, 'app_icon.png')
     img.save(png_path, 'PNG')
     print(f"✓ Created {png_path} (256x256)")
     

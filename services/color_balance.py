@@ -49,6 +49,17 @@ def apply_gray_world_robust(img_bgr: np.ndarray,
     r *= gain_r
     g *= gain_g
     b *= gain_b
+    
+    # Add triangular dither to reduce banding from gain scaling
+    # This is especially important when gains differ significantly
+    max_gain = max(gain_r, gain_g, gain_b)
+    if max_gain > 1.05:  # Only dither if significant gain applied
+        dither_r = np.random.uniform(-0.5, 0.5, r.shape) + np.random.uniform(-0.5, 0.5, r.shape)
+        dither_g = np.random.uniform(-0.5, 0.5, g.shape) + np.random.uniform(-0.5, 0.5, g.shape)
+        dither_b = np.random.uniform(-0.5, 0.5, b.shape) + np.random.uniform(-0.5, 0.5, b.shape)
+        r += dither_r
+        g += dither_g
+        b += dither_b
 
     balanced = cv2.merge([b, g, r])
     return np.clip(balanced, 0, 255).astype(np.uint8)
@@ -58,7 +69,7 @@ def apply_manual_gains(img_bgr: np.ndarray,
                        red_gain: float,
                        blue_gain: float) -> np.ndarray:
     """
-    Apply manual red/blue gains for white balance.
+    Apply manual red/blue gains for white balance with dithering to reduce banding.
     
     Args:
         img_bgr: Input BGR image (uint8)
@@ -70,7 +81,19 @@ def apply_manual_gains(img_bgr: np.ndarray,
     """
     img = img_bgr.astype(np.float32)
     b, g, r = cv2.split(img)
+    
+    # Apply gains
     r *= red_gain
     b *= blue_gain
+    
+    # Add small triangular dither noise before rounding to reduce banding
+    # This is especially important when gains > 1.0 cause quantization
+    if red_gain > 1.0 or blue_gain > 1.0:
+        # Triangular PDF dither: sum of two uniform distributions
+        dither_r = np.random.uniform(-0.5, 0.5, r.shape) + np.random.uniform(-0.5, 0.5, r.shape)
+        dither_b = np.random.uniform(-0.5, 0.5, b.shape) + np.random.uniform(-0.5, 0.5, b.shape)
+        r += dither_r
+        b += dither_b
+    
     balanced = cv2.merge([b, g, r])
     return np.clip(balanced, 0, 255).astype(np.uint8)
