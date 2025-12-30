@@ -163,8 +163,9 @@ class ImageProcessor:
             
             app_logger.info(f"Saved: {os.path.basename(output_path)}")
             
-            # Push to output servers if active (read from saved file, not in-memory img)
-            self.app._push_to_output_servers(output_path)
+            # Push to output servers if active - pass the processed image directly
+            # to avoid re-reading from disk and double-compressing JPGs
+            self.app._push_to_output_servers(output_path, img)
             
             # Clean up the processed image object (we only need the file path now)
             del img
