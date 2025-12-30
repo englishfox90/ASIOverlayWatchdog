@@ -4,6 +4,7 @@ Handles ZWO camera operations
 """
 import os
 import threading
+import tkinter as tk
 from services.logger import app_logger
 from services.zwo_camera import ZWOCamera
 from .camera_settings import CameraSettings
@@ -392,6 +393,20 @@ class CameraController:
             self.app.start_capture_button.config(state='disabled', cursor='')
             app_logger.warning("Invalid camera selection")
     
+    def _safe_get(self, var, default, var_type=float):
+        """Safely get a value from a tkinter variable, returning default if invalid.
+        
+        This handles cases where user clears a field while typing a new value.
+        """
+        try:
+            value = var.get()
+            # For numeric types, validate the value is reasonable
+            if var_type in (int, float) and value == '':
+                return default
+            return var_type(value)
+        except (tk.TclError, ValueError):
+            return default
+    
     def update_live_settings(self):
         """Update camera settings during active capture without restarting"""
         if not self.zwo_camera or not self.zwo_camera.camera:
@@ -399,7 +414,7 @@ class CameraController:
         
         try:
             # Update exposure (convert from UI to seconds) and apply immediately to camera
-            exposure_value = self.app.exposure_var.get()
+            exposure_value = self._safe_get(self.app.exposure_var, 1.0, float)
             if self.app.exposure_unit_var.get() == 's':
                 exposure_sec = exposure_value
             else:
@@ -408,17 +423,17 @@ class CameraController:
             # Use the new update_exposure method which applies to camera immediately
             self.zwo_camera.update_exposure(exposure_sec)
             
-            # Update other settings
-            self.zwo_camera.gain = self.app.gain_var.get()
-            self.zwo_camera.white_balance_r = self.app.wb_r_var.get()
-            self.zwo_camera.white_balance_b = self.app.wb_b_var.get()
-            self.zwo_camera.offset = self.app.offset_var.get()
-            self.zwo_camera.target_brightness = self.app.target_brightness_var.get()
+            # Update other settings (with safe defaults)
+            self.zwo_camera.gain = self._safe_get(self.app.gain_var, 100, int)
+            self.zwo_camera.white_balance_r = self._safe_get(self.app.wb_r_var, 75, int)
+            self.zwo_camera.white_balance_b = self._safe_get(self.app.wb_b_var, 99, int)
+            self.zwo_camera.offset = self._safe_get(self.app.offset_var, 20, int)
+            self.zwo_camera.target_brightness = self._safe_get(self.app.target_brightness_var, 100, int)
             self.zwo_camera.bayer_pattern = self.app.bayer_pattern_var.get()
             
             # Update auto exposure settings
             self.zwo_camera.auto_exposure = self.app.auto_exposure_var.get()
-            self.zwo_camera.max_exposure = self.app.max_exposure_var.get()
+            self.zwo_camera.max_exposure = self._safe_get(self.app.max_exposure_var, 30.0, float)
             
             # Update flip
             flip_map = {'None': 0, 'Horizontal': 1, 'Vertical': 2, 'Both': 3}
