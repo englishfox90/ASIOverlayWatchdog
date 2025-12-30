@@ -8,6 +8,7 @@ from PIL import Image, ImageTk
 from pathlib import Path
 from datetime import datetime
 from services.logger import app_logger
+from services.processor import auto_stretch_image
 
 
 class StatusManager:
@@ -93,17 +94,22 @@ class StatusManager:
                 except:
                     pass
             
-            # Apply auto brightness if enabled
-            # PERF-001: Only copy when we need to modify for brightness adjustment
+            # Apply auto-stretch first (same as saved/published images)
+            if self.app.config.get('auto_stretch_enabled', True):
+                preview_img = auto_stretch_image(img.copy())
+            else:
+                preview_img = img.copy()
+            
+            # Apply auto brightness if enabled (on top of stretch)
             if self.app.auto_brightness_var.get():
                 from PIL import ImageEnhance
                 import numpy as np
                 
-                # Analyze brightness using view (no copy) on grayscale conversion
-                gray_img = img.convert('L')
-                img_array = np.asarray(gray_img)  # View, not copy
+                # Analyze brightness
+                gray_img = preview_img.convert('L')
+                img_array = np.asarray(gray_img)
                 mean_brightness = np.mean(img_array)
-                del gray_img  # Release grayscale image
+                del gray_img
                 target_brightness = 128
                 auto_factor = target_brightness / max(mean_brightness, 10)
                 auto_factor = max(0.5, min(auto_factor, 4.0))
@@ -112,19 +118,11 @@ class StatusManager:
                 manual_factor = self.app.brightness_var.get()
                 final_factor = auto_factor * manual_factor
                 
-                # Now we need a copy to apply brightness enhancement
-                preview_img = img.copy()
                 enhancer = ImageEnhance.Brightness(preview_img)
                 preview_img = enhancer.enhance(final_factor)
-            else:
-                # No brightness adjustment - work directly with original for thumbnail
-                preview_img = img
             
-            # Resize to fit - thumbnail() modifies in-place, so copy if we haven't already
-            if preview_img is img:
-                thumb = img.copy()
-            else:
-                thumb = preview_img
+            # Resize to fit
+            thumb = preview_img
             thumb.thumbnail((200, 200), Image.Resampling.LANCZOS)
             
             photo = ImageTk.PhotoImage(thumb)
