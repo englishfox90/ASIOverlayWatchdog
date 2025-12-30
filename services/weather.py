@@ -300,14 +300,9 @@ class WeatherService:
         try:
             import os
             
-            # Get overlay_images directory (same as image overlays)
-            try:
-                import appdirs
-                from app_config import APP_NAME, APP_AUTHOR
-                data_dir = appdirs.user_data_dir(APP_NAME, APP_AUTHOR)
-            except ImportError:
-                # Fallback to local directory
-                data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "overlay_images")
+            # Get data directory (consistent with config.py pattern)
+            from app_config import APP_DATA_FOLDER
+            data_dir = os.path.join(os.getenv('LOCALAPPDATA'), APP_DATA_FOLDER)
             
             icon_dir = os.path.join(data_dir, "weather_icons")
             os.makedirs(icon_dir, exist_ok=True)

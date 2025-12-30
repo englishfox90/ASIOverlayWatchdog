@@ -1,5 +1,5 @@
 """
-AllSky Overlay Watchdog with ZWO Camera Support
+PFR Sentinel - Live Camera Monitoring & Overlay System for Observatories
 Main entry point - Modern UI Edition
 """
 # Initialize logging FIRST before any other imports that might log

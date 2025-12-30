@@ -1,5 +1,5 @@
 """
-Services package for AllSky Overlay Watchdog
+Services package for PFR Sentinel
 Contains core processing and hardware integration modules
 """
 from .config import Config

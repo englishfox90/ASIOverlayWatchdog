@@ -1,5 +1,5 @@
 """
-Main window for AllSky Overlay Watchdog
+Main window for PFR Sentinel
 Modern GUI with modular tab components and delegated business logic
 """
 import tkinter as tk
@@ -9,6 +9,7 @@ import os
 import gc
 from datetime import datetime
 
+from app_config import APP_DISPLAY_NAME, APP_SUBTITLE, APP_AUTHOR
 from services.config import Config
 from services.watcher import FileWatcher
 from services.logger import app_logger
@@ -234,8 +235,8 @@ class ModernOverlayApp:
     
     def show_about(self):
         """Show about dialog"""
-        about_text = f"""AllSky Overlay Watchdog
-ZWO Camera Edition
+        about_text = f"""{APP_DISPLAY_NAME}
+{APP_SUBTITLE}
 
 Version: {APP_VERSION}
 Author: {APP_AUTHOR}
