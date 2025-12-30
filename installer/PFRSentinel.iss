@@ -74,7 +74,7 @@ begin
   begin
     // Show info message about data locations
     MsgBox('User data is stored in:' + #13#10 + 
-           ExpandConstant('{localappdata}\PFR\Sentinel\') + #13#10#13#10 +
+           ExpandConstant('{localappdata}\PFRSentinel\') + #13#10#13#10 +
            '- config.json (preserved during upgrades)' + #13#10 +
            '- Logs\ (rotated daily, kept for 7 days)',
            mbInformation, MB_OK);
@@ -131,7 +131,7 @@ begin
     if (IsUpgrade) then
     begin
       // Don't uninstall - just overwrite files to preserve user data
-      // Config.json is now stored in %LOCALAPPDATA%\PFR\Sentinel\
+      // Config.json is now stored in %LOCALAPPDATA%\PFRSentinel\
       // so it won't be affected by upgrades anyway
     end;
   end;
