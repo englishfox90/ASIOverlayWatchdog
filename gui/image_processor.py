@@ -203,6 +203,11 @@ class ImageProcessor:
             display_base = self.app.preview_image.copy()
             from PIL import ImageEnhance
             
+            # Apply auto-stretch (MTF) if enabled - BEFORE brightness/saturation (same as save pipeline)
+            auto_stretch_config = self.app.config.get('auto_stretch', {})
+            if auto_stretch_config.get('enabled', False):
+                display_base = auto_stretch_image(display_base, auto_stretch_config)
+            
             # Apply brightness adjustment
             if self.app.auto_brightness_var.get():
                 import numpy as np
