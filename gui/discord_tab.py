@@ -3,7 +3,7 @@ Discord alerts tab - webhook configuration and alert settings
 """
 import tkinter as tk
 import ttkbootstrap as ttk
-from .theme import COLORS, FONTS, SPACING, create_scrollable_frame
+from .theme import COLORS, FONTS, SPACING, create_gradient_scrollable_frame
 from . import theme
 
 
@@ -23,7 +23,7 @@ class DiscordTab:
     def create_ui(self):
         """Create Discord tab UI"""
         # Create scrollable frame for content
-        scroll_container, scrollable_content = create_scrollable_frame(self.tab)
+        scroll_container, scrollable_content = create_gradient_scrollable_frame(self.tab)
         scroll_container.pack(fill='both', expand=True)
         
         # Content frame with padding

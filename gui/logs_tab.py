@@ -6,7 +6,7 @@ import ttkbootstrap as ttk
 import os
 import subprocess
 from . import theme
-from .theme import COLORS, FONTS, SPACING
+from .theme import COLORS, FONTS, SPACING, create_gradient_stripe
 from services.logger import app_logger
 
 
@@ -22,6 +22,9 @@ class LogsTab:
     
     def create_ui(self):
         """Create the logs tab UI with theme"""
+        # Gradient accent stripe at top
+        create_gradient_stripe(self.tab)
+        
         # Main container
         logs_container = tk.Frame(self.tab, bg=COLORS['bg_primary'])
         logs_container.pack(fill='both', expand=True)

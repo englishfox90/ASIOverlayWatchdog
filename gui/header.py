@@ -204,29 +204,51 @@ class LiveMonitoringHeader:
     """Live monitoring section with preview, histogram, and logs"""
     
     def __init__(self, parent):
-        self.frame = ttk.Labelframe(parent, text="  Live Monitoring  ", bootstyle="info", padding=10)
+        # Custom LabelFrame with Iris accent color for visibility
+        self.frame = tk.LabelFrame(
+            parent, 
+            text="  Live Monitoring  ",
+            font=FONTS['body_bold'],
+            fg=COLORS['accent_11'],  # Light iris purple text
+            bg=COLORS['bg_primary'],
+            bd=1,
+            relief='groove',
+            highlightbackground=COLORS['accent_6'],  # Iris border
+            highlightcolor=COLORS['accent_8'],
+            highlightthickness=1,
+            padx=10,
+            pady=10
+        )
         self.frame.pack(fill='both', padx=SPACING['button_gap'], pady=SPACING['element_gap'])
         
         # Layout: Preview on left, Histogram + Logs stacked on right
-        left_frame = ttk.Frame(self.frame)
+        left_frame = tk.Frame(self.frame, bg=COLORS['bg_primary'])
         left_frame.pack(side='left', padx=SPACING['button_gap'])
         
-        ttk.Label(left_frame, text="Last Capture", font=FONTS['body_bold']).pack()
-        self.mini_preview_label = ttk.Label(left_frame, text="No image yet", relief='sunken', width=25)
+        tk.Label(left_frame, text="Last Capture", font=FONTS['body_bold'],
+                bg=COLORS['bg_primary'], fg=COLORS['text_primary']).pack()
+        self.mini_preview_label = tk.Label(left_frame, text="No image yet", 
+                                           relief='sunken', width=25,
+                                           bg=COLORS['bg_input'], fg=COLORS['text_secondary'])
         self.mini_preview_label.pack()
         self.mini_preview_image = None
         
         # Right side: Histogram and logs stacked
-        right_frame = ttk.Frame(self.frame)
+        right_frame = tk.Frame(self.frame, bg=COLORS['bg_primary'])
         right_frame.pack(side='left', fill='both', expand=True, padx=SPACING['button_gap'])
         
         # Histogram on top
-        ttk.Label(right_frame, text="Histogram", font=FONTS['body_bold']).pack()
-        self.histogram_canvas = tk.Canvas(right_frame, width=600, height=100, bg=COLORS['bg_primary'], highlightthickness=1)
+        tk.Label(right_frame, text="Histogram", font=FONTS['body_bold'],
+                bg=COLORS['bg_primary'], fg=COLORS['text_primary']).pack()
+        self.histogram_canvas = tk.Canvas(right_frame, width=600, height=100, 
+                                          bg=COLORS['bg_primary'], 
+                                          highlightthickness=1,
+                                          highlightbackground=COLORS['border'])
         self.histogram_canvas.pack(fill='x')
         
         # Logs below
-        ttk.Label(right_frame, text="Recent Activity", font=FONTS['body_bold']).pack(pady=(SPACING['element_gap'], 0))
+        tk.Label(right_frame, text="Recent Activity", font=FONTS['body_bold'],
+                bg=COLORS['bg_primary'], fg=COLORS['text_primary']).pack(pady=(SPACING['element_gap'], 0))
         self.mini_log_text = scrolledtext.ScrolledText(right_frame, height=2, wrap=tk.WORD, font=FONTS['tiny'])
         self.mini_log_text.pack(fill='both', expand=True)
         self.mini_log_text.config(state='disabled')

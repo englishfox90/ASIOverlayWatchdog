@@ -3,7 +3,7 @@ Overlay tab component - Theme integration with modular structure
 """
 import tkinter as tk
 import ttkbootstrap as ttk
-from .theme import COLORS, FONTS, SPACING
+from .theme import COLORS, FONTS, SPACING, create_gradient_stripe
 from . import theme
 from .overlays.overlay_list import OverlayListPanel
 from .overlays.text_editor import TextOverlayEditor
@@ -23,6 +23,9 @@ class OverlayTab:
     
     def create_ui(self):
         """Create the themed overlay tab UI - 2 column layout"""
+        # Gradient accent stripe at top
+        create_gradient_stripe(self.tab)
+        
         # Main container with pack
         overlays_container = tk.Frame(self.tab, bg=COLORS['bg_primary'])
         overlays_container.pack(fill='both', expand=True)

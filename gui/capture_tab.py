@@ -5,7 +5,7 @@ Production-polished UI with consistent dark theme styling
 import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.tooltip import ToolTip
-from .theme import COLORS, FONTS, SPACING, LAYOUT, configure_dark_input_styles, create_primary_button, create_secondary_button, create_destructive_button, create_card, create_scrollable_frame
+from .theme import COLORS, FONTS, SPACING, LAYOUT, configure_dark_input_styles, create_primary_button, create_secondary_button, create_destructive_button, create_card, create_gradient_scrollable_frame
 
 
 class CaptureTab:
@@ -27,7 +27,7 @@ class CaptureTab:
     def create_ui(self):
         """Create the capture tab UI with production polish"""
         # Create scrollable frame for content
-        scroll_container, scrollable_content = create_scrollable_frame(self.tab)
+        scroll_container, scrollable_content = create_gradient_scrollable_frame(self.tab)
         scroll_container.pack(fill='both', expand=True)
         
         # Content frame with padding
@@ -59,14 +59,14 @@ class CaptureTab:
             button_frame, "📁 Directory Watch Mode",
             lambda: self.select_mode('watch')
         )
-        self.watch_mode_btn.config(width=22)
+        self.watch_mode_btn.config(width=24)  # Wider to prevent cutoff
         self.watch_mode_btn.pack(side='left', padx=(0, 2))
         
         self.camera_mode_btn = create_secondary_button(
             button_frame, "📷 ZWO Camera Capture Mode",
             lambda: self.select_mode('camera')
         )
-        self.camera_mode_btn.config(width=22)
+        self.camera_mode_btn.config(width=26)  # Wider for longer text
         self.camera_mode_btn.pack(side='left')
         
         # Pack the card container

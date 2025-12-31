@@ -5,7 +5,9 @@ Modern dark theme with consistent styling matching Capture tab
 import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.tooltip import ToolTip
-from .theme import COLORS, FONTS, SPACING, LAYOUT, configure_dark_input_styles, create_card, create_secondary_button, create_primary_button, create_scrollable_frame
+from .theme import (COLORS, FONTS, SPACING, LAYOUT, configure_dark_input_styles, 
+                   create_card, create_secondary_button, create_primary_button,
+                   create_gradient_scrollable_frame, ToggleButtonGroup, ToggleSwitch)
 
 
 class SettingsTab:
@@ -24,12 +26,13 @@ class SettingsTab:
     
     def create_ui(self):
         """Create the settings tab UI with full-width layout"""
-        # Create scrollable frame for content
-        scroll_container, scrollable_content = create_scrollable_frame(self.tab)
+        # Create scrollable frame with gradient background for content
+        scroll_container, scrollable_content = create_gradient_scrollable_frame(self.tab)
         scroll_container.pack(fill='both', expand=True)
         
-        # Content frame with padding
-        container = tk.Frame(scrollable_content, bg=COLORS['bg_primary'])
+        # Content frame with padding - transparent to show gradient
+        # Note: Cards will have their own solid backgrounds for readability
+        container = tk.Frame(scrollable_content)
         container.pack(fill='both', expand=True,
                       padx=SPACING['card_margin_x'],
                       pady=SPACING['card_margin_y'])
@@ -76,32 +79,37 @@ class SettingsTab:
         if not hasattr(self.app, 'output_mode_var'):
             self.app.output_mode_var = tk.StringVar(value='file')
         
-        modes = [
-            ('file', '💾 Save to File', 'Save processed images to output directory (default)'),
-            ('webserver', '🌐 Web Server', 'Serve latest image via HTTP (for NINA, browsers)'),
-            ('rtsp', '📡 RTSP Stream', 'Stream via RTSP protocol (for VLC, viewers)')
-        ]
-        
         # Check if ffmpeg is available for RTSP
         ffmpeg_available = self._check_ffmpeg_available()
         
-        for mode_id, label, tooltip in modes:
-            btn = ttk.Radiobutton(
+        # Build options list (exclude RTSP if ffmpeg not available)
+        options = [
+            ('file', '💾 Save to File'),
+            ('webserver', '🌐 Web Server'),
+        ]
+        if ffmpeg_available:
+            options.append(('rtsp', '📡 RTSP Stream'))
+        
+        # Create styled toggle button group
+        toggle_group = ToggleButtonGroup(
+            btn_frame,
+            options=options,
+            variable=self.app.output_mode_var,
+            command=lambda: self.app.on_output_mode_change(),
+            bg=COLORS['bg_card']
+        )
+        toggle_group.pack(side='left')
+        
+        # RTSP warning if not available
+        if not ffmpeg_available:
+            rtsp_hint = tk.Label(
                 btn_frame,
-                text=label,
-                variable=self.app.output_mode_var,
-                value=mode_id,
-                command=lambda: self.app.on_output_mode_change(),
-                bootstyle="primary-toolbutton"
+                text="(RTSP requires ffmpeg)",
+                font=FONTS['tiny'],
+                bg=COLORS['bg_card'],
+                fg=COLORS['text_muted']
             )
-            btn.pack(side='left', padx=(0, SPACING['element_gap']))
-            
-            # Disable RTSP if ffmpeg not found
-            if mode_id == 'rtsp' and not ffmpeg_available:
-                btn.config(state='disabled')
-                ToolTip(btn, text="⚠️ RTSP requires ffmpeg\n\nInstall ffmpeg and add to PATH to enable.\nSee README.md for instructions.", bootstyle="warning-inverse")
-            else:
-                ToolTip(btn, text=tooltip, bootstyle="primary-inverse")
+            rtsp_hint.pack(side='left', padx=(SPACING['element_gap'], 0))
         
         # Status display (shows URLs when servers running) with copy button
         status_frame = tk.Frame(parent, bg=COLORS['bg_card'])
@@ -191,12 +199,14 @@ class SettingsTab:
         format_frame.grid(row=row, column=1, sticky='w', 
                          pady=(0, SPACING['row_gap']), columnspan=2)
         
-        ttk.Radiobutton(format_frame, text="PNG (Lossless)",
-                       variable=self.app.output_format_var, value="png",
-                       bootstyle="primary-toolbutton").pack(side='left', padx=(0, 10))
-        ttk.Radiobutton(format_frame, text="JPG",
-                       variable=self.app.output_format_var, value="jpg",
-                       bootstyle="primary-toolbutton").pack(side='left')
+        # Use custom styled toggle button group
+        format_toggle = ToggleButtonGroup(
+            format_frame,
+            options=[('png', 'PNG (Lossless)'), ('jpg', 'JPG')],
+            variable=self.app.output_format_var,
+            bg=COLORS['bg_card']
+        )
+        format_toggle.pack(side='left')
         
         row += 1
         
@@ -242,18 +252,18 @@ class SettingsTab:
         
         row += 1
         
-        # Advanced Settings toggle
+        # Advanced Settings toggle - using custom styled toggle
         if not hasattr(self.app, 'webserver_advanced_var'):
             self.app.webserver_advanced_var = tk.BooleanVar(value=False)
         
-        advanced_check = ttk.Checkbutton(
-            grid, 
+        advanced_toggle = ToggleSwitch(
+            grid,
             text="⚙️ Show Advanced Settings (IP & Port)",
             variable=self.app.webserver_advanced_var,
             command=self._toggle_webserver_advanced,
-            bootstyle="primary-round-toggle"
+            bg=COLORS['bg_card']
         )
-        advanced_check.grid(row=row, column=0, columnspan=2, sticky='w', pady=(SPACING['element_gap'], SPACING['row_gap']))
+        advanced_toggle.grid(row=row, column=0, columnspan=2, sticky='w', pady=(SPACING['element_gap'], SPACING['row_gap']))
         
         row += 1
         
@@ -436,12 +446,14 @@ class SettingsTab:
         format_frame.grid(row=row, column=1, sticky='w', 
                          pady=(0, SPACING['row_gap']), columnspan=2)
         
-        ttk.Radiobutton(format_frame, text="PNG (Lossless)",
-                       variable=self.app.output_format_var, value="png",
-                       bootstyle="primary-toolbutton").pack(side='left', padx=(0, 10))
-        ttk.Radiobutton(format_frame, text="JPG",
-                       variable=self.app.output_format_var, value="jpg",
-                       bootstyle="primary-toolbutton").pack(side='left')
+        # Use custom styled toggle button group
+        format_toggle = ToggleButtonGroup(
+            format_frame,
+            options=[('png', 'PNG (Lossless)'), ('jpg', 'JPG')],
+            variable=self.app.output_format_var,
+            bg=COLORS['bg_card']
+        )
+        format_toggle.pack(side='left')
         
         row += 1
         
@@ -572,13 +584,14 @@ class SettingsTab:
         if not hasattr(self.app, 'weather_units_var'):
             self.app.weather_units_var = tk.StringVar(value='metric')
         
-        # Units
-        ttk.Radiobutton(control_row, text="°C",
-                       variable=self.app.weather_units_var, value="metric",
-                       bootstyle="primary-toolbutton").pack(side='left', padx=(0, 3))
-        ttk.Radiobutton(control_row, text="°F",
-                       variable=self.app.weather_units_var, value="imperial",
-                       bootstyle="primary-toolbutton").pack(side='left', padx=(0, 12))
+        # Units toggle using custom styled toggle button group
+        units_toggle = ToggleButtonGroup(
+            control_row,
+            options=[('metric', '°C'), ('imperial', '°F')],
+            variable=self.app.weather_units_var,
+            bg=COLORS['bg_card']
+        )
+        units_toggle.pack(side='left', padx=(0, 12))
         
         # Test button
         test_btn = create_secondary_button(control_row, "🌐 Test",

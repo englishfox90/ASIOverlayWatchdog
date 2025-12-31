@@ -4,7 +4,7 @@ Preview tab component - image preview with zoom controls
 import tkinter as tk
 import ttkbootstrap as ttk
 from . import theme
-from .theme import COLORS, FONTS, SPACING
+from .theme import COLORS, FONTS, SPACING, create_gradient_stripe
 
 
 class PreviewTab:
@@ -19,6 +19,9 @@ class PreviewTab:
     
     def create_ui(self):
         """Create the preview tab UI with theme"""
+        # Gradient accent stripe at top
+        create_gradient_stripe(self.tab)
+        
         # Main container
         preview_container = tk.Frame(self.tab, bg=COLORS['bg_primary'])
         preview_container.pack(fill='both', expand=True)
