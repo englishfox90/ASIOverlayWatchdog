@@ -157,6 +157,9 @@ class Config:
         self.config_path = config_path
         self.data = self.load()
         
+        # Migrate any paths that still reference old ASIOverlayWatchDog
+        self._migrate_old_paths()
+        
         # Always attempt to clean up old ASIOverlayWatchDog directory if it exists
         self._cleanup_old_directory()
     
@@ -224,6 +227,79 @@ class Config:
             print(f"  {old_dir}")
             print(f"to:")
             print(f"  {new_dir}")
+    
+    def _migrate_old_paths(self):
+        """Update any config paths that still reference old ASIOverlayWatchDog location"""
+        from services.logger import app_logger
+        import shutil
+        
+        paths_to_check = ['sdk_path', 'output_directory', 'watch_directory']
+        updated = False
+        
+        for key in paths_to_check:
+            value = self.data.get(key, '')
+            if value and 'ASIOverlayWatchDog' in value:
+                new_value = value.replace('ASIOverlayWatchDog', 'PFRSentinel')
+                
+                # For SDK path, also try to copy the DLL if it exists at old location but not new
+                if key == 'sdk_path' and os.path.isfile(value):
+                    new_dir = os.path.dirname(new_value)
+                    if not os.path.exists(new_value) and os.path.exists(new_dir):
+                        try:
+                            shutil.copy2(value, new_value)
+                            app_logger.info(f"Copied SDK DLL from {value} to {new_value}")
+                        except Exception as e:
+                            app_logger.warning(f"Could not copy SDK DLL: {e}")
+                
+                self.data[key] = new_value
+                app_logger.info(f"Migrated {key}: {value} -> {new_value}")
+                updated = True
+        
+        # Also check if sdk_path points to non-existent file - try to find it in new location
+        sdk_path = self.data.get('sdk_path', '')
+        if sdk_path and not os.path.isfile(sdk_path):
+            # Try to find SDK in the new PFRSentinel _internal folder
+            possible_locations = [
+                os.path.join(os.getenv('PROGRAMFILES(X86)', ''), 'PFRSentinel', '_internal', 'ASICamera2.dll'),
+                os.path.join(os.getenv('PROGRAMFILES', ''), 'PFRSentinel', '_internal', 'ASICamera2.dll'),
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), '_internal', 'ASICamera2.dll'),
+            ]
+            for loc in possible_locations:
+                if os.path.isfile(loc):
+                    self.data['sdk_path'] = loc
+                    app_logger.info(f"SDK path was invalid, found SDK at: {loc}")
+                    updated = True
+                    break
+            else:
+                if sdk_path:
+                    app_logger.warning(f"SDK path is invalid and could not find SDK: {sdk_path}")
+        
+        if updated:
+            self.save()
+        
+        # Clean up old Program Files installation if it exists and is empty or only has _internal
+        self._cleanup_old_program_files()
+    
+    def _cleanup_old_program_files(self):
+        """Attempt to remove old ASIOverlayWatchDog from Program Files if it exists"""
+        import shutil
+        from services.logger import app_logger
+        
+        # Check both Program Files locations
+        old_locations = [
+            os.path.join(os.getenv('PROGRAMFILES', ''), 'ASIOverlayWatchDog'),
+            os.path.join(os.getenv('PROGRAMFILES(X86)', ''), 'ASIOverlayWatchDog'),
+        ]
+        
+        for old_dir in old_locations:
+            if old_dir and os.path.exists(old_dir):
+                try:
+                    shutil.rmtree(old_dir)
+                    app_logger.info(f"Cleaned up old Program Files directory: {old_dir}")
+                except PermissionError:
+                    app_logger.warning(f"Could not remove old Program Files directory (may need admin rights): {old_dir}")
+                except Exception as e:
+                    app_logger.warning(f"Could not remove old Program Files directory {old_dir}: {e}")
     
     def _cleanup_old_directory(self):
         """Attempt to remove old ASIOverlayWatchDog directory if it still exists"""

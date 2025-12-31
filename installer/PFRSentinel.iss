@@ -81,6 +81,73 @@ begin
   end;
 end;
 
+{ Detect old ASIOverlayWatchDog installation by searching registry }
+function GetOldAppUninstallString: String;
+var
+  sUnInstPath: String;
+  sUnInstallString: String;
+  sDisplayName: String;
+  Keys: TArrayOfString;
+  i: Integer;
+begin
+  Result := '';
+  { Search for ASIOverlayWatchDog in uninstall registry - check HKCU first (lowest privileges) }
+  if RegGetSubkeyNames(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall', Keys) then
+  begin
+    for i := 0 to GetArrayLength(Keys) - 1 do
+    begin
+      sUnInstPath := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' + Keys[i];
+      if RegQueryStringValue(HKCU, sUnInstPath, 'DisplayName', sDisplayName) then
+      begin
+        if Pos('ASIOverlayWatchDog', sDisplayName) > 0 then
+        begin
+          RegQueryStringValue(HKCU, sUnInstPath, 'UninstallString', sUnInstallString);
+          Result := sUnInstallString;
+          Exit;
+        end;
+      end;
+    end;
+  end;
+  { Also check HKLM }
+  if RegGetSubkeyNames(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall', Keys) then
+  begin
+    for i := 0 to GetArrayLength(Keys) - 1 do
+    begin
+      sUnInstPath := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' + Keys[i];
+      if RegQueryStringValue(HKLM, sUnInstPath, 'DisplayName', sDisplayName) then
+      begin
+        if Pos('ASIOverlayWatchDog', sDisplayName) > 0 then
+        begin
+          RegQueryStringValue(HKLM, sUnInstPath, 'UninstallString', sUnInstallString);
+          Result := sUnInstallString;
+          Exit;
+        end;
+      end;
+    end;
+  end;
+end;
+
+function HasOldAppInstalled: Boolean;
+begin
+  Result := (GetOldAppUninstallString <> '');
+end;
+
+function UninstallOldApp: Integer;
+var
+  sUnInstallString: String;
+  iResultCode: Integer;
+begin
+  Result := 0;
+  sUnInstallString := GetOldAppUninstallString;
+  if sUnInstallString <> '' then begin
+    sUnInstallString := RemoveQuotes(sUnInstallString);
+    if Exec(sUnInstallString, '/SILENT /NORESTART /SUPPRESSMSGBOXES','', SW_HIDE, ewWaitUntilTerminated, iResultCode) then
+      Result := 1
+    else
+      Result := 2;
+  end;
+end;
+
 { Detect and handle previous installation }
 function GetUninstallString: String;
 var
@@ -128,9 +195,16 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if (CurStep=ssInstall) then
   begin
+    { Uninstall old ASIOverlayWatchDog if present }
+    if HasOldAppInstalled then
+    begin
+      Log('Found old ASIOverlayWatchDog installation, uninstalling...');
+      UninstallOldApp;
+    end;
+    
     if (IsUpgrade) then
     begin
-      // Don't uninstall - just overwrite files to preserve user data
+      // Don't uninstall PFRSentinel - just overwrite files to preserve user data
       // Config.json is now stored in %LOCALAPPDATA%\PFRSentinel\
       // so it won't be affected by upgrades anyway
     end;

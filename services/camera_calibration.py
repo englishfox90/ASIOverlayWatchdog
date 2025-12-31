@@ -147,6 +147,13 @@ class CameraCalibration:
                 if new_exposure is None:
                     brightness_ratio = self.target_brightness / max(brightness, 1)  # Avoid divide by zero
                     
+                    # Check if we're at max exposure and still below target
+                    at_max_exposure = abs(self.exposure_seconds - self.max_exposure_sec) < 0.001
+                    if at_max_exposure and brightness < self.target_brightness:
+                        self.log(f"  At maximum exposure ({self.max_exposure_sec*1000:.0f}ms) - accepting brightness {brightness:.1f} (target was {self.target_brightness})")
+                        self.log(f"Calibration complete at max exposure. Final brightness: {brightness:.1f}")
+                        return True
+                    
                     # Apply stall multiplier if progress has stalled
                     stall_multiplier = 1.0
                     if stalled_count >= 3:
@@ -176,6 +183,13 @@ class CameraCalibration:
                         adjustment_factor = brightness_ratio * 0.95
                     
                     new_exposure = self.exposure_seconds * adjustment_factor
+                    
+                    # Check if we want to go higher but are at max
+                    if new_exposure > self.max_exposure_sec and brightness < self.target_brightness:
+                        self.log(f"  Reached maximum exposure limit ({self.max_exposure_sec*1000:.0f}ms)")
+                        self.log(f"Calibration complete at max exposure. Brightness: {brightness:.1f} (target was {self.target_brightness})")
+                        return True
+                    
                     new_exposure = max(0.000032, min(self.max_exposure_sec, new_exposure))
                     self.log(f"  Adjusting exposure: {self.exposure_seconds*1000:.2f}ms -> {new_exposure*1000:.2f}ms (factor: {adjustment_factor:.2f})")
                 
