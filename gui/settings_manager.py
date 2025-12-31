@@ -60,6 +60,9 @@ class SettingsManager:
         self.app.auto_stretch_var.set(auto_stretch.get('enabled', False))
         self.app.stretch_median_var.set(auto_stretch.get('target_median', 0.25))
         self.app.stretch_linked_var.set(auto_stretch.get('linked_stretch', True))
+        self.app.stretch_preserve_blacks_var.set(auto_stretch.get('preserve_blacks', True))
+        self.app.stretch_shadow_var.set(auto_stretch.get('shadow_aggressiveness', 2.8))
+        self.app.stretch_saturation_var.set(auto_stretch.get('saturation_boost', 1.5))
         
         # Handle old timestamp corner key
         timestamp = self.app.config.get('timestamp_corner', False)
@@ -244,7 +247,10 @@ class SettingsManager:
         self.app.config.set('auto_stretch', {
             'enabled': self.app.auto_stretch_var.get(),
             'target_median': self.app.stretch_median_var.get(),
-            'linked_stretch': self.app.stretch_linked_var.get()
+            'linked_stretch': self.app.stretch_linked_var.get(),
+            'preserve_blacks': self.app.stretch_preserve_blacks_var.get(),
+            'shadow_aggressiveness': self.app.stretch_shadow_var.get(),
+            'saturation_boost': self.app.stretch_saturation_var.get()
         })
         
         self.app.config.set('timestamp_corner', self.app.timestamp_corner_var.get())

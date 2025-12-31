@@ -84,7 +84,11 @@ DEFAULT_CONFIG = {
     "auto_stretch": {
         "enabled": False,
         "target_median": 0.25,  # Target median value (0.0-1.0, default 0.25 = quarter brightness)
-        "linked_stretch": True  # Apply same stretch to all RGB channels (False = per-channel MAD clipping)
+        "linked_stretch": True,  # Apply same stretch to all RGB channels (False = per-channel MAD clipping)
+        "preserve_blacks": True,  # Keep true blacks dark instead of lifting to grey
+        "black_point": 0.0,  # Manual black point (0.0-0.1) - pixels below this stay black
+        "shadow_aggressiveness": 2.8,  # MAD multiplier for shadow clipping (1.5=aggressive, 2.8=standard, 4.0=gentle)
+        "saturation_boost": 1.5  # Post-stretch saturation boost (1.0=none, 1.5=moderate, 2.0=strong)
     },
     
     # Overlay settings

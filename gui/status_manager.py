@@ -95,10 +95,14 @@ class StatusManager:
                     pass
             
             # Apply auto-stretch first (same as saved/published images)
-            if self.app.config.get('auto_stretch_enabled', True):
+            auto_stretch_config = self.app.config.get('auto_stretch', {})
+            if auto_stretch_config.get('enabled', False):
                 stretch_config = {
-                    'target_median': self.app.config.get('stretch_target', 0.25),
-                    'linked_stretch': self.app.config.get('stretch_linked', True),
+                    'target_median': auto_stretch_config.get('target_median', 0.25),
+                    'linked_stretch': auto_stretch_config.get('linked_stretch', True),
+                    'preserve_blacks': auto_stretch_config.get('preserve_blacks', True),
+                    'shadow_aggressiveness': auto_stretch_config.get('shadow_aggressiveness', 2.8),
+                    'saturation_boost': auto_stretch_config.get('saturation_boost', 1.5),
                 }
                 preview_img = auto_stretch_image(img.copy(), stretch_config)
             else:

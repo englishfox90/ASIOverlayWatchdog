@@ -553,9 +553,11 @@ def auto_stretch_image(img, config):
         img: PIL Image object
         config: Dictionary with stretch settings:
                - target_median: Target median brightness (0.0-1.0)
-               - shadows_clip: Shadow clipping point (0.0-0.5)
-               - highlights_clip: Highlight clipping point (0.5-1.0)
-               - linked_stretch: Apply same stretch to all channels
+               - linked_stretch: Apply same stretch to all channels (prevents color shifts)
+               - preserve_blacks: Keep true blacks dark instead of lifting to grey
+               - black_point: Manual black point (0.0-0.1) - pixels below this stay black
+               - shadow_aggressiveness: MAD multiplier (1.5=aggressive, 2.8=standard, 4.0=gentle)
+               - saturation_boost: Post-stretch saturation multiplier
     
     Returns:
         PIL Image with stretch applied
@@ -567,9 +569,15 @@ def auto_stretch_image(img, config):
         # Get stretch parameters
         target_median = config.get('target_median', 0.25)
         linked_stretch = config.get('linked_stretch', True)
+        preserve_blacks = config.get('preserve_blacks', True)
+        black_point = config.get('black_point', 0.0)
+        shadow_aggressiveness = config.get('shadow_aggressiveness', 2.8)
+        saturation_boost = config.get('saturation_boost', 1.5)
         
-        # Clamp target to valid range
+        # Clamp parameters to valid ranges
         target_median = np.clip(target_median, 0.05, 0.95)
+        black_point = np.clip(black_point, 0.0, 0.1)
+        shadow_aggressiveness = np.clip(shadow_aggressiveness, 1.0, 5.0)
         
         # Check current image brightness - skip stretch if image is already bright
         # MTF stretch is designed for dark astro images, not daylight scenes
@@ -589,53 +597,26 @@ def auto_stretch_image(img, config):
             app_logger.debug(f"Auto-stretch skipped: image already bright (median={current_brightness:.3f} > target={target_median:.3f})")
             return img
         
-        app_logger.debug(f"Auto-stretch starting: current_median={current_brightness:.3f}, target={target_median:.3f}")
+        app_logger.debug(f"Auto-stretch starting: current_median={current_brightness:.3f}, target={target_median:.3f}, preserve_blacks={preserve_blacks}")
         
         # Determine if image is grayscale or color
         if len(img_array.shape) == 2:
             # Grayscale image
-            stretched = _stretch_channel(img_array, target_median, 'L')
+            stretched = _stretch_channel(img_array, target_median, 'L', 
+                                        preserve_blacks, black_point, shadow_aggressiveness)
         elif img_array.shape[2] == 3:
             # RGB image
             if linked_stretch:
-                # Linked stretch: use luminance for single MAD-based shadow clip
-                luminance = 0.299 * img_array[:,:,0] + 0.587 * img_array[:,:,1] + 0.114 * img_array[:,:,2]
-                
-                # Calculate shadow clip from luminance using MAD
-                median_lum = np.median(luminance)
-                mad_lum = np.median(np.abs(luminance - median_lum))
-                mad_lum = max(mad_lum, 0.001)
-                shadow_clip = max(0.0, median_lum - 2.8 * mad_lum)
-                shadow_clip = min(shadow_clip, median_lum * 0.8)
-                
-                app_logger.debug(f"Auto-stretch (linked): lum_median={median_lum:.4f}, MAD={mad_lum:.4f}, shadow_clip={shadow_clip:.4f}")
-                
-                # Apply same shadow clip to all channels
-                stretched = np.zeros_like(img_array)
-                for c in range(3):
-                    channel = img_array[:,:,c]
-                    if shadow_clip > 0:
-                        channel = np.clip(channel, shadow_clip, 1.0)
-                        channel = (channel - shadow_clip) / (1.0 - shadow_clip)
-                    stretched[:,:,c] = channel
-                
-                # Calculate MTF from luminance after clipping
-                lum_clipped = 0.299 * stretched[:,:,0] + 0.587 * stretched[:,:,1] + 0.114 * stretched[:,:,2]
-                current_median = np.median(lum_clipped)
-                midtone = _calculate_mtf_midtone(current_median, target_median)
-                
-                # Apply same MTF to all channels
-                for c in range(3):
-                    stretched[:,:,c] = mtf_stretch(stretched[:,:,c], midtone)
-                    
-                app_logger.debug(f"MTF (linked): post-clip_median={current_median:.4f}, midtone={midtone:.4f}, target={target_median:.3f}")
+                stretched = _stretch_linked_rgb(img_array, target_median, 
+                                               preserve_blacks, black_point, shadow_aggressiveness)
             else:
-                # Independent stretch per channel with MAD-based shadow clipping
+                # Independent stretch per channel (WARNING: can cause color shifts)
                 stretched = np.zeros_like(img_array)
                 channel_names = ['R', 'G', 'B']
                 for c in range(3):
                     stretched[:,:,c] = _stretch_channel(
-                        img_array[:,:,c], target_median, channel_names[c]
+                        img_array[:,:,c], target_median, channel_names[c],
+                        preserve_blacks, black_point, shadow_aggressiveness
                     )
         elif img_array.shape[2] == 4:
             # RGBA image - stretch RGB, preserve alpha
@@ -643,37 +624,15 @@ def auto_stretch_image(img, config):
             alpha = img_array[:,:,3]
             
             if linked_stretch:
-                # Linked stretch: use luminance for single MAD-based shadow clip
-                luminance = 0.299 * rgb[:,:,0] + 0.587 * rgb[:,:,1] + 0.114 * rgb[:,:,2]
-                
-                median_lum = np.median(luminance)
-                mad_lum = np.median(np.abs(luminance - median_lum))
-                mad_lum = max(mad_lum, 0.001)
-                shadow_clip = max(0.0, median_lum - 2.8 * mad_lum)
-                shadow_clip = min(shadow_clip, median_lum * 0.8)
-                
-                stretched_rgb = np.zeros_like(rgb)
-                for c in range(3):
-                    channel = rgb[:,:,c]
-                    if shadow_clip > 0:
-                        channel = np.clip(channel, shadow_clip, 1.0)
-                        channel = (channel - shadow_clip) / (1.0 - shadow_clip)
-                    stretched_rgb[:,:,c] = channel
-                
-                # Calculate MTF from luminance after clipping
-                lum_clipped = 0.299 * stretched_rgb[:,:,0] + 0.587 * stretched_rgb[:,:,1] + 0.114 * stretched_rgb[:,:,2]
-                current_median = np.median(lum_clipped)
-                midtone = _calculate_mtf_midtone(current_median, target_median)
-                
-                for c in range(3):
-                    stretched_rgb[:,:,c] = mtf_stretch(stretched_rgb[:,:,c], midtone)
+                stretched_rgb = _stretch_linked_rgb(rgb, target_median,
+                                                   preserve_blacks, black_point, shadow_aggressiveness)
             else:
-                # Independent stretch per channel with MAD-based shadow clipping
                 stretched_rgb = np.zeros_like(rgb)
                 channel_names = ['R', 'G', 'B']
                 for c in range(3):
                     stretched_rgb[:,:,c] = _stretch_channel(
-                        rgb[:,:,c], target_median, channel_names[c]
+                        rgb[:,:,c], target_median, channel_names[c],
+                        preserve_blacks, black_point, shadow_aggressiveness
                     )
             
             stretched = np.dstack([stretched_rgb, alpha])
@@ -685,9 +644,7 @@ def auto_stretch_image(img, config):
         stretched_uint8 = (stretched * 255.0).astype(np.uint8)
         result_img = Image.fromarray(stretched_uint8, mode=img.mode)
         
-        # Boost saturation to compensate for stretch color loss
-        # MTF stretch tends to desaturate, so we boost by ~50% to restore vibrancy
-        saturation_boost = config.get('stretch_saturation_boost', 1.5)
+        # Apply saturation boost to compensate for stretch color desaturation
         if saturation_boost != 1.0 and result_img.mode in ('RGB', 'RGBA'):
             from PIL import ImageEnhance
             enhancer = ImageEnhance.Color(result_img)
@@ -701,21 +658,148 @@ def auto_stretch_image(img, config):
         return img
 
 
-def _stretch_channel(channel, target_median, channel_name=''):
+def _stretch_linked_rgb(img_array, target_median, preserve_blacks=True, 
+                        black_point=0.0, shadow_aggressiveness=2.8):
+    """
+    Stretch RGB image using linked luminance-based approach.
+    
+    This applies the same shadow clip and MTF to all channels, which
+    preserves color balance and prevents per-frame color shifts.
+    
+    Args:
+        img_array: 3D numpy array (H, W, 3) in 0-1 range
+        target_median: Target median brightness after stretch
+        preserve_blacks: If True, keep true blacks dark
+        black_point: Manual black point - pixels below this stay black
+        shadow_aggressiveness: MAD multiplier for shadow clipping
+    
+    Returns:
+        Stretched RGB array
+    """
+    # Calculate luminance for linked processing
+    luminance = 0.299 * img_array[:,:,0] + 0.587 * img_array[:,:,1] + 0.114 * img_array[:,:,2]
+    
+    # Calculate shadow clip from luminance using MAD
+    median_lum = np.median(luminance)
+    mad_lum = np.median(np.abs(luminance - median_lum))
+    mad_lum = max(mad_lum, 0.001)
+    
+    # Calculate shadow clip point using aggressiveness parameter
+    # Higher aggressiveness = more clipping = lighter blacks
+    # Lower aggressiveness = less clipping = darker blacks preserved
+    shadow_clip = max(0.0, median_lum - shadow_aggressiveness * mad_lum)
+    
+    # Safety: don't clip more than 80% of the median value
+    shadow_clip = min(shadow_clip, median_lum * 0.8)
+    
+    # Apply manual black point if set (overrides calculated if higher)
+    effective_black_point = max(shadow_clip, black_point)
+    
+    app_logger.debug(f"Auto-stretch (linked): lum_median={median_lum:.4f}, MAD={mad_lum:.4f}, "
+                    f"shadow_clip={shadow_clip:.4f}, black_point={black_point:.4f}")
+    
+    # Create output array
+    stretched = np.zeros_like(img_array)
+    
+    if preserve_blacks:
+        # PRESERVE BLACKS MODE: Apply soft transition instead of hard clip
+        # This keeps true blacks dark while still stretching midtones
+        
+        # Find the 1st percentile as true black reference
+        true_black = np.percentile(luminance, 1)
+        
+        # Calculate transition zone (pixels between true black and clip point)
+        transition_start = true_black
+        transition_end = effective_black_point
+        
+        app_logger.debug(f"Preserve blacks: true_black={true_black:.4f}, transition=[{transition_start:.4f}-{transition_end:.4f}]")
+        
+        for c in range(3):
+            channel = img_array[:,:,c].copy()
+            
+            if transition_end > transition_start:
+                # Create mask for different zones
+                is_black = luminance <= transition_start
+                is_transition = (luminance > transition_start) & (luminance <= transition_end)
+                is_normal = luminance > transition_end
+                
+                # Blacks stay black (map to 0)
+                channel[is_black] = 0.0
+                
+                # Transition zone: smooth ramp from 0 to clipped value
+                if np.any(is_transition):
+                    # Calculate how far through transition zone each pixel is
+                    t = (luminance[is_transition] - transition_start) / (transition_end - transition_start)
+                    # Smooth step function (ease in/out)
+                    t = t * t * (3 - 2 * t)  # Smoothstep
+                    # Map from original value to stretched value
+                    orig_val = channel[is_transition]
+                    stretched_val = (orig_val - effective_black_point) / (1.0 - effective_black_point)
+                    stretched_val = np.clip(stretched_val, 0, 1)
+                    channel[is_transition] = t * stretched_val
+                
+                # Normal zone: standard clip and rescale
+                if np.any(is_normal):
+                    normal_vals = channel[is_normal]
+                    normal_vals = np.clip(normal_vals, effective_black_point, 1.0)
+                    channel[is_normal] = (normal_vals - effective_black_point) / (1.0 - effective_black_point)
+            else:
+                # No transition zone - just apply clip if needed
+                if effective_black_point > 0:
+                    channel = np.clip(channel, effective_black_point, 1.0)
+                    channel = (channel - effective_black_point) / (1.0 - effective_black_point)
+            
+            stretched[:,:,c] = channel
+    else:
+        # STANDARD MODE: Hard clip shadows (original behavior)
+        for c in range(3):
+            channel = img_array[:,:,c]
+            if effective_black_point > 0:
+                channel = np.clip(channel, effective_black_point, 1.0)
+                channel = (channel - effective_black_point) / (1.0 - effective_black_point)
+            stretched[:,:,c] = channel
+    
+    # Calculate MTF from luminance after clipping
+    lum_clipped = 0.299 * stretched[:,:,0] + 0.587 * stretched[:,:,1] + 0.114 * stretched[:,:,2]
+    current_median = np.median(lum_clipped)
+    
+    # Skip MTF if already at target
+    if abs(current_median - target_median) < 0.01:
+        app_logger.debug(f"MTF (linked): skipped - already at target (median={current_median:.4f})")
+        return stretched
+    
+    midtone = _calculate_mtf_midtone(current_median, target_median)
+    
+    # Apply same MTF to all channels (preserves color)
+    for c in range(3):
+        stretched[:,:,c] = mtf_stretch(stretched[:,:,c], midtone)
+    
+    app_logger.debug(f"MTF (linked): post-clip_median={current_median:.4f}, midtone={midtone:.4f}, target={target_median:.3f}")
+    
+    return stretched
+
+
+def _stretch_channel(channel, target_median, channel_name='',
+                    preserve_blacks=True, black_point=0.0, shadow_aggressiveness=2.8):
     """
     Stretch a single channel to target median using MAD-based shadow clipping.
     
-    This uses the statistical approach: shadow_clip = median - 2.8 * MAD
+    This uses the statistical approach: shadow_clip = median - aggressiveness * MAD
     where MAD (Median Absolute Deviation) is a robust measure of noise floor.
     
     Args:
         channel: 2D numpy array (0-1 range)
         target_median: Target median value after stretch
         channel_name: Optional name for debug logging (e.g., 'R', 'G', 'B')
+        preserve_blacks: If True, keep true blacks dark
+        black_point: Manual black point - pixels below this stay black
+        shadow_aggressiveness: MAD multiplier (lower = preserve more shadows)
     
     Returns:
         Stretched channel
     """
+    channel = channel.copy()
+    
     # Step 1: Calculate shadow clip using MAD (Median Absolute Deviation)
     median = np.median(channel)
     mad = np.median(np.abs(channel - median))
@@ -723,20 +807,49 @@ def _stretch_channel(channel, target_median, channel_name=''):
     # Ensure minimum MAD to prevent over-clipping uniform images
     mad = max(mad, 0.001)
     
-    # Calculate shadow clip point: median - 2.8 * MAD
-    # 2.8 sigma captures ~99.5% of noise in Gaussian distribution
-    shadow_clip = max(0.0, median - 2.8 * mad)
+    # Calculate shadow clip point using aggressiveness parameter
+    shadow_clip = max(0.0, median - shadow_aggressiveness * mad)
     
     # Safety: don't clip more than 80% of the median value
     shadow_clip = min(shadow_clip, median * 0.8)
     
-    if channel_name:
-        app_logger.debug(f"Auto-stretch {channel_name}: median={median:.4f}, MAD={mad:.4f}, shadow_clip={shadow_clip:.4f}")
+    # Apply manual black point if set (overrides calculated if higher)
+    effective_black_point = max(shadow_clip, black_point)
     
-    # Step 2: Apply shadow clipping and rescale to 0-1
-    if shadow_clip > 0:
-        channel = np.clip(channel, shadow_clip, 1.0)
-        channel = (channel - shadow_clip) / (1.0 - shadow_clip)
+    if channel_name:
+        app_logger.debug(f"Auto-stretch {channel_name}: median={median:.4f}, MAD={mad:.4f}, "
+                        f"shadow_clip={shadow_clip:.4f}, effective_bp={effective_black_point:.4f}")
+    
+    # Step 2: Apply shadow clipping with optional black preservation
+    if preserve_blacks and effective_black_point > 0:
+        # Find true black reference (1st percentile)
+        true_black = np.percentile(channel, 1)
+        
+        # Create smooth transition from true blacks to normal stretch
+        is_black = channel <= true_black
+        is_normal = channel > effective_black_point
+        is_transition = ~is_black & ~is_normal
+        
+        result = np.zeros_like(channel)
+        result[is_black] = 0.0  # True blacks stay black
+        
+        if np.any(is_transition):
+            # Smooth transition zone
+            t = (channel[is_transition] - true_black) / (effective_black_point - true_black + 1e-10)
+            t = t * t * (3 - 2 * t)  # Smoothstep
+            stretched_val = (channel[is_transition] - effective_black_point) / (1.0 - effective_black_point)
+            stretched_val = np.clip(stretched_val, 0, 1)
+            result[is_transition] = t * stretched_val
+        
+        if np.any(is_normal):
+            normal_vals = np.clip(channel[is_normal], effective_black_point, 1.0)
+            result[is_normal] = (normal_vals - effective_black_point) / (1.0 - effective_black_point)
+        
+        channel = result
+    elif effective_black_point > 0:
+        # Standard hard clip (original behavior)
+        channel = np.clip(channel, effective_black_point, 1.0)
+        channel = (channel - effective_black_point) / (1.0 - effective_black_point)
     
     # Step 3: Calculate current median after clipping
     current_median = np.median(channel)

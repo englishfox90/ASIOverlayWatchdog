@@ -860,6 +860,134 @@ class SettingsTab:
         
         row += 1
         
+        # Preserve Blacks checkbox
+        self.app.stretch_preserve_blacks_var = tk.BooleanVar(value=True)
+        preserve_blacks_check = ttk.Checkbutton(grid, text="Preserve black point",
+                                               variable=self.app.stretch_preserve_blacks_var,
+                                               bootstyle="info-square-toggle",
+                                               state='disabled')
+        preserve_blacks_check.grid(row=row, column=0, columnspan=3, sticky='w',
+                                  pady=(0, SPACING['row_gap']))
+        self.app.stretch_preserve_blacks_check = preserve_blacks_check
+        
+        ToolTip(preserve_blacks_check,
+               text="Keep true blacks dark instead of lifting them to grey. "
+                    "Prevents the washed-out look while still stretching midtones.",
+               bootstyle="info-inverse")
+        
+        row += 1
+        
+        # Shadow Aggressiveness slider
+        tk.Label(grid, text="Shadow Clip:", font=FONTS['body'],
+                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
+                width=LAYOUT['label_width'], anchor='w').grid(
+            row=row, column=0, sticky='w', pady=(0, SPACING['row_gap']))
+        
+        shadow_frame = tk.Frame(grid, bg=COLORS['bg_card'])
+        shadow_frame.grid(row=row, column=1, sticky='ew', 
+                         pady=(0, SPACING['row_gap']), columnspan=2)
+        
+        self.app.stretch_shadow_var = tk.DoubleVar(value=2.8)
+        self.app.stretch_shadow_scale = ttk.Scale(
+            shadow_frame,
+            from_=1.5, to=4.5,  # 1.5=aggressive (more grey), 4.5=gentle (darker blacks)
+            variable=self.app.stretch_shadow_var,
+            orient='horizontal',
+            bootstyle="info",
+            state='disabled'
+        )
+        self.app.stretch_shadow_scale.pack(side='left', fill='x', expand=True,
+                                           padx=(0, SPACING['row_gap']))
+        
+        self.app.stretch_shadow_label = tk.Label(
+            shadow_frame,
+            text="Std",
+            font=FONTS['body_bold'],
+            bg=COLORS['bg_card'],
+            fg=COLORS['text_disabled'],
+            width=8
+        )
+        self.app.stretch_shadow_label.pack(side='left')
+        
+        def update_shadow_label(*args):
+            val = self.app.stretch_shadow_var.get()
+            if val <= 2.0:
+                label = "Aggressive"
+            elif val <= 3.0:
+                label = "Standard"
+            else:
+                label = "Gentle"
+            self.app.stretch_shadow_label.config(text=label)
+            if self.app.preview_image:
+                self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
+        
+        try:
+            for trace_id in self.app.stretch_shadow_var.trace_info():
+                self.app.stretch_shadow_var.trace_remove(*trace_id)
+        except:
+            pass
+        
+        self.app.stretch_shadow_var.trace_add('write', update_shadow_label)
+        
+        ToolTip(self.app.stretch_shadow_scale,
+               text="How aggressively to clip shadows. Gentle = darker blacks preserved, Aggressive = more lifted.",
+               bootstyle="info-inverse")
+        
+        row += 1
+        
+        # Saturation Boost slider
+        tk.Label(grid, text="Saturation Boost:", font=FONTS['body'],
+                bg=COLORS['bg_card'], fg=COLORS['text_secondary'],
+                width=LAYOUT['label_width'], anchor='w').grid(
+            row=row, column=0, sticky='w', pady=(0, SPACING['row_gap']))
+        
+        sat_boost_frame = tk.Frame(grid, bg=COLORS['bg_card'])
+        sat_boost_frame.grid(row=row, column=1, sticky='ew', 
+                            pady=(0, SPACING['row_gap']), columnspan=2)
+        
+        self.app.stretch_saturation_var = tk.DoubleVar(value=1.5)
+        self.app.stretch_saturation_scale = ttk.Scale(
+            sat_boost_frame,
+            from_=1.0, to=2.0,  # 1.0=none, 2.0=strong
+            variable=self.app.stretch_saturation_var,
+            orient='horizontal',
+            bootstyle="info",
+            state='disabled'
+        )
+        self.app.stretch_saturation_scale.pack(side='left', fill='x', expand=True,
+                                               padx=(0, SPACING['row_gap']))
+        
+        self.app.stretch_saturation_label = tk.Label(
+            sat_boost_frame,
+            text="1.5x",
+            font=FONTS['body_bold'],
+            bg=COLORS['bg_card'],
+            fg=COLORS['text_disabled'],
+            width=6
+        )
+        self.app.stretch_saturation_label.pack(side='left')
+        
+        def update_saturation_label(*args):
+            val = self.app.stretch_saturation_var.get()
+            self.app.stretch_saturation_label.config(text=f"{val:.1f}x")
+            if self.app.preview_image:
+                self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
+        
+        try:
+            for trace_id in self.app.stretch_saturation_var.trace_info():
+                self.app.stretch_saturation_var.trace_remove(*trace_id)
+        except:
+            pass
+        
+        self.app.stretch_saturation_var.trace_add('write', update_saturation_label)
+        
+        ToolTip(self.app.stretch_saturation_scale,
+               text="Boost color saturation after stretch (1.0 = no boost, 2.0 = double). "
+                    "Helps restore color vibrancy that stretching can reduce.",
+               bootstyle="info-inverse")
+        
+        row += 1
+        
         # === End Auto Stretch Section ===
         
         # Timestamp
@@ -951,11 +1079,21 @@ class SettingsTab:
             self.app.stretch_median_scale.config(state='normal')
             self.app.stretch_median_label.config(fg=COLORS['text_primary'])
             self.app.stretch_linked_check.config(state='normal')
+            self.app.stretch_preserve_blacks_check.config(state='normal')
+            self.app.stretch_shadow_scale.config(state='normal')
+            self.app.stretch_shadow_label.config(fg=COLORS['text_primary'])
+            self.app.stretch_saturation_scale.config(state='normal')
+            self.app.stretch_saturation_label.config(fg=COLORS['text_primary'])
         else:
             # Disable stretch controls
             self.app.stretch_median_scale.config(state='disabled')
             self.app.stretch_median_label.config(fg=COLORS['text_disabled'])
             self.app.stretch_linked_check.config(state='disabled')
+            self.app.stretch_preserve_blacks_check.config(state='disabled')
+            self.app.stretch_shadow_scale.config(state='disabled')
+            self.app.stretch_shadow_label.config(fg=COLORS['text_disabled'])
+            self.app.stretch_saturation_scale.config(state='disabled')
+            self.app.stretch_saturation_label.config(fg=COLORS['text_disabled'])
         
         # Refresh preview if there's an image loaded
         if self.app.preview_image:

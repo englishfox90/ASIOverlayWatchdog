@@ -258,9 +258,26 @@ class CameraConnection:
             controls = self.camera.get_controls()
             self.log(f"  Available controls: {len(controls)}")
             
-            # Apply settings if provided
+            # Brief stabilization delay - camera needs time to fully initialize
+            # This helps prevent "Camera closed" errors immediately after connection
+            time.sleep(0.3)
+            
+            # Apply settings if provided (sets ROI, gain, exposure, etc.)
             if settings:
                 self.configure(settings)
+            else:
+                # CRITICAL: Always set ROI to full frame even without settings
+                # Without this, camera may use default ROI causing resolution mismatch
+                self.log("No settings provided - setting ROI to full frame (default)")
+                self.camera.set_roi(
+                    start_x=0, start_y=0,
+                    width=camera_info['MaxWidth'],
+                    height=camera_info['MaxHeight'],
+                    bins=1,
+                    image_type=self.asi.ASI_IMG_RAW8
+                )
+                self.camera.set_image_type(self.asi.ASI_IMG_RAW8)
+                self.log(f"  ROI: Full frame {camera_info['MaxWidth']}x{camera_info['MaxHeight']}")
             
             self.log(f"✓ Camera connection successful")
             return True
@@ -309,9 +326,16 @@ class CameraConnection:
         self.log(f"Using first available camera at index {cameras[0]['index']}: {cameras[0]['name']}")
         return cameras[0]['index']
     
-    def reconnect_safe(self, target_camera_name: Optional[str] = None) -> bool:
+    def reconnect_safe(self, target_camera_name: Optional[str] = None,
+                       settings: Optional[Dict[str, Any]] = None) -> bool:
         """
         Safely reconnect to camera by re-detecting available cameras first.
+        
+        Args:
+            target_camera_name: Name of camera to reconnect to (defaults to last connected)
+            settings: Camera settings dict to apply after reconnection (ROI, gain, etc.)
+                     CRITICAL: Without settings, camera may use default ROI causing
+                     resolution mismatch and reshape errors during capture.
         """
         self.log("=== Safe Camera Reconnection ===")
         camera_to_find = target_camera_name or self.camera_name
@@ -332,8 +356,8 @@ class CameraConnection:
         target_index = self._find_camera_index(detected, camera_to_find)
         self.camera_index = target_index
         
-        # Connect (with SDK reset fallback on failure)
-        if self.connect(target_index):
+        # Connect with settings (with SDK reset fallback on failure)
+        if self.connect(target_index, settings):
             return True
         
         self.log("⚠ Connection failed, attempting complete SDK reset...")
@@ -347,7 +371,7 @@ class CameraConnection:
         
         target_index = self._find_camera_index(detected, camera_to_find)
         self.camera_index = target_index
-        return self.connect(target_index)
+        return self.connect(target_index, settings)
     
     # =========================================================================
     # Camera Configuration

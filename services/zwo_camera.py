@@ -175,8 +175,26 @@ class ZWOCamera:
         """
         Safely reconnect to camera by re-detecting available cameras first.
         Delegates to connection manager, but handles calibration manager init.
+        
+        IMPORTANT: This passes current camera settings to ensure ROI and other
+        settings are properly restored after reconnection. Without this, the
+        camera may capture at wrong resolution causing reshape errors.
         """
-        success = self._connection.reconnect_safe(target_camera_name=self.camera_name)
+        # Build settings dict from current properties to restore after reconnection
+        settings = {
+            'gain': self.gain,
+            'exposure_sec': self.exposure_seconds,
+            'wb_r': self.white_balance_r,
+            'wb_b': self.white_balance_b,
+            'wb_mode': self.wb_mode,
+            'offset': self.offset,
+            'flip': self.flip,
+        }
+        
+        success = self._connection.reconnect_safe(
+            target_camera_name=self.camera_name,
+            settings=settings
+        )
         
         if success:
             # Sync camera_name and camera_index from connection manager
@@ -440,11 +458,8 @@ class ZWOCamera:
                                     except Exception as exp_err:
                                         pass  # No exposure active
                                     
-                                    # Disconnect camera gracefully
-                                    # Note: We use snapshot mode, not video mode - no need to stop_video_capture
-                                    self.log("Closing camera connection...")
-                                    self.camera.close()
-                                    self.camera = None
+                                    # Disconnect camera gracefully using connection manager
+                                    self._connection.disconnect()
                                     self.log("✓ Camera disconnected for off-peak hours (reducing hardware load)")
                                     
                                     # Restore capturing flag for reconnection logic
@@ -526,18 +541,11 @@ class ZWOCamera:
                     if consecutive_errors <= max_reconnect_attempts:
                         self.log(f"Initiating reconnection attempt {consecutive_errors}/{max_reconnect_attempts}...")
                         try:
-                            # Clean up existing camera first
+                            # Clean up existing camera using connection manager
+                            # This ensures proper cleanup via the thread-safe disconnect method
                             if self.camera:
                                 self.log("Cleaning up existing camera connection...")
-                                # Note: We use snapshot mode, not video mode - no need to stop_video_capture
-                                try:
-                                    self.camera.close()
-                                    self.log("Closed camera")
-                                except Exception as close_err:
-                                    self.log(f"Camera already closed: {close_err}")
-                                finally:
-                                    self.camera = None
-                                    self.log("Camera reference cleared")
+                                self._connection.disconnect()
                             
                             # Reinitialize camera using safe reconnection
                             self.log("Waiting 0.5s before reconnection attempt...")
