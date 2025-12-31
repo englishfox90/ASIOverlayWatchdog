@@ -1,148 +1,236 @@
 """
-Generate application icon for ASIOverlayWatchDog
-Creates an astronomy-themed icon with telescope/camera motif
-"""
-from PIL import Image, ImageDraw, ImageFont
-import os
+Generate application icon for PFR Sentinel
+Converts Icon.png or Icon.svg to multi-resolution .ico file for Windows
 
-def create_app_icon():
-    """Create a multi-resolution icon file"""
+Usage:
+    python scripts/create_icon.py
     
-    # Create base image at highest resolution (256x256)
-    size = 256
-    img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+Source files (in assets/):
+    - Icon.png (preferred) - High-res PNG source
+    - Icon.svg (fallback) - SVG source (requires cairosvg)
     
-    # Dark blue gradient background (night sky)
-    for i in range(size):
-        # Gradient from dark blue to darker blue
-        r = int(10 + (30 - 10) * (i / size))
-        g = int(15 + (45 - 15) * (i / size))
-        b = int(40 + (80 - 40) * (i / size))
-        draw.rectangle([(0, i), (size, i+1)], fill=(r, g, b, 255))
+Output files (in assets/):
+    - app_icon.ico - Multi-resolution Windows icon (16x16 to 256x256)
+    - app_icon.png - 256x256 PNG copy for reference
+
+Style Guide:
+    - Corner radius: 12.5% of icon size (matches PFRAstro liquid glass aesthetic)
+    - This gives ~32px radius on 256px icon, scaling proportionally
+"""
+from PIL import Image, ImageDraw
+import os
+import sys
+
+# Corner radius as percentage of icon size (PFRAstro style guide)
+CORNER_RADIUS_PERCENT = 12.5
+
+
+def add_rounded_corners(img: Image.Image, radius_percent: float = CORNER_RADIUS_PERCENT) -> Image.Image:
+    """Add rounded corners to an image using an alpha mask.
     
-    # Draw stars (small white dots)
-    import random
-    random.seed(42)  # Consistent stars
-    for _ in range(20):
-        x = random.randint(10, size-10)
-        y = random.randint(10, size-10)
-        star_size = random.randint(1, 3)
-        draw.ellipse([x-star_size, y-star_size, x+star_size, y+star_size], 
-                     fill=(255, 255, 255, random.randint(180, 255)))
+    Args:
+        img: Source PIL Image (will be converted to RGBA)
+        radius_percent: Corner radius as percentage of image size
+        
+    Returns:
+        New image with rounded corners and transparent background
+    """
+    # Ensure RGBA
+    if img.mode != 'RGBA':
+        img = img.convert('RGBA')
     
-    # Draw telescope/camera body (simplified camera shape)
-    cam_color = (60, 60, 70, 255)
-    lens_color = (40, 40, 50, 255)
-    highlight_color = (200, 200, 220, 255)
+    size = img.size[0]  # Assuming square
+    radius = int(size * radius_percent / 100)
     
-    # Main camera body (rounded rectangle)
-    body_rect = [size*0.25, size*0.35, size*0.75, size*0.75]
-    draw.rounded_rectangle(body_rect, radius=15, fill=cam_color, outline=highlight_color, width=3)
+    # Create a mask for rounded corners
+    mask = Image.new('L', img.size, 0)
+    draw = ImageDraw.Draw(mask)
     
-    # Lens (circle on left side)
-    lens_center_x = size * 0.35
-    lens_center_y = size * 0.55
-    lens_radius = size * 0.15
-    draw.ellipse([lens_center_x - lens_radius, lens_center_y - lens_radius,
-                  lens_center_x + lens_radius, lens_center_y + lens_radius],
-                 fill=lens_color, outline=highlight_color, width=3)
+    # Draw rounded rectangle (white = opaque, black = transparent)
+    draw.rounded_rectangle(
+        [(0, 0), (size - 1, size - 1)],
+        radius=radius,
+        fill=255
+    )
     
-    # Lens glass reflection (inner circle)
-    inner_radius = lens_radius * 0.6
-    draw.ellipse([lens_center_x - inner_radius, lens_center_y - inner_radius,
-                  lens_center_x + inner_radius, lens_center_y + inner_radius],
-                 fill=(70, 70, 90, 255))
+    # Create output with transparent background
+    output = Image.new('RGBA', img.size, (0, 0, 0, 0))
+    output.paste(img, (0, 0))
     
-    # Lens highlight (small white arc)
-    highlight_radius = lens_radius * 0.3
-    highlight_x = lens_center_x - lens_radius * 0.3
-    highlight_y = lens_center_y - lens_radius * 0.3
-    draw.ellipse([highlight_x - highlight_radius, highlight_y - highlight_radius,
-                  highlight_x + highlight_radius, highlight_y + highlight_radius],
-                 fill=(200, 220, 255, 200))
+    # Apply the rounded corner mask to alpha channel
+    # Composite: keep RGB from img, use mask for alpha
+    r, g, b, a = output.split()
+    # Combine existing alpha with rounded corner mask
+    combined_alpha = Image.composite(a, Image.new('L', img.size, 0), mask)
+    output = Image.merge('RGBA', (r, g, b, combined_alpha))
     
-    # Viewfinder bump on top
-    viewfinder_rect = [size*0.42, size*0.25, size*0.58, size*0.38]
-    draw.rounded_rectangle(viewfinder_rect, radius=5, fill=cam_color, outline=highlight_color, width=2)
+    return output
+
+
+def convert_svg_to_png(svg_path: str, output_path: str, size: int = 512) -> bool:
+    """Convert SVG to PNG using cairosvg if available.
     
-    # Button/indicator LEDs (small colored dots)
-    # Red LED
-    led_x = size * 0.65
-    led_y = size * 0.45
-    led_size = size * 0.02
-    draw.ellipse([led_x - led_size, led_y - led_size, led_x + led_size, led_y + led_size],
-                 fill=(255, 50, 50, 255), outline=(200, 200, 200, 255), width=1)
-    
-    # Green LED
-    led_x = size * 0.65
-    led_y = size * 0.52
-    draw.ellipse([led_x - led_size, led_y - led_size, led_x + led_size, led_y + led_size],
-                 fill=(50, 255, 50, 255), outline=(200, 200, 200, 255), width=1)
-    
-    # Overlay text indicator (small text at bottom)
-    # Draw "ASI" text on lens
+    Args:
+        svg_path: Path to source SVG file
+        output_path: Path for output PNG file
+        size: Output size in pixels (square)
+        
+    Returns:
+        True if successful, False otherwise
+    """
     try:
-        # Try to use a bold font
-        font_size = int(size * 0.12)
-        try:
-            font = ImageFont.truetype("arial.ttf", font_size)
-            font_bold = ImageFont.truetype("arialbd.ttf", font_size)
-        except:
-            font = ImageFont.load_default()
-            font_bold = font
-        
-        # Draw ASI text
-        text = "ASI"
-        # Get text bounding box
-        bbox = draw.textbbox((0, 0), text, font=font_bold)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        text_x = lens_center_x - text_width / 2
-        text_y = lens_center_y + lens_radius + 8
-        
-        # Draw text with shadow
-        draw.text((text_x + 2, text_y + 2), text, fill=(0, 0, 0, 180), font=font_bold)
-        draw.text((text_x, text_y), text, fill=(100, 200, 255, 255), font=font_bold)
+        import cairosvg
+        cairosvg.svg2png(
+            url=svg_path,
+            write_to=output_path,
+            output_width=size,
+            output_height=size
+        )
+        print(f"✓ Converted SVG to PNG ({size}x{size})")
+        return True
+    except ImportError:
+        print("⚠ cairosvg not installed. Install with: pip install cairosvg")
+        print("  (Also requires Cairo library on system)")
+        return False
     except Exception as e:
-        print(f"Font rendering skipped: {e}")
+        print(f"✗ SVG conversion failed: {e}")
+        return False
+
+
+def create_app_icon(source_png: str = None):
+    """Create multi-resolution .ico file from source image.
     
-    # Save at multiple resolutions for Windows icon
+    Args:
+        source_png: Optional path to source PNG. If None, looks for
+                   Icon.png or Icon.svg in assets folder.
+                   
+    Returns:
+        Tuple of (ico_path, png_path) on success
+    """
+    # Determine paths
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.basename(script_dir) == 'scripts':
+        project_dir = os.path.dirname(script_dir)
+    else:
+        project_dir = script_dir
+    assets_dir = os.path.join(project_dir, 'assets')
+    os.makedirs(assets_dir, exist_ok=True)
+    
+    # Find source image
+    if source_png and os.path.exists(source_png):
+        source_path = source_png
+        print(f"Using specified source: {source_path}")
+    else:
+        # Look for Icon.png first, then Icon.svg
+        png_source = os.path.join(assets_dir, 'Icon.png')
+        svg_source = os.path.join(assets_dir, 'Icon.svg')
+        
+        if os.path.exists(png_source):
+            source_path = png_source
+            print(f"Found source: {source_path}")
+        elif os.path.exists(svg_source):
+            # Convert SVG to temporary PNG
+            temp_png = os.path.join(assets_dir, '_temp_icon.png')
+            if convert_svg_to_png(svg_source, temp_png, size=512):
+                source_path = temp_png
+            else:
+                print("✗ No usable icon source found!")
+                print(f"  Place Icon.png or Icon.svg in {assets_dir}")
+                sys.exit(1)
+        else:
+            print("✗ No icon source found!")
+            print(f"  Place Icon.png or Icon.svg in {assets_dir}")
+            sys.exit(1)
+    
+    # Load and process source image
+    try:
+        img = Image.open(source_path)
+        print(f"Loaded: {img.size[0]}x{img.size[1]} {img.mode}")
+        
+        # Convert to RGBA if needed
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+            print(f"Converted to RGBA")
+        
+        # Resize to 256x256 if larger (ico max useful size)
+        if img.size[0] > 256 or img.size[1] > 256:
+            # Maintain aspect ratio, fit within 256x256
+            img.thumbnail((256, 256), Image.Resampling.LANCZOS)
+            print(f"Resized to: {img.size[0]}x{img.size[1]}")
+        
+        # Ensure square (pad if needed)
+        if img.size[0] != img.size[1]:
+            max_dim = max(img.size)
+            square = Image.new('RGBA', (max_dim, max_dim), (0, 0, 0, 0))
+            offset = ((max_dim - img.size[0]) // 2, (max_dim - img.size[1]) // 2)
+            square.paste(img, offset)
+            img = square
+            print(f"Padded to square: {img.size[0]}x{img.size[1]}")
+        
+        # Apply rounded corners to base image
+        img = add_rounded_corners(img, CORNER_RADIUS_PERCENT)
+        print(f"Applied rounded corners ({CORNER_RADIUS_PERCENT}% radius)")
+            
+    except Exception as e:
+        print(f"✗ Failed to load source image: {e}")
+        sys.exit(1)
+    
+    # Create multiple resolutions for ICO
+    # Apply rounded corners at each size for best quality
     icon_sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
     icon_images = []
     
     for icon_size in icon_sizes:
-        if icon_size == (256, 256):
-            icon_images.append(img)
+        if img.size == icon_size:
+            # Already has rounded corners applied
+            icon_images.append(img.copy())
         else:
+            # Resize then re-apply rounded corners for crisp edges at each size
             resized = img.resize(icon_size, Image.Resampling.LANCZOS)
+            # Re-apply corners at this size for sharper results
+            resized = add_rounded_corners(resized, CORNER_RADIUS_PERCENT)
             icon_images.append(resized)
-    
-    # Determine output path (scripts/ or project root)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    if os.path.basename(script_dir) == 'scripts':
-        assets_dir = os.path.join(os.path.dirname(script_dir), 'assets')
-    else:
-        assets_dir = os.path.join(script_dir, 'assets')
-    os.makedirs(assets_dir, exist_ok=True)
     
     # Save as .ico file (Windows icon format with multiple resolutions)
     icon_path = os.path.join(assets_dir, 'app_icon.ico')
-    icon_images[0].save(icon_path, format='ICO', sizes=[(img.size[0], img.size[1]) for img in icon_images])
+    icon_images[0].save(
+        icon_path, 
+        format='ICO', 
+        sizes=[(im.size[0], im.size[1]) for im in icon_images]
+    )
     print(f"✓ Created {icon_path} with {len(icon_images)} resolutions")
     
     # Also save as PNG for reference/other uses
     png_path = os.path.join(assets_dir, 'app_icon.png')
-    img.save(png_path, 'PNG')
+    # Save largest size
+    icon_images[0].save(png_path, 'PNG')
     print(f"✓ Created {png_path} (256x256)")
+    
+    # Cleanup temp file if created
+    temp_png = os.path.join(assets_dir, '_temp_icon.png')
+    if os.path.exists(temp_png):
+        os.remove(temp_png)
     
     return icon_path, png_path
 
+
 if __name__ == '__main__':
-    icon_file, png_file = create_app_icon()
-    print(f"\n✅ Icon files created successfully!")
+    print("=" * 50)
+    print("PFR Sentinel Icon Generator")
+    print("=" * 50)
+    
+    # Allow command-line source override
+    source = sys.argv[1] if len(sys.argv) > 1 else None
+    
+    icon_file, png_file = create_app_icon(source)
+    
+    print()
+    print("✅ Icon files created successfully!")
     print(f"   - {icon_file} (for Windows executable)")
     print(f"   - {png_file} (reference image)")
-    print(f"\nNext steps:")
-    print(f"   1. Icon is ready to use")
-    print(f"   2. Will be applied to window and executable automatically")
+    print()
+    print("The icon will be used for:")
+    print("   • Application window title bar")
+    print("   • Taskbar icon")  
+    print("   • Executable file icon")
+    print("   • Installer icon")

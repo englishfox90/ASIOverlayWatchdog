@@ -60,9 +60,11 @@ Built with a modern dark-themed GUI using ttkbootstrap, PFR Sentinel includes li
 - ✅ **Status Indicators**: Visual feedback for all operations
 
 ### Automation & Reliability
-- ✅ **Command Line Support**: `--auto-start`, `--auto-stop`, `--headless` flags for scripting
+- ✅ **Command Line Support**: `--auto-start`, `--auto-stop`, `--headless`, `--tray` flags for scripting
+- ✅ **Headless Mode**: Run without GUI for servers, Docker, or scheduled tasks
+- ✅ **System Tray Mode**: Minimize to Windows system tray with right-click menu controls
 - ✅ **Automatic Camera Detection**: Retry logic ensures reliable unattended startup
-- ✅ **7-Day Rotating Logs**: File-based logging in `%APPDATA%\ASIOverlayWatchDog\logs`
+- ✅ **7-Day Rotating Logs**: File-based logging in `%APPDATA%\PFRSentinel\Logs`
 - ✅ **Disk Space Management**: Automated cleanup with configurable size limits
 - ✅ **Thread-Safe Architecture**: Robust multi-threaded design for 24/7 operation
 - ✅ **Error Recovery**: Discord webhook integration for critical error alerts (optional)
@@ -189,27 +191,79 @@ python main.py --auto-start --auto-stop 3600
 # Auto-start and run indefinitely (stop manually or with SIGTERM)
 python main.py --auto-start --auto-stop 0
 
-# Experimental headless mode (no GUI, requires auto-start)
-python main.py --auto-start --headless
+# Headless mode - no GUI, uses saved config (great for servers)
+python main.py --headless
+
+# Headless with auto-stop after 1 hour
+python main.py --headless --auto-stop 3600
+
+# System tray mode - starts minimized to tray
+python main.py --tray
+
+# Tray mode with auto-start capture
+python main.py --tray --auto-start
 
 # View all options
 python main.py --help
 ```
 
-### Command Line Behavior
+### Command Line Arguments
 
-- `--auto-start`: Waits 3 seconds for camera initialization, then automatically switches to camera mode and starts capture using the previously saved camera selection
-- `--auto-stop SECONDS`: Stops capture after the specified duration (0 = run indefinitely)
-- `--headless`: Experimental mode that runs without GUI (must use with `--auto-start`)
+| Flag | Description |
+|------|-------------|
+| `--auto-start` | Automatically start camera capture on launch (uses saved camera settings) |
+| `--auto-stop SECONDS` | Stop capture after N seconds (0 = run indefinitely) |
+| `--headless` | Run without GUI - captures based on saved config. Ideal for servers, Docker, Raspberry Pi |
+| `--tray` | Start minimized to Windows system tray with right-click menu controls |
 
-**Example: Scheduled Task**
-```batch
-@echo off
-cd /d "C:\Program Files\ASIOverlayWatchDog"
-ASIOverlayWatchDog.exe --auto-start --auto-stop 3600
+### Headless Mode
+
+Runs without any GUI - perfect for:
+- Headless servers (Linux/Windows Server)
+- Docker containers
+- Raspberry Pi deployments
+- Windows Task Scheduler automation
+
+```powershell
+# Run until Ctrl+C
+python main.py --headless
+
+# Run for 1 hour then exit
+python main.py --headless --auto-stop 3600
 ```
 
-This captures for 1 hour and exits automatically - perfect for Windows Task Scheduler!
+Headless mode:
+- Loads camera settings from saved `config.json`
+- Starts web server automatically if configured as output mode
+- Applies overlays and saves to output directory
+- Handles graceful shutdown on Ctrl+C or SIGTERM
+- Respects scheduled capture windows if configured
+
+### System Tray Mode
+
+Runs with full GUI but starts minimized to the Windows system tray:
+
+```powershell
+python main.py --tray
+```
+
+Tray mode features:
+- **Right-click menu**: Show Window, Start/Stop Capture, Status, Exit
+- **Double-click**: Restore the main window
+- **X button**: Minimizes to tray instead of closing
+- **Notifications**: Alerts when capture starts/stops
+
+Ideal for 24/7 observatory computers where you want the app running but not cluttering the taskbar.
+
+### Example: Windows Task Scheduler
+
+```batch
+@echo off
+cd /d "C:\Program Files\PFRSentinel"
+PFRSentinel.exe --headless --auto-stop 3600
+```
+
+This captures for 1 hour and exits automatically - perfect for scheduled tasks!
 
 ---
 
@@ -257,8 +311,8 @@ This captures for 1 hour and exits automatically - perfect for Windows Task Sche
 ### Project Structure
 
 ```
-ASIOverlayWatchDog/
-├── gui/                    # Modern modular GUI (9 modules)
+PFRSentinel/
+├── gui/                    # Modern modular GUI
 │   ├── main_window.py     # Application core + business logic
 │   ├── header.py          # Status & live monitoring components
 │   ├── capture_tab.py     # Capture controls UI
@@ -267,17 +321,20 @@ ASIOverlayWatchDog/
 │   ├── preview_tab.py     # Image preview with zoom
 │   ├── logs_tab.py        # Log viewer with file access
 │   ├── theme.py           # Centralized styling (CRITICAL)
+│   ├── system_tray.py     # Windows system tray integration
 │   └── overlays/          # Modular overlay system
-├── services/               # Core processing modules (10 services)
+├── services/               # Core processing modules
 │   ├── config.py          # JSON persistence
 │   ├── logger.py          # 7-day rotating file logs
 │   ├── processor.py       # Image overlay engine
 │   ├── watcher.py         # Directory monitoring
 │   ├── zwo_camera.py      # ZWO ASI SDK wrapper
+│   ├── headless_runner.py # Headless mode capture engine
 │   ├── cleanup.py         # Disk space management
 │   ├── web_output.py      # HTTP server
 │   ├── rtsp_output.py     # RTSP streaming server
 │   └── ...
+├── tests/                  # Pytest test suite (94 tests)
 ├── docs/                   # Additional documentation
 ├── main.py                 # Application entry point
 ├── config.json             # Runtime state (auto-generated)
