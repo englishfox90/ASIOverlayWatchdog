@@ -9,6 +9,8 @@ from app_config import APP_DATA_FOLDER, DEFAULT_OUTPUT_SUBFOLDER
 DEFAULT_CONFIG = {
     # Window settings
     "window_geometry": "1280x1700",
+    "splitter_sizes": [400, 500],  # Live panel and inspector panel widths
+    "inspector_visible": True,  # Whether inspector panel is visible
     
     # Mode selection
     "capture_mode": "camera",  # "watch" or "camera"

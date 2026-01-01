@@ -1,15 +1,29 @@
 @echo off
 REM Complete build script for PFR Sentinel
 REM Builds executable and creates Windows installer
+REM
+REM Usage:
+REM   build_sentinel_installer.bat          # Build new PySide6 UI (default)
+REM   build_sentinel_installer.bat --legacy # Build old Tkinter UI
 
 echo ========================================
 echo   PFR Sentinel - Full Build
 echo ========================================
 echo.
 
+REM Check for UI flag
+set UI_FLAG=
+if /i "%1"=="--legacy" (
+    set UI_FLAG=--legacy
+    echo Building: Tkinter (Legacy UI)
+) else (
+    echo Building: PySide6 (Modern Fluent UI)
+)
+echo.
+
 REM Step 1: Build executable
 echo [1/2] Building executable...
-call build_sentinel.bat
+call build_sentinel.bat %UI_FLAG%
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Executable build failed!
     pause

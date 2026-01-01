@@ -1,5 +1,34 @@
 # Build & Distribution Guide
 
+## UI Version Selection (NEW)
+
+**PFR Sentinel now supports building with either the new PySide6 UI or legacy Tkinter UI.**
+
+### Build New UI (Default - PySide6)
+```batch
+build_sentinel.bat
+# or
+build_sentinel_installer.bat
+```
+- Modern Windows 11 Fluent design
+- Better performance and animations
+- Entry point: `main_pyside.py`
+- Spec file: `PFRSentinel_PySide.spec`
+
+### Build Old UI (Legacy - Tkinter)
+```batch
+build_sentinel.bat --legacy
+# or
+build_sentinel_installer.bat --legacy
+```
+- Proven stable interface
+- Entry point: `main.py`
+- Spec file: `PFRSentinel.spec`
+
+**Note**: Both UIs share the same backend (`services/`) and produce the same `PFRSentinel.exe` filename. The UI framework is bundled internally. Both support all command-line flags (`--headless`, `--tray`, `--auto-start`, `--auto-stop`).
+
+---
+
 ## Overview
 
 This document describes how to build ASIOverlayWatchDog as a Windows executable and create an installer.

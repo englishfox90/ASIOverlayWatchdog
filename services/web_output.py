@@ -86,7 +86,11 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
     def _serve_image(self):
         """Serve the latest processed image with ETag caching support."""
         if not self.latest_image_data:
-            self.send_error(404, "No image available yet")
+            try:
+                self.send_error(404, "No image available yet")
+            except (ConnectionAbortedError, BrokenPipeError):
+                # Client disconnected while we were sending 404 - ignore
+                pass
             return
         
         try:

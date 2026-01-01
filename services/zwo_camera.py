@@ -318,6 +318,10 @@ class ZWOCamera:
             self.exposure_start_time = start_time
             
             while time.time() - start_time < timeout:
+                # Check if camera was disconnected during wait
+                if self.camera is None:
+                    raise Exception("Camera disconnected during exposure")
+                
                 status = self.camera.get_exposure_status()
                 if status == self.asi.ASI_EXP_SUCCESS:
                     break
@@ -616,13 +620,13 @@ class ZWOCamera:
         self.log("Stopping capture...")
         self.is_capturing = False
         
-        # Wait for capture thread to finish
+        # Wait briefly for capture thread to finish
         if self.capture_thread and self.capture_thread.is_alive():
             self.log("Waiting for capture thread to finish...")
-            self.capture_thread.join(timeout=10.0)  # Increased timeout for long exposures
+            self.capture_thread.join(timeout=2.0)  # Reduced timeout for faster stop
             
             if self.capture_thread.is_alive():
-                self.log("Warning: Capture thread did not finish in time")
+                self.log("Warning: Capture thread still running (will finish in background)")
             else:
                 self.log("Capture thread finished successfully")
             
@@ -662,6 +666,10 @@ class ZWOCamera:
         self.log("Starting rapid auto-exposure calibration...")
         self.calibration_mode = True
         
+        # Notify UI that calibration is starting
+        if self.on_calibration_callback:
+            self.on_calibration_callback(True)
+        
         # Run calibration using the calibration manager
         success = self.calibration_manager.run_calibration(max_attempts=15)
         
@@ -670,6 +678,10 @@ class ZWOCamera:
         
         self.calibration_complete = True
         self.calibration_mode = False
+        
+        # Notify UI that calibration is complete
+        if self.on_calibration_callback:
+            self.on_calibration_callback(False)
     
     def adjust_exposure_auto(self, img_array):
         """Adjust exposure based on image brightness with intelligent step sizing"""
