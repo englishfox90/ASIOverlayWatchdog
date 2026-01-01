@@ -104,6 +104,9 @@ class MainWindow(QMainWindow):
         # Auto-detect cameras after UI is ready (delay to ensure window is shown)
         QTimer.singleShot(500, self._auto_detect_cameras)
         
+        # Send Discord startup notification if enabled
+        QTimer.singleShot(1000, self._send_discord_startup)
+        
         app_logger.info(f"PFR Sentinel v{__version__} initialized")
     
     def _setup_window(self):
@@ -473,6 +476,44 @@ class MainWindow(QMainWindow):
     # CAPTURE CONTROL
     # =========================================================================
     
+    def _send_discord_startup(self):
+        """Send Discord startup notification if enabled"""
+        try:
+            discord_config = self.config.get('discord', {})
+            if not discord_config.get('enabled', False):
+                return
+            
+            if not discord_config.get('startup_enabled', True):
+                return
+            
+            from services.discord_alerts import DiscordAlerts
+            alerts = DiscordAlerts(self.config)
+            
+            if alerts.is_enabled():
+                alerts.send_startup_message()
+                app_logger.info("Discord startup notification sent")
+        except Exception as e:
+            app_logger.error(f"Failed to send Discord startup notification: {e}")
+    
+    def _send_discord_error(self, error_msg: str):
+        """Send Discord error notification if enabled"""
+        try:
+            discord_config = self.config.get('discord', {})
+            if not discord_config.get('enabled', False):
+                return
+            
+            if not discord_config.get('error_enabled', True):
+                return
+            
+            from services.discord_alerts import DiscordAlerts
+            alerts = DiscordAlerts(self.config)
+            
+            if alerts.is_enabled():
+                alerts.send_error_message(error_msg)
+                app_logger.debug("Discord error notification sent")
+        except Exception as e:
+            app_logger.error(f"Failed to send Discord error notification: {e}")
+    
     def start_capture(self):
         """Start capture (camera or watch mode)"""
         mode = self.config.get('capture_mode', 'camera')
@@ -498,6 +539,9 @@ class MainWindow(QMainWindow):
             app_logger.error(f"Failed to start capture: {e}")
             self.is_capturing = False
             self.app_bar.set_capturing(False)
+            
+            # Send Discord error notification
+            self._send_discord_error(f"Failed to start capture: {e}")
     
     def stop_capture(self):
         """Stop capture"""
@@ -878,7 +922,6 @@ class MainWindow(QMainWindow):
                 
                 if not self.first_image_posted_to_discord:
                     should_post = True
-                    self.first_image_posted_to_discord = True
                     app_logger.info(f"Posting first image to Discord: {image_path}")
                 else:
                     # Check interval
@@ -897,13 +940,20 @@ class MainWindow(QMainWindow):
                             app_logger.info(f"Posting periodic Discord update (interval: {interval_minutes}m)")
                 
                 if should_post:
-                    self._send_discord_periodic_update(image_path)
+                    success = self._send_discord_periodic_update(image_path)
+                    # Mark first image as posted only after successful send
+                    if success and not self.first_image_posted_to_discord:
+                        self.first_image_posted_to_discord = True
                 
         except Exception as e:
             app_logger.error(f"Error pushing to output servers: {e}")
     
     def _send_discord_periodic_update(self, image_path: str):
-        """Send periodic update to Discord with latest image"""
+        """Send periodic update to Discord with latest image
+        
+        Returns:
+            bool: True if sent successfully, False otherwise
+        """
         try:
             from services.discord_alerts import DiscordAlerts
             from datetime import datetime
@@ -911,7 +961,7 @@ class MainWindow(QMainWindow):
             alerts = DiscordAlerts(self.config)
             
             if not alerts.is_enabled():
-                return
+                return False
             
             # Build status message
             mode = "ZWO Camera" if self.is_capturing else "Directory Watch"
@@ -947,11 +997,14 @@ class MainWindow(QMainWindow):
             if success:
                 self.last_discord_post_time = datetime.now()
                 app_logger.info("Discord update sent successfully")
+                return True
             else:
                 app_logger.warning(f"Discord update failed: {alerts.last_send_status}")
+                return False
                 
         except Exception as e:
             app_logger.error(f"Error sending Discord update: {e}")
+            return False
     
     # =========================================================================
     # WINDOW EVENTS
