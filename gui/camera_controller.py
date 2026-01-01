@@ -67,83 +67,57 @@ class CameraController:
                 app_logger.info(f"SDK reports {num_cameras} camera(s) connected")
                 
                 if num_cameras == 0:
-                    app_logger.warning("⚠ No cameras detected")
-                    app_logger.info("Troubleshooting: 1) Check USB cable, 2) Verify camera power, 3) Check USB drivers")
+                    app_logger.warning("No cameras detected - check USB connection")
                     self.app.root.after(0, lambda: self._on_detection_complete([], "No cameras detected. Check USB connection."))
                     return
                 
-                app_logger.info(f"Enumerating {num_cameras} camera(s) using SDK list_cameras() API...")
                 camera_list = []
-                
-                # CRITICAL: Use asi.list_cameras() which retrieves camera info WITHOUT opening them!
-                # This prevents interference with cameras already in use by other applications
+                # Use asi.list_cameras() to retrieve camera info WITHOUT opening them
                 for i in range(num_cameras):
                     try:
                         camera_name = asi.list_cameras()[i]
                         camera_list.append(f"{camera_name} (Index: {i})")
-                        app_logger.info(f"✓ Camera {i}: {camera_name}")
+                        app_logger.info(f"Camera {i}: {camera_name}")
                     except Exception as cam_error:
-                        app_logger.warning(f"⚠ Could not retrieve name for camera {i}: {cam_error}")
+                        app_logger.warning(f"Could not retrieve name for camera {i}: {cam_error}")
                         camera_list.append(f"Camera {i}")
                 
-                app_logger.info(f"✓ Camera detection complete: {len(camera_list)} camera(s) listed safely")
-                
                 if camera_list:
-                    app_logger.info(f"✓ Camera detection complete: {len(camera_list)} camera(s) found")
+                    app_logger.info(f"Camera detection complete: {len(camera_list)} camera(s) found")
                     self.app.root.after(0, lambda: self._on_detection_complete(camera_list, None))
                 else:
-                    app_logger.warning("Detection found cameras but could not access any")
                     self.app.root.after(0, lambda: self._on_detection_complete([], "No valid cameras found"))
                 
             except Exception as e:
                 error_msg = f"Detection error: {str(e)}"
-                app_logger.error(f"✗ Camera detection failed: {error_msg}")
+                app_logger.error(f"Camera detection failed: {error_msg}")
                 import traceback
                 app_logger.debug(f"Stack trace: {traceback.format_exc()}")
                 self.app.root.after(0, lambda: self._on_detection_complete([], error_msg))
         
-        # Start detection thread
-        app_logger.debug("Starting detection thread...")
+        # Start detection thread with timeout
         detection_thread = threading.Thread(target=detect_thread, daemon=True)
         detection_thread.start()
         
-        # Start timeout monitor (10 second timeout)
         def timeout_monitor():
             detection_thread.join(timeout=10.0)
             if detection_thread.is_alive():
-                # Thread still running after timeout
-                app_logger.error("✗ Camera detection timed out after 10 seconds")
-                app_logger.warning("Possible causes: 1) Camera in use by another app, 2) USB driver issue, 3) Camera hardware problem")
+                app_logger.error("Camera detection timed out after 10 seconds")
                 self.app.root.after(0, lambda: self._on_detection_complete(
-                    [], 
-                    "Detection timed out. Camera may be in use or SDK issue. Check logs."
-                ))
+                    [], "Detection timed out. Camera may be in use."))
         
-        app_logger.debug("Starting timeout monitor (10s)...")
         threading.Thread(target=timeout_monitor, daemon=True).start()
     
     def _on_detection_complete(self, camera_list, error_msg):
         """Handle camera detection completion"""
-        # Hide spinner
         self.app.capture_tab.hide_detection_spinner()
         
         if error_msg:
-            # Show inline error with retry option
             self.app.capture_tab.show_detection_error(error_msg)
-            app_logger.error(f"✗ Camera detection failed: {error_msg}")
+            app_logger.error(f"Camera detection failed: {error_msg}")
             self.app.camera_combo['values'] = []
             self.app.start_capture_button.config(state='disabled', cursor='')
-            
-            # Log file location hint for troubleshooting
-            try:
-                log_location = app_logger.handlers[0].baseFilename if app_logger.handlers else "Unknown"
-                app_logger.info(f"For detailed diagnostics, check log file: {log_location}")
-            except:
-                pass
-            app_logger.info("Click 'Detect Cameras' to try again")
         else:
-            # Success
-            app_logger.info(f"Populating camera list with {len(camera_list)} camera(s)")
             self.app.camera_combo['values'] = camera_list
             if camera_list:
                 self.app.camera_combo.current(0)
@@ -323,40 +297,19 @@ class CameraController:
     def on_camera_frame(self, img, metadata):
         """Callback when camera captures a frame - called from camera thread
         
-        PERF-002: This callback runs on the camera's background thread.
-        Heavy work is queued to the image processor's background thread.
-        GUI updates are scheduled via root.after() to run on UI thread.
-        
-        Note: We gather tkinter var values here because they're thread-safe for reads,
-        but pass them to processors as a config dict to be explicit about what's needed.
+        SINGLE-STRETCH ARCHITECTURE: Image is processed once in the save pipeline,
+        which also updates mini preview and caches result for preview tab.
         """
         try:
-            # Store reference for other components (will be copied by processors)
+            # Store reference for other components
             self.app.last_captured_image = img
             
-            # PERF-002: Gather config from tkinter vars (thread-safe for reads)
-            # This avoids processors needing to access GUI vars directly
-            preview_config = {
-                'auto_stretch_config': self.app.config.get('auto_stretch', {}),
-                'auto_brightness': self.app.auto_brightness_var.get(),
-                'brightness_factor': self.app.brightness_var.get(),
-                'auto_exposure': self.app.auto_exposure_var.get() if hasattr(self.app, 'auto_exposure_var') else False,
-                'target_brightness': self.app.target_brightness_var.get() if hasattr(self.app, 'target_brightness_var') else 100,
-            }
-            
-            # Queue mini preview update to background processor
-            self.app.status_manager.update_mini_preview(img, config=preview_config)
-            
-            # Queue image processing to background thread
-            # process_and_save_image gathers its own config from vars
+            # Queue image processing - handles save, mini preview, and caching
             self.app.image_processor.process_and_save_image(img, metadata)
             
             # Increment counter on UI thread
             self.app.image_count += 1
             self.app.root.after(0, lambda: self.app.image_count_var.set(str(self.app.image_count)))
-            
-            # Note: First Discord post is triggered from image_processor after image is saved
-            # to ensure last_processed_image is set correctly
             
         except Exception as e:
             app_logger.error(f"Error processing camera frame: {e}")

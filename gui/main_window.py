@@ -96,12 +96,13 @@ class ModernOverlayApp:
         self.watcher = None
         self.web_server = None  # HTTP server for web output mode
         self.rtsp_server = None  # RTSP server for streaming mode
-        self.last_processed_image = None
-        self.last_captured_image = None
+        self.last_processed_image = None  # Path to saved file
+        self.last_processed_pil_image = None  # Cached PIL image (with overlays) for display
+        self.last_stretched_image = None  # Cached stretched image (no overlays) for mini preview
+        self.last_captured_image = None  # Raw captured image
         self.image_count = 0
         self.selected_camera_index = 0
         self.selected_overlay_index = None
-        self.preview_image = None
         self.is_capturing = False
         self.is_loading_config = False  # Flag to prevent saving during load
         
@@ -416,7 +417,7 @@ Supports:
             # Get the currently selected tab index
             current_tab = self.notebook.index(self.notebook.select())
             # Preview tab is at index 3 (Capture=0, Overlays=1, Settings=2, Preview=3)
-            if current_tab == 3 and self.preview_image:
+            if current_tab == 3 and self.last_processed_pil_image:
                 # Delay slightly to ensure canvas is sized
                 self.root.after(100, lambda: self.refresh_preview(auto_fit=True))
         except Exception as e:

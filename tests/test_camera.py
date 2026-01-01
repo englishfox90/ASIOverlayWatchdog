@@ -8,6 +8,13 @@ import sys
 import numpy as np
 from unittest.mock import Mock, MagicMock, patch
 
+# Check if cv2 is available
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
@@ -50,6 +57,7 @@ class TestBayerDebayering:
         # ASI cameras typically use BGGR
         assert DEFAULT_CONFIG['zwo_bayer_pattern'] in ['RGGB', 'BGGR', 'GRBG', 'GBRG']
     
+    @pytest.mark.skipif(not HAS_CV2, reason="OpenCV (cv2) not installed")
     def test_debayer_creates_rgb(self):
         """Test debayering produces RGB image"""
         import cv2
@@ -63,6 +71,7 @@ class TestBayerDebayering:
         # Should be 3 channels
         assert rgb.shape == (100, 100, 3)
     
+    @pytest.mark.skipif(not HAS_CV2, reason="OpenCV (cv2) not installed")
     def test_all_bayer_patterns(self):
         """Test all Bayer pattern conversions work"""
         import cv2
