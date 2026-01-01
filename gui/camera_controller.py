@@ -435,16 +435,19 @@ class CameraController:
             app_logger.info("Auto exposure disabled")
     
     def is_sdk_available(self):
-        """Check if ASI SDK is available and loadable"""
+        """Check if ASI SDK is available (path exists and module importable)
+        
+        NOTE: This does NOT initialize the SDK, to avoid breaking existing connections.
+        """
         sdk_path = self.app.sdk_path_var.get()
         if not sdk_path or not os.path.exists(sdk_path):
             return False
         try:
-            import zwoasi as asi
-            asi.init(sdk_path)
+            # Only check if module is importable, do NOT call init()
+            # Calling init() can break existing camera connections from other apps
+            import zwoasi
             return True
-        except Exception as e:
-            app_logger.debug(f"SDK not available: {e}")
+        except ImportError:
             return False
     
     # ===== SCHEDULED CAPTURE METHODS =====
