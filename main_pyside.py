@@ -83,11 +83,21 @@ def main():
     # Create and show main window
     window = MainWindow()
     
+    # Check if tray mode should be enabled (from config or --tray argument)
+    tray_enabled = args.tray or window.config.get('tray_mode_enabled', False)
+    
     # System tray mode - start minimized to tray
-    if args.tray:
+    if tray_enabled:
         try:
             from ui.system_tray_qt import SystemTrayQt
             tray = SystemTrayQt(window, app, auto_start=args.auto_start, auto_stop=args.auto_stop)
+            window.system_tray = tray  # Store reference so window knows it's in tray mode
+            
+            # If --tray was explicitly provided, save it to config
+            if args.tray:
+                window.config.set('tray_mode_enabled', True)
+                window.config.save()
+            
             # Window will be shown by tray when user clicks "Show Window"
         except ImportError as e:
             app_logger.error(f"System tray mode requires pystray: {e}")

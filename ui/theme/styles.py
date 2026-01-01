@@ -4,7 +4,9 @@ Generates Qt stylesheets from design tokens for QFluentWidgets
 """
 from qfluentwidgets import setTheme, Theme, setThemeColor, isDarkTheme
 from qfluentwidgets import FluentStyleSheet
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QCursor
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox
 from .tokens import Colors, Typography, Spacing, Layout
 
 
@@ -15,6 +17,35 @@ def apply_theme():
     
     # Set accent color to Iris purple
     setThemeColor(QColor(Colors.iris_9))
+
+
+def configure_widget_cursors(widget: QWidget):
+    """
+    Recursively configure appropriate cursor shapes for widgets
+    
+    Args:
+        widget: Root widget to configure (usually main window or panel)
+    """
+    # Configure this widget
+    if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
+        widget.setCursor(Qt.CursorShape.IBeamCursor)
+    elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+        # SpinBox has text area, but also buttons - keep default for now
+        pass
+    elif isinstance(widget, QPushButton):
+        widget.setCursor(Qt.CursorShape.PointingHandCursor)
+    elif isinstance(widget, QComboBox):
+        widget.setCursor(Qt.CursorShape.PointingHandCursor)
+    
+    # Recursively configure children
+    for child in widget.findChildren(QWidget):
+        if isinstance(child, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            child.setCursor(Qt.CursorShape.IBeamCursor)
+        elif isinstance(child, QPushButton):
+            child.setCursor(Qt.CursorShape.PointingHandCursor)
+        elif isinstance(child, QComboBox):
+            child.setCursor(Qt.CursorShape.PointingHandCursor)
+
 
 
 def get_stylesheet() -> str:

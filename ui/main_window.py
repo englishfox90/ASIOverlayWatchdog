@@ -35,7 +35,7 @@ from .panels.capture_settings import CaptureSettingsPanel
 from .panels.output_settings import OutputSettingsPanel
 from .panels.image_processing import ImageProcessingPanel
 from .panels.overlay_settings import OverlaySettingsPanel
-from .panels.services_settings import ServicesSettingsPanel
+from .panels.settings_panel import SettingsPanel
 from .panels.logs_panel import LogsPanel
 from .controllers.image_processor import ImageProcessor
 
@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
         self.web_server = None
         self.rtsp_server = None
         self.weather_service = None
+        self.system_tray = None  # Set by main_pyside.py when in tray mode
         
         # Initialize weather service from config
         self._init_weather_service()
@@ -94,6 +95,10 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._setup_connections()
         self._apply_styles()
+        
+        # Configure cursor shapes for all widgets
+        from .theme import configure_widget_cursors
+        configure_widget_cursors(self)
         
         # Start periodic updates
         self._start_timers()
@@ -193,16 +198,16 @@ class MainWindow(QMainWindow):
         self.output_panel = OutputSettingsPanel(self)
         self.processing_panel = ImageProcessingPanel(self)
         self.overlay_panel = OverlaySettingsPanel(self)
-        self.services_panel = ServicesSettingsPanel(self)
         self.logs_panel = LogsPanel(self)
+        self.settings_panel = SettingsPanel(self)
         
         # Add to stack
         self.inspector_stack.addWidget(self.capture_panel)      # Index 0
         self.inspector_stack.addWidget(self.output_panel)       # Index 1
         self.inspector_stack.addWidget(self.processing_panel)   # Index 2
         self.inspector_stack.addWidget(self.overlay_panel)      # Index 3
-        self.inspector_stack.addWidget(self.services_panel)     # Index 4
-        self.inspector_stack.addWidget(self.logs_panel)         # Index 5
+        self.inspector_stack.addWidget(self.logs_panel)         # Index 4
+        self.inspector_stack.addWidget(self.settings_panel)     # Index 5
         
         # Restore splitter sizes from config
         saved_sizes = self.config.get('splitter_sizes', [400, 500])
@@ -213,8 +218,16 @@ class MainWindow(QMainWindow):
         if not inspector_visible:
             self.inspector_stack.hide()
         
-        # Default to Capture panel
-        self.inspector_stack.setCurrentIndex(0)
+        # Restore last navigation section
+        last_section = self.config.get('last_nav_section', 'capture')
+        if last_section:
+            # Set nav rail selection without emitting signal
+            self.nav_rail.set_active_section(last_section)
+            # Manually trigger the layout update
+            self._on_nav_changed(last_section)
+        else:
+            # Default to Capture panel
+            self.inspector_stack.setCurrentIndex(0)
     
     def _setup_connections(self):
         """Connect signals and slots"""
@@ -233,7 +246,10 @@ class MainWindow(QMainWindow):
         self.output_panel.settings_changed.connect(self._on_settings_changed)
         self.processing_panel.settings_changed.connect(self._on_settings_changed)
         self.overlay_panel.settings_changed.connect(self._on_settings_changed)
-        self.services_panel.settings_changed.connect(self._on_settings_changed)
+        self.settings_panel.settings_changed.connect(self._on_settings_changed)
+        
+        # Settings panel actions
+        self.settings_panel.test_discord_requested.connect(self._on_test_discord)
         
         # Camera panel actions
         self.capture_panel.detect_cameras_clicked.connect(self._on_detect_cameras)
@@ -440,8 +456,8 @@ class MainWindow(QMainWindow):
             'output': 1,
             'processing': 2,
             'overlays': 3,  # Show overlay panel, hide live panel
-            'services': 4,
-            'logs': 5,
+            'logs': 4,
+            'settings': 5,  # Settings panel (hide live panel)
         }
         
         index = section_map.get(section, 0)
@@ -452,14 +468,16 @@ class MainWindow(QMainWindow):
             self.live_panel.set_preview_only(True)
             self.inspector_stack.hide()
             self.config.set('inspector_visible', False)
+            self.config.set('last_nav_section', section)
             self.config.save()
-        elif section == 'overlays':
-            # Overlays: hide live panel, show overlay panel full width
+        elif section in ('overlays', 'settings'):
+            # Overlays/Settings: hide live panel, show panel full width
             self.live_panel.hide()
             self.live_panel.set_preview_only(False)
             self.inspector_stack.show()
             self.inspector_stack.setCurrentIndex(index)
             self.config.set('inspector_visible', True)
+            self.config.set('last_nav_section', section)
             self.config.save()
         else:
             # Normal tabs: show both panels with histogram and activity log
@@ -468,6 +486,7 @@ class MainWindow(QMainWindow):
             self.inspector_stack.show()
             self.inspector_stack.setCurrentIndex(index)
             self.config.set('inspector_visible', True)
+            self.config.set('last_nav_section', section)
             self.config.save()
         
         app_logger.debug(f"Navigation: {section}")
@@ -514,6 +533,44 @@ class MainWindow(QMainWindow):
         except Exception as e:
             app_logger.error(f"Failed to send Discord error notification: {e}")
     
+    def _send_discord_shutdown(self):
+        """Send Discord shutdown notification if enabled"""
+        try:
+            discord_config = self.config.get('discord', {})
+            if not discord_config.get('enabled', False):
+                return
+            
+            if not discord_config.get('post_startup_shutdown', False):
+                return
+            
+            from services.discord_alerts import DiscordAlerts
+            alerts = DiscordAlerts(self.config)
+            
+            if alerts.is_enabled():
+                alerts.send_shutdown_message()
+                app_logger.info("Discord shutdown notification sent")
+        except Exception as e:
+            app_logger.error(f"Failed to send Discord shutdown notification: {e}")
+    
+    def _send_discord_capture_started(self):
+        """Send Discord capture started notification if enabled"""
+        try:
+            discord_config = self.config.get('discord', {})
+            if not discord_config.get('enabled', False):
+                return
+            
+            if not discord_config.get('post_startup_shutdown', False):
+                return
+            
+            from services.discord_alerts import DiscordAlerts
+            alerts = DiscordAlerts(self.config)
+            
+            if alerts.is_enabled():
+                alerts.send_capture_started_message()
+                app_logger.info("Discord capture started notification sent")
+        except Exception as e:
+            app_logger.error(f"Failed to send Discord capture started notification: {e}")
+    
     def start_capture(self):
         """Start capture (camera or watch mode)"""
         mode = self.config.get('capture_mode', 'camera')
@@ -534,6 +591,9 @@ class MainWindow(QMainWindow):
             
             # Faster status updates while capturing
             self.status_timer.setInterval(200)
+            
+            # Send Discord capture started notification
+            self._send_discord_capture_started()
             
         except Exception as e:
             app_logger.error(f"Failed to start capture: {e}")
@@ -673,7 +733,7 @@ class MainWindow(QMainWindow):
             self.output_panel.load_from_config(self.config)
             self.processing_panel.load_from_config(self.config)
             self.overlay_panel.load_from_config(self.config)
-            self.services_panel.load_from_config(self.config)
+            self.settings_panel.load_from_config(self.config)
             
             # Update status chips based on config
             self._update_service_status()
@@ -1012,6 +1072,23 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close"""
+        # If in tray mode, hide to tray instead of closing
+        if self.system_tray is not None:
+            event.ignore()  # Don't close the window
+            self.hide()     # Hide it instead
+            app_logger.debug("Window minimized to system tray")
+            return
+        
+        # Normal close: send shutdown notification and cleanup
+        # Send Discord shutdown notification first
+        self._send_discord_shutdown()
+        
+        # Stop all timers first to prevent callbacks during shutdown
+        if hasattr(self, 'status_timer') and self.status_timer:
+            self.status_timer.stop()
+        if hasattr(self, 'log_timer') and self.log_timer:
+            self.log_timer.stop()
+        
         # Save geometry
         geo = f"{self.width()}x{self.height()}"
         self.config.set('window_geometry', geo)
@@ -1053,3 +1130,10 @@ class MainWindow(QMainWindow):
         
         app_logger.info("Application closing")
         event.accept()
+    
+    def quit_application(self):
+        """Properly quit application (called from tray exit)"""
+        # Disable tray mode to allow normal close
+        self.system_tray = None
+        # Close window (will trigger normal closeEvent)
+        self.close()

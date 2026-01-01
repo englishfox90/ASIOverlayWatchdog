@@ -91,14 +91,16 @@ class AppBar(QFrame):
         # App icon (small)
         self.app_icon = QLabel()
         self.app_icon.setFixedSize(28, 28)
+        self.app_icon.setScaledContents(False)  # Don't stretch to fill
         try:
             from utils_paths import resource_path
-            icon_path = resource_path('assets/app_icon.ico')
+            icon_path = resource_path('assets/app_icon.png')
             if os.path.exists(icon_path):
                 pixmap = QPixmap(icon_path).scaled(
-                    28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    28, 28, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
                 )
                 self.app_icon.setPixmap(pixmap)
+                self.app_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         except:
             pass
         brand_layout.addWidget(self.app_icon)
