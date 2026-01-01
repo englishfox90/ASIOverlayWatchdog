@@ -2,8 +2,8 @@
 Status and monitoring module
 Handles status updates, logging, and live monitoring
 
-PERF-002: Heavy operations (histogram, auto-stretch) are offloaded to
-the image processor's background thread to keep UI responsive.
+SINGLE-STRETCH ARCHITECTURE: Mini preview is updated from image_processor
+after the single stretch operation, avoiding redundant processing.
 """
 import numpy as np
 from tkinter import filedialog, messagebox
@@ -11,7 +11,6 @@ from PIL import Image, ImageTk
 from pathlib import Path
 from datetime import datetime
 from services.logger import app_logger
-from services.processor import auto_stretch_image
 
 
 class StatusManager:
@@ -89,47 +88,11 @@ class StatusManager:
             update_interval = 200 if is_capturing else 1000  # 200ms when capturing, 1s otherwise
             self.app.root.after(update_interval, self.update_status_header)
     
-    def update_mini_preview(self, img, config=None):
-        """Update mini preview in header - offloads heavy work to background thread
-        
-        PERF-002: This method queues the heavy processing (auto-stretch, brightness,
-        histogram) to the image processor's background thread, then updates GUI
-        elements only on the main thread.
-        
-        Args:
-            img: PIL Image to process
-            config: Optional pre-gathered config dict. If None, will read from GUI vars
-                   (should only be None when called from UI thread)
-        """
-        # Skip if an update is already pending (prevents queue buildup)
-        if self._mini_preview_pending:
-            return
-        
-        self._mini_preview_pending = True
-        
-        # Use provided config or gather from GUI vars
-        if config is None:
-            config = {
-                'auto_stretch_config': self.app.config.get('auto_stretch', {}),
-                'auto_brightness': self.app.auto_brightness_var.get(),
-                'brightness_factor': self.app.brightness_var.get(),
-                'auto_exposure': self.app.auto_exposure_var.get() if hasattr(self.app, 'auto_exposure_var') else False,
-                'target_brightness': self.app.target_brightness_var.get() if hasattr(self.app, 'target_brightness_var') else 100,
-            }
-        
-        # Queue the heavy processing work to background thread
-        self.app.image_processor._queue_task({
-            'type': 'mini_preview',
-            'img': img.copy(),  # Copy to avoid race conditions
-            'auto_stretch_config': config['auto_stretch_config'],
-            'auto_brightness': config['auto_brightness'],
-            'brightness_factor': config['brightness_factor'],
-            'auto_exposure': config['auto_exposure'],
-            'target_brightness': config['target_brightness'],
-        })
-    
     def _do_mini_preview_gui_update(self, photo, hist_data):
-        """Update GUI with processed mini preview - runs on UI thread"""
+        """Update GUI with processed mini preview - runs on UI thread
+        
+        Called from image_processor._update_mini_preview_from_stretched()
+        """
         try:
             # Clean up old image references to prevent memory leak
             if hasattr(self.app, 'mini_preview_image') and self.app.mini_preview_image:

@@ -112,8 +112,7 @@ class PreviewTab:
         v_scroll.grid(row=0, column=1, sticky="ns")
         h_scroll.grid(row=1, column=0, sticky="ew")
         
-        # Initialize preview variables
-        self.app.preview_image = None
+        # Initialize preview variables (last_processed_pil_image is set in main_window)
         self.app.preview_photo = None
     
     def on_refresh_preview(self):

@@ -711,7 +711,7 @@ class SettingsTab:
         def update_brightness_label(*args):
             self.app.brightness_value_label.config(text=f"{self.app.brightness_var.get():.2f}")
             # Refresh preview if there's an image loaded
-            if self.app.preview_image:
+            if self.app.last_processed_pil_image:
                 self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
         
         # Remove any existing traces to prevent duplicates
@@ -763,7 +763,7 @@ class SettingsTab:
         def update_saturation_label(*args):
             self.app.saturation_value_label.config(text=f"{self.app.saturation_var.get():.2f}")
             # Refresh preview if there's an image loaded
-            if self.app.preview_image:
+            if self.app.last_processed_pil_image:
                 self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
         
         # Remove any existing traces to prevent duplicates
@@ -839,7 +839,7 @@ class SettingsTab:
             self.app.stretch_median_label.config(
                 text=f"{int(self.app.stretch_median_var.get()*100)}%"
             )
-            if self.app.preview_image:
+            if self.app.last_processed_pil_image:
                 self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
         
         try:
@@ -931,7 +931,7 @@ class SettingsTab:
             else:
                 label = "Gentle"
             self.app.stretch_shadow_label.config(text=label)
-            if self.app.preview_image:
+            if self.app.last_processed_pil_image:
                 self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
         
         try:
@@ -983,7 +983,7 @@ class SettingsTab:
         def update_saturation_label(*args):
             val = self.app.stretch_saturation_var.get()
             self.app.stretch_saturation_label.config(text=f"{val:.1f}x")
-            if self.app.preview_image:
+            if self.app.last_processed_pil_image:
                 self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
         
         try:
@@ -1109,7 +1109,7 @@ class SettingsTab:
             self.app.stretch_saturation_label.config(fg=COLORS['text_disabled'])
         
         # Refresh preview if there's an image loaded
-        if self.app.preview_image:
+        if self.app.last_processed_pil_image:
             self.app.root.after(10, lambda: self.app.refresh_preview(auto_fit=False))
     
     def _toggle_webserver_advanced(self):

@@ -105,8 +105,6 @@ class ImageProcessor:
                 
                 if task_type == 'save_image':
                     self._do_process_and_save(task)
-                elif task_type == 'mini_preview':
-                    self._do_update_mini_preview(task)
                 elif task_type == 'refresh_preview':
                     self._do_refresh_preview(task)
                 
@@ -121,103 +119,12 @@ class ImageProcessor:
     def _queue_task(self, task):
         """Queue a processing task, dropping old tasks if queue is full"""
         try:
-            # Non-blocking put - if queue is full, skip this frame
             self._processing_queue.put_nowait(task)
         except queue.Full:
-            # Queue is full - processing is backed up, skip this frame
             app_logger.debug(f"Processing queue full, skipping {task.get('type')} task")
     
-    def _do_update_mini_preview(self, task):
-        """Process mini preview and histogram on background thread
-        
-        Heavy operations (auto-stretch, brightness, histogram) run here,
-        then we schedule lightweight GUI updates to the main thread.
-        """
-        try:
-            img = task['img']
-            auto_stretch_config = task['auto_stretch_config']
-            auto_brightness = task['auto_brightness']
-            brightness_factor = task['brightness_factor']
-            auto_exposure = task.get('auto_exposure', False)
-            target_brightness = task.get('target_brightness', 100)
-            
-            # Apply auto-stretch if enabled
-            if auto_stretch_config.get('enabled', False):
-                stretch_config = {
-                    'target_median': auto_stretch_config.get('target_median', 0.25),
-                    'linked_stretch': auto_stretch_config.get('linked_stretch', True),
-                    'preserve_blacks': auto_stretch_config.get('preserve_blacks', True),
-                    'shadow_aggressiveness': auto_stretch_config.get('shadow_aggressiveness', 2.8),
-                    'saturation_boost': auto_stretch_config.get('saturation_boost', 1.5),
-                }
-                preview_img = auto_stretch_image(img, stretch_config)
-            else:
-                preview_img = img
-            
-            # Apply auto brightness if enabled
-            if auto_brightness:
-                gray_img = preview_img.convert('L')
-                img_array = np.asarray(gray_img)
-                mean_brightness = np.mean(img_array)
-                del gray_img
-                target_br = 128
-                auto_factor = target_br / max(mean_brightness, 10)
-                auto_factor = max(0.5, min(auto_factor, 4.0))
-                
-                manual_factor = brightness_factor if brightness_factor else 1.0
-                final_factor = auto_factor * manual_factor
-                
-                enhancer = ImageEnhance.Brightness(preview_img)
-                preview_img = enhancer.enhance(final_factor)
-            
-            # Resize to fit (200x200 thumbnail)
-            preview_img.thumbnail((200, 200), Image.Resampling.LANCZOS)
-            
-            # Calculate histogram from original image (before stretch/brightness)
-            img_array = np.asarray(img)
-            hist_r = np.histogram(img_array[:, :, 0], bins=256, range=(0, 256))[0]
-            hist_g = np.histogram(img_array[:, :, 1], bins=256, range=(0, 256))[0]
-            hist_b = np.histogram(img_array[:, :, 2], bins=256, range=(0, 256))[0]
-            
-            # Normalize histograms
-            max_val = max(hist_r.max(), hist_g.max(), hist_b.max())
-            if max_val > 0:
-                hist_r = (hist_r / max_val * 90).astype(int)
-                hist_g = (hist_g / max_val * 90).astype(int)
-                hist_b = (hist_b / max_val * 90).astype(int)
-            
-            hist_data = {
-                'r': hist_r,
-                'g': hist_g,
-                'b': hist_b,
-                'auto_exposure': auto_exposure,
-                'target_brightness': target_brightness,
-            }
-            
-            # Create PhotoImage on main thread (required by tkinter)
-            def update_gui():
-                try:
-                    photo = ImageTk.PhotoImage(preview_img)
-                    self.app.status_manager._do_mini_preview_gui_update(photo, hist_data)
-                except Exception as e:
-                    app_logger.error(f"Mini preview GUI update failed: {e}")
-                    self.app.status_manager._mini_preview_pending = False
-            
-            self.app.root.after(0, update_gui)
-            
-            # Clean up
-            del img
-            
-        except Exception as e:
-            app_logger.error(f"Mini preview processing failed: {e}")
-            # Reset pending flag on error
-            self.app.root.after(0, lambda: setattr(self.app.status_manager, '_mini_preview_pending', False))
-    
     def _do_refresh_preview(self, task):
-        """Process preview refresh on background thread - placeholder for future optimization"""
-        # For now, this delegates to the existing refresh_preview method
-        # which runs on the UI thread. Full optimization would move the heavy
-        # processing here similar to _do_update_mini_preview.
+        """Process preview refresh on background thread"""
         auto_fit = task.get('auto_fit', True)
         self.app.root.after(0, lambda: self.refresh_preview(auto_fit=auto_fit))
 
@@ -244,6 +151,9 @@ class ImageProcessor:
                 'filename_pattern': self.app.filename_pattern_var.get(),
                 'auto_stretch': self.app.config.get('auto_stretch', {}),
                 'auto_refresh': self.app.auto_refresh_var.get(),
+                # Auto-exposure info for histogram markers
+                'auto_exposure': self.app.auto_exposure_var.get() if hasattr(self.app, 'auto_exposure_var') else False,
+                'target_brightness': self.app.target_brightness_var.get() if hasattr(self.app, 'target_brightness_var') else 100,
             }
             
             if not config['output_dir']:
@@ -263,7 +173,13 @@ class ImageProcessor:
             app_logger.error(traceback.format_exc())
     
     def _do_process_and_save(self, task):
-        """Actually process and save image - runs on background thread"""
+        """Process and save image - runs on background thread
+        
+        SINGLE-STRETCH ARCHITECTURE: Process image once, cache results for all consumers:
+        - last_stretched_image: After stretch (for mini preview histogram)
+        - last_processed_pil_image: Final with overlays (for preview tab display)
+        - File on disk (for web server, Discord, etc.)
+        """
         try:
             img = task['img']
             metadata = task['metadata']
@@ -281,8 +197,15 @@ class ImageProcessor:
             overlays = config['overlays']
             auto_stretch_config = config['auto_stretch']
             
-            # Ensure output directory exists
             os.makedirs(output_dir, exist_ok=True)
+            
+            # Calculate histogram from RAW image BEFORE any processing
+            # This shows the original sensor data distribution
+            raw_array = np.asarray(img)
+            raw_hist_r = np.histogram(raw_array[:, :, 0], bins=256, range=(0, 256))[0]
+            raw_hist_g = np.histogram(raw_array[:, :, 1], bins=256, range=(0, 256))[0]
+            raw_hist_b = np.histogram(raw_array[:, :, 2], bins=256, range=(0, 256))[0]
+            del raw_array
             
             # Resize if needed
             if resize_percent < 100:
@@ -290,39 +213,38 @@ class ImageProcessor:
                 new_height = int(img.height * resize_percent / 100)
                 img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
             
-            # Apply auto-stretch (MTF) if enabled - BEFORE brightness/saturation/overlays
+            # Apply auto-stretch (MTF) if enabled - SINGLE STRETCH for all consumers
             if auto_stretch_config.get('enabled', False):
                 img = auto_stretch_image(img, auto_stretch_config)
                 app_logger.debug("Applied auto-stretch to camera capture")
             
-            # Apply auto brightness if enabled (with proper analysis)
+            # Cache stretched image for mini preview (before brightness/overlays)
+            stretched_for_preview = img.copy()
+            
+            # Apply auto brightness
             if auto_brightness:
-                # Analyze brightness using view (no copy)
                 gray_img = img.convert('L')
                 img_array = np.asarray(gray_img)
                 mean_brightness = np.mean(img_array)
                 del gray_img
                 
-                # Calculate adaptive enhancement factor
                 target_brightness = 128
                 auto_factor = target_brightness / max(mean_brightness, 10)
                 auto_factor = max(0.5, min(auto_factor, 4.0))
-                
                 manual_factor = brightness_factor if brightness_factor else 1.0
                 final_factor = auto_factor * manual_factor
                 
                 enhancer = ImageEnhance.Brightness(img)
                 img = enhancer.enhance(final_factor)
-                
-                app_logger.debug(f"Auto brightness: mean={mean_brightness:.1f}, auto={auto_factor:.2f}, manual={manual_factor:.2f}, final={final_factor:.2f}")
+                app_logger.debug(f"Auto brightness: mean={mean_brightness:.1f}, factor={final_factor:.2f}")
             
-            # Apply saturation adjustment
+            # Apply saturation
             if saturation_factor != 1.0:
                 enhancer = ImageEnhance.Color(img)
                 img = enhancer.enhance(saturation_factor)
                 app_logger.debug(f"Saturation adjusted: factor={saturation_factor:.2f}")
             
-            # Add timestamp corner if enabled
+            # Add timestamp corner
             if timestamp_corner:
                 draw = ImageDraw.Draw(img)
                 timestamp_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -332,55 +254,48 @@ class ImageProcessor:
                     font = ImageFont.load_default()
                 draw.text((img.width - 200, 10), timestamp_text, fill='white', font=font)
             
-            # Add overlays (pass weather_service for weather tokens)
+            # Add overlays
             img = add_overlays(img, overlays, metadata, weather_service=self.app.weather_service)
             
-            # Generate output filename
+            # Generate output path
             session = metadata.get('session', datetime.now().strftime('%Y-%m-%d'))
             original_filename = metadata.get('FILENAME', 'capture.png')
             base_filename = os.path.splitext(original_filename)[0]
-            
             output_filename = filename_pattern.replace('{filename}', base_filename)
             output_filename = output_filename.replace('{session}', session)
             output_filename = output_filename.replace('{timestamp}', datetime.now().strftime('%Y%m%d_%H%M%S'))
-            
-            if output_format.lower() == 'png':
-                output_filename += '.png'
-            else:
-                output_filename += '.jpg'
-            
+            output_filename += '.png' if output_format.lower() == 'png' else '.jpg'
             output_path = os.path.join(output_dir, output_filename)
             
-            # Save
+            # Save to disk
             if output_format.lower() == 'png':
                 img.save(output_path, 'PNG')
             else:
                 img.save(output_path, 'JPEG', quality=jpg_quality)
             
-            # Schedule GUI updates on main thread
+            app_logger.info(f"Saved: {os.path.basename(output_path)}")
+            
+            # Update mini preview from stretched image, but use RAW histogram
+            auto_exposure = config.get('auto_exposure', False)
+            target_brightness = config.get('target_brightness', 100)
+            raw_hist = {'r': raw_hist_r, 'g': raw_hist_g, 'b': raw_hist_b}
+            self._update_mini_preview_from_stretched(
+                stretched_for_preview, auto_brightness, brightness_factor,
+                auto_exposure, target_brightness, raw_hist
+            )
+            del stretched_for_preview
+            
+            # Cache processed image and schedule GUI updates
+            processed_copy = img.copy()
+            
             def update_gui():
                 try:
+                    # Cache processed image for preview tab (no re-stretching needed)
+                    self.app.last_processed_pil_image = processed_copy
                     self.app.last_processed_image = output_path
-                    
-                    # Store preview image (already resized)
-                    if hasattr(self.app, 'preview_image') and self.app.preview_image:
-                        try:
-                            del self.app.preview_image
-                        except:
-                            pass
-                    
-                    # Store a copy for preview (without overlays for clean preview base)
-                    if resize_percent < 100 and self.app.last_captured_image:
-                        new_width = int(self.app.last_captured_image.width * resize_percent / 100)
-                        new_height = int(self.app.last_captured_image.height * resize_percent / 100)
-                        self.app.preview_image = self.app.last_captured_image.resize(
-                            (new_width, new_height), Image.Resampling.LANCZOS)
-                    elif self.app.last_captured_image:
-                        self.app.preview_image = self.app.last_captured_image.copy()
-                    
                     self.app.preview_metadata = metadata.copy()
                     
-                    # Auto-refresh preview if enabled
+                    # Auto-refresh preview using cached processed image
                     if config['auto_refresh']:
                         self.refresh_preview(auto_fit=True)
                 except Exception as e:
@@ -388,121 +303,130 @@ class ImageProcessor:
             
             self.app.root.after(0, update_gui)
             
-            app_logger.info(f"Saved: {os.path.basename(output_path)}")
-            
-            # Push to output servers (can be slow, but runs on background thread)
+            # Push to output servers
             self.app._push_to_output_servers(output_path, img)
-            
-            # Clean up the processed image object
             del img
             
-            # Update last_processed_image and check for Discord posts
-            # This sets the path BEFORE checking for Discord, ensuring it's available
+            # Discord check
             def update_discord_state():
                 self.app.last_processed_image = output_path
-                
-                # Post first image to Discord (only once per session)
                 if not self.app.first_image_posted_to_discord and self.app.discord_enabled_var.get() and self.app.discord_periodic_enabled_var.get():
                     self.app.first_image_posted_to_discord = True
                     app_logger.info(f"Posting first image to Discord: {output_path}")
                     self.app.output_manager._post_periodic_discord_update()
             
             self.app.root.after(0, update_discord_state)
-            
-            # Periodically cleanup overlay cache
             self._cleanup_overlay_cache()
             
         except Exception as e:
             app_logger.error(f"Processing failed: {e}")
             app_logger.error(traceback.format_exc())
     
-    def refresh_preview(self, auto_fit=True):
-        """Refresh preview display"""
-        # Use the last processed image or last captured image
-        if not self.app.preview_image:
-            # Try to load the last processed image file
-            if self.app.last_processed_image and os.path.exists(self.app.last_processed_image):
-                try:
-                    self.app.preview_image = Image.open(self.app.last_processed_image)
-                except Exception as e:
-                    app_logger.error(f"Failed to load preview: {e}")
-                    return
-            else:
-                return
+    def _update_mini_preview_from_stretched(self, stretched_img, auto_brightness, brightness_factor,
+                                              auto_exposure=False, target_brightness=100, raw_hist=None):
+        """Update mini preview from already-stretched image
         
+        Args:
+            stretched_img: PIL Image after auto-stretch (for preview display)
+            auto_brightness: Whether auto-brightness is enabled
+            brightness_factor: Manual brightness multiplier
+            auto_exposure: Whether auto-exposure is enabled (for histogram markers)
+            target_brightness: Target brightness value (0-255) for histogram marker
+            raw_hist: Pre-calculated histogram from RAW image {'r': array, 'g': array, 'b': array}
+        """
         try:
-            # Apply auto brightness and saturation adjustments (for display only)
-            display_base = self.app.preview_image.copy()
+            preview_img = stretched_img.copy()
             
-            # Apply auto-stretch (MTF) if enabled - BEFORE brightness/saturation (same as save pipeline)
-            auto_stretch_config = self.app.config.get('auto_stretch', {})
-            if auto_stretch_config.get('enabled', False):
-                display_base = auto_stretch_image(display_base, auto_stretch_config)
-            
-            # Apply brightness adjustment
-            if self.app.auto_brightness_var.get():
-                # Analyze brightness
-                img_array = np.array(display_base.convert('L'))
+            # Apply brightness for display (same as save pipeline)
+            if auto_brightness:
+                gray_img = preview_img.convert('L')
+                img_array = np.asarray(gray_img)
                 mean_brightness = np.mean(img_array)
-                target_brightness = 128
-                auto_factor = target_brightness / max(mean_brightness, 10)
-                auto_factor = max(0.5, min(auto_factor, 4.0))
+                del gray_img
                 
-                # Apply manual multiplier
-                manual_factor = self.app.brightness_var.get()
+                target_br = 128
+                auto_factor = target_br / max(mean_brightness, 10)
+                auto_factor = max(0.5, min(auto_factor, 4.0))
+                manual_factor = brightness_factor if brightness_factor else 1.0
                 final_factor = auto_factor * manual_factor
                 
-                enhancer = ImageEnhance.Brightness(display_base)
-                display_base = enhancer.enhance(final_factor)
+                enhancer = ImageEnhance.Brightness(preview_img)
+                preview_img = enhancer.enhance(final_factor)
             
-            # Apply saturation adjustment
-            saturation_factor = self.app.saturation_var.get()
-            if saturation_factor != 1.0:
-                enhancer = ImageEnhance.Color(display_base)
-                display_base = enhancer.enhance(saturation_factor)
-            
-            # Add overlays for preview (same as saved image)
-            from services.processor import add_overlays
-            overlays = self.app.overlay_manager.get_overlays_config()
-            # Use real metadata if available, otherwise create empty metadata
-            if hasattr(self.app, 'preview_metadata') and self.app.preview_metadata:
-                preview_metadata = self.app.preview_metadata
+            # Use pre-calculated RAW histogram (shows original sensor data)
+            if raw_hist:
+                hist_r, hist_g, hist_b = raw_hist['r'], raw_hist['g'], raw_hist['b']
             else:
-                # Fallback for when no image has been captured yet
-                preview_metadata = {
-                    'CAMERA': 'No Image',
-                    'EXPOSURE': '0',
-                    'GAIN': '0',
-                    'TEMP': '0',
-                    'RES': f'{display_base.width}x{display_base.height}',
-                    'FILENAME': 'preview.jpg',
-                    'SESSION': 'preview',
-                    'DATETIME': ''
-                }
-            display_base = add_overlays(display_base, overlays, preview_metadata, weather_service=self.app.weather_service)
+                # Fallback: calculate from stretched image
+                img_array = np.asarray(stretched_img)
+                hist_r = np.histogram(img_array[:, :, 0], bins=256, range=(0, 256))[0]
+                hist_g = np.histogram(img_array[:, :, 1], bins=256, range=(0, 256))[0]
+                hist_b = np.histogram(img_array[:, :, 2], bins=256, range=(0, 256))[0]
             
+            # Normalize histograms to 0-90 range for display (canvas is 100px tall)
+            max_val = max(hist_r.max(), hist_g.max(), hist_b.max())
+            if max_val > 0:
+                hist_r = (hist_r / max_val * 90).astype(int)
+                hist_g = (hist_g / max_val * 90).astype(int)
+                hist_b = (hist_b / max_val * 90).astype(int)
+            
+            # Resize for mini preview
+            preview_img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+            
+            # Include auto-exposure info for histogram markers
+            hist_data = {
+                'r': hist_r, 'g': hist_g, 'b': hist_b,
+                'auto_exposure': auto_exposure,
+                'target_brightness': target_brightness,
+            }
+            
+            def update_gui():
+                try:
+                    photo = ImageTk.PhotoImage(preview_img)
+                    self.app.status_manager._do_mini_preview_gui_update(photo, hist_data)
+                except Exception as e:
+                    app_logger.error(f"Mini preview GUI update failed: {e}")
+                    self.app.status_manager._mini_preview_pending = False
+            
+            self.app.root.after(0, update_gui)
+            
+        except Exception as e:
+            app_logger.error(f"Mini preview from stretched failed: {e}")
+    
+    def refresh_preview(self, auto_fit=True):
+        """Refresh preview display using cached processed image (no re-stretch)"""
+        # Use cached processed image if available (already stretched/processed)
+        if self.app.last_processed_pil_image:
+            display_base = self.app.last_processed_pil_image.copy()
+        elif self.app.last_processed_image and os.path.exists(self.app.last_processed_image):
+            # Fallback: load from file (already processed with overlays)
+            try:
+                display_base = Image.open(self.app.last_processed_image)
+            except Exception as e:
+                app_logger.error(f"Failed to load preview: {e}")
+                return
+        else:
+            return
+        
+        try:
             # Auto-fit: calculate zoom to fit image in canvas
             if auto_fit:
                 canvas_width = self.app.preview_canvas.winfo_width()
                 canvas_height = self.app.preview_canvas.winfo_height()
                 
-                # Only auto-fit if canvas has been sized (not 1x1)
                 if canvas_width > 1 and canvas_height > 1:
-                    # Calculate zoom to fit while maintaining aspect ratio
                     zoom_x = (canvas_width - 20) / display_base.width
                     zoom_y = (canvas_height - 20) / display_base.height
-                    zoom = min(zoom_x, zoom_y, 1.0)  # Don't zoom beyond 100%
-                    
-                    # Update the zoom slider
+                    zoom = min(zoom_x, zoom_y, 1.0)
                     zoom_percent = int(zoom * 100)
-                    if zoom_percent >= 10:  # Ensure it's within slider range
+                    if zoom_percent >= 10:
                         self.app.preview_zoom_var.set(zoom_percent)
             
             zoom = self.app.preview_zoom_var.get() / 100.0
             new_size = (int(display_base.width * zoom), int(display_base.height * zoom))
             display_img = display_base.resize(new_size, Image.Resampling.LANCZOS)
             
-            # Clean up old preview photo to prevent memory leak
+            # Clean up old preview photo
             if hasattr(self.app, 'preview_photo') and self.app.preview_photo:
                 try:
                     del self.app.preview_photo
@@ -514,7 +438,6 @@ class ImageProcessor:
             self.app.preview_canvas.create_image(0, 0, anchor='nw', image=self.app.preview_photo)
             self.app.preview_canvas.config(scrollregion=self.app.preview_canvas.bbox('all'))
             
-            # Clean up temporary images
             del display_img
             del display_base
         except Exception as e:
