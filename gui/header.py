@@ -227,10 +227,14 @@ class LiveMonitoringHeader:
         
         tk.Label(left_frame, text="Last Capture", font=FONTS['body_bold'],
                 bg=COLORS['bg_primary'], fg=COLORS['text_primary']).pack()
-        self.mini_preview_label = tk.Label(left_frame, text="No image yet", 
-                                           relief='sunken', width=25,
+        # Fixed 250x250 square preview container
+        preview_container = tk.Frame(left_frame, width=250, height=250, 
+                                     bg=COLORS['bg_input'], relief='sunken', bd=1)
+        preview_container.pack()
+        preview_container.pack_propagate(False)  # Prevent container from shrinking
+        self.mini_preview_label = tk.Label(preview_container, text="No image yet", 
                                            bg=COLORS['bg_input'], fg=COLORS['text_secondary'])
-        self.mini_preview_label.pack()
+        self.mini_preview_label.place(relx=0.5, rely=0.5, anchor='center')  # Center the label
         self.mini_preview_image = None
         
         # Right side: Histogram and logs stacked

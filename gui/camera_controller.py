@@ -355,11 +355,8 @@ class CameraController:
             self.app.image_count += 1
             self.app.root.after(0, lambda: self.app.image_count_var.set(str(self.app.image_count)))
             
-            # Post first image to Discord immediately after calibration (only once)
-            if not self.app.first_image_posted_to_discord and self.app.discord_enabled_var.get() and self.app.discord_periodic_enabled_var.get():
-                self.app.first_image_posted_to_discord = True
-                self.app.root.after(1000, self.app.output_manager._post_periodic_discord_update)
-                app_logger.info("Posting first image to Discord")
+            # Note: First Discord post is triggered from image_processor after image is saved
+            # to ensure last_processed_image is set correctly
             
         except Exception as e:
             app_logger.error(f"Error processing camera frame: {e}")

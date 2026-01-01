@@ -3,6 +3,7 @@ Output Manager - Handles Web/RTSP/Discord output modes
 Extracted from main_window.py to improve modularity
 """
 import io
+import os
 from tkinter import messagebox
 from datetime import datetime
 
@@ -286,11 +287,13 @@ class OutputManager:
         self.save_discord_settings()
         
         # Get latest image path
+        # NOTE: Only use last_processed_image (file path). last_captured_image is a PIL Image object.
         image_path = None
-        if self.app.discord_include_image_var.get() and self.app.last_processed_image:
-            image_path = self.app.last_processed_image
-        elif self.app.discord_include_image_var.get() and self.app.last_captured_image:
-            image_path = self.app.last_captured_image
+        if self.app.discord_include_image_var.get():
+            if self.app.last_processed_image and isinstance(self.app.last_processed_image, str):
+                image_path = self.app.last_processed_image
+            else:
+                app_logger.warning("No processed image available for Discord test - capture an image first")
         
         # Send test alert
         success = self.discord_alerts.send_discord_message(
@@ -402,16 +405,18 @@ This is a test alert with your current configuration.""",
                 return
         
         # Get latest image if available
+        # NOTE: Only use last_processed_image (file path). last_captured_image is a PIL Image object.
         image_path = None
         if self.app.discord_include_image_var.get():
-            if self.app.last_processed_image:
-                image_path = self.app.last_processed_image
-                app_logger.debug(f"Using last_processed_image: {image_path}")
-            elif self.app.last_captured_image:
-                image_path = self.app.last_captured_image
-                app_logger.debug(f"Using last_captured_image: {image_path}")
+            if self.app.last_processed_image and isinstance(self.app.last_processed_image, str):
+                # Verify file still exists
+                if os.path.exists(self.app.last_processed_image):
+                    image_path = self.app.last_processed_image
+                    app_logger.debug(f"Using last_processed_image: {image_path}")
+                else:
+                    app_logger.warning(f"last_processed_image file no longer exists: {self.app.last_processed_image}")
             else:
-                app_logger.warning("No image available for Discord post")
+                app_logger.warning(f"No processed image path available for Discord post (last_processed_image={self.app.last_processed_image})")
         else:
             app_logger.debug("Discord image inclusion disabled")
         
@@ -439,13 +444,12 @@ This is a test alert with your current configuration.""",
             return
         
         # Get latest image if available
+        # NOTE: Only use last_processed_image (file path). last_captured_image is a PIL Image object.
         image_path = None
         if self.app.discord_include_image_var.get():
-            if self.app.last_processed_image:
+            if self.app.last_processed_image and isinstance(self.app.last_processed_image, str):
                 image_path = self.app.last_processed_image
-            elif self.app.last_captured_image:
-                image_path = self.app.last_captured_image
-        
+
         # Build start message
         mode = "Camera Capture" if self.app.is_capturing else "Directory Watch"
         
@@ -470,7 +474,11 @@ This is a test alert with your current configuration.""",
         Args:
             image_path: Path to the processed image
         """
-        # Only send if Discord is enabled and periodic posting is enabled
+        # Always update last_processed_image so it's available for Discord posts
+        # even if periodic posting is disabled (e.g., for test alerts or manual posts)
+        self.app.last_processed_image = image_path
+        
+        # Only continue if Discord is enabled and periodic posting is enabled
         if not self.app.discord_enabled_var.get():
             return
         
@@ -480,10 +488,8 @@ This is a test alert with your current configuration.""",
         if not self.discord_alerts:
             return
         
-        # Check if we should send based on interval
-        # This is handled by the scheduled job, but we update last_processed_image
-        # so the scheduled post uses the latest image
-        self.app.last_processed_image = image_path
+        # The actual periodic posting is handled by the scheduled job in schedule_discord_periodic()
+        # This method just ensures last_processed_image is up to date
     
     def send_discord_error(self, error_text):
         """
