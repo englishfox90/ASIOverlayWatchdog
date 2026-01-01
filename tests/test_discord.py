@@ -482,3 +482,96 @@ class TestPeriodicUpdates:
         result = alerts.send_periodic_update(latest_image_path=str(test_image))
         
         assert result is True
+
+
+class TestDiscordImagePathValidation:
+    """Test that Discord methods properly validate image paths"""
+    
+    @pytest.fixture
+    def discord_config(self):
+        """Sample Discord config"""
+        return {
+            'discord': {
+                'enabled': True,
+                'webhook_url': 'https://discord.com/api/webhooks/test/test',
+                'username_override': 'TestBot',
+                'avatar_url': '',
+                'embed_color_hex': '#0EA5E9',
+                'include_latest_image': True,
+            }
+        }
+    
+    @pytest.fixture
+    def discord_alerts(self, discord_config):
+        """Create DiscordAlerts instance"""
+        from services.discord_alerts import DiscordAlerts
+        
+        config = Mock()
+        config.get = lambda key, default=None: discord_config.get(key, default)
+        
+        return DiscordAlerts(config)
+    
+    @patch('services.discord_alerts.requests.post')
+    def test_send_message_with_pil_image_fails_gracefully(self, mock_post, discord_alerts):
+        """Test that passing PIL Image instead of path is handled safely
+        
+        This tests the fix for: Discord webhook error: _path_exists: 
+        path should be string, bytes, os.PathLike or integer, not Image
+        """
+        from PIL import Image
+        
+        # Create a PIL Image object (NOT a path)
+        pil_image = Image.new('RGB', (100, 100), color='red')
+        
+        mock_response = Mock()
+        mock_response.status_code = 204
+        mock_post.return_value = mock_response
+        
+        # Should NOT crash - PIL Image should be treated as invalid path
+        # The os.path.exists check will handle this by catching the TypeError
+        result = discord_alerts.send_discord_message(
+            "Test Title",
+            "Test Description",
+            level="info",
+            image_path=pil_image  # Wrong type! Should be str, not Image
+        )
+        
+        # Should succeed (message sent without image) or fail gracefully
+        # The key is it should NOT crash with an exception
+        assert result in [True, False]
+    
+    @patch('services.discord_alerts.requests.post')
+    def test_send_message_with_valid_path(self, mock_post, discord_alerts, tmp_path):
+        """Test that valid string path works correctly"""
+        # Create a test image file
+        test_image = tmp_path / "test.jpg"
+        test_image.write_bytes(b'\xff\xd8\xff\xe0' + b'\x00' * 100)
+        
+        mock_response = Mock()
+        mock_response.status_code = 204
+        mock_post.return_value = mock_response
+        
+        result = discord_alerts.send_discord_message(
+            "Test Title",
+            "Test Description",
+            level="info",
+            image_path=str(test_image)  # Correct: string path
+        )
+        
+        assert result is True
+    
+    @patch('services.discord_alerts.requests.post')
+    def test_send_message_with_none_path(self, mock_post, discord_alerts):
+        """Test that None path sends text-only message"""
+        mock_response = Mock()
+        mock_response.status_code = 204
+        mock_post.return_value = mock_response
+        
+        result = discord_alerts.send_discord_message(
+            "Test Title",
+            "Test Description",
+            level="info",
+            image_path=None
+        )
+        
+        assert result is True

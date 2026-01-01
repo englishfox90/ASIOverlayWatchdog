@@ -90,7 +90,15 @@ class DiscordAlerts:
             # Check if we should attach an image
             include_image = discord_config.get('include_latest_image', True)
             
-            if image_path and include_image and os.path.exists(image_path):
+            # Validate image_path is a string path, not a PIL Image or other object
+            valid_image_path = (
+                image_path and 
+                include_image and 
+                isinstance(image_path, (str, bytes, os.PathLike)) and 
+                os.path.exists(image_path)
+            )
+            
+            if valid_image_path:
                 # Send with image attachment
                 app_logger.debug(f"Attaching image to Discord: {image_path}")
                 files = {
@@ -110,8 +118,11 @@ class DiscordAlerts:
                 files["file"][1].close()  # Close file handle
             else:
                 # Send text-only message
-                if image_path and not os.path.exists(image_path):
-                    app_logger.warning(f"Discord image path doesn't exist: {image_path}")
+                if image_path:
+                    if not isinstance(image_path, (str, bytes, os.PathLike)):
+                        app_logger.warning(f"Discord image_path is not a valid path type: {type(image_path).__name__}")
+                    elif not os.path.exists(image_path):
+                        app_logger.warning(f"Discord image path doesn't exist: {image_path}")
                 app_logger.debug("Sending text-only Discord message")
                 response = requests.post(
                     webhook_url,

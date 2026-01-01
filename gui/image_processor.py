@@ -396,8 +396,18 @@ class ImageProcessor:
             # Clean up the processed image object
             del img
             
-            # Check if Discord periodic update should be sent (schedules to main thread internally)
-            self.app.root.after(0, lambda: self.app.check_discord_periodic_send(output_path))
+            # Update last_processed_image and check for Discord posts
+            # This sets the path BEFORE checking for Discord, ensuring it's available
+            def update_discord_state():
+                self.app.last_processed_image = output_path
+                
+                # Post first image to Discord (only once per session)
+                if not self.app.first_image_posted_to_discord and self.app.discord_enabled_var.get() and self.app.discord_periodic_enabled_var.get():
+                    self.app.first_image_posted_to_discord = True
+                    app_logger.info(f"Posting first image to Discord: {output_path}")
+                    self.app.output_manager._post_periodic_discord_update()
+            
+            self.app.root.after(0, update_discord_state)
             
             # Periodically cleanup overlay cache
             self._cleanup_overlay_cache()
