@@ -679,6 +679,10 @@ class OverlaySettingsPanel(QWidget):
     
     def _refresh_list(self):
         """Refresh overlay table display"""
+        # Save current selection and block signals to prevent selection loss
+        saved_index = self._selected_index
+        self.overlay_table.blockSignals(True)
+        
         self.overlay_table.setRowCount(0)
         for i, overlay in enumerate(self._overlays):
             self.overlay_table.insertRow(i)
@@ -702,6 +706,12 @@ class OverlaySettingsPanel(QWidget):
             self.overlay_table.setItem(i, 0, QTableWidgetItem(name))
             self.overlay_table.setItem(i, 1, QTableWidgetItem(otype))
             self.overlay_table.setItem(i, 2, QTableWidgetItem(summary))
+        
+        # Restore selection without triggering signals
+        if saved_index >= 0 and saved_index < len(self._overlays):
+            self.overlay_table.selectRow(saved_index)
+        
+        self.overlay_table.blockSignals(False)
     
     def _show_add_menu(self):
         """Show menu to add text or image overlay"""
@@ -731,6 +741,8 @@ class OverlaySettingsPanel(QWidget):
         }
         self._overlays.append(new_overlay)
         self._refresh_list()
+        # Select the new overlay (triggers _on_overlay_selected)
+        self.overlay_table.blockSignals(False)  # Ensure signals are enabled
         self.overlay_table.selectRow(len(self._overlays) - 1)
         self._save_overlays()
     
@@ -942,9 +954,10 @@ class OverlaySettingsPanel(QWidget):
         self._refresh_list()
     
     def _on_text_changed(self):
-        self._update_current_overlay()
-        self._refresh_list()
-        self._update_preview()
+        if self._selected_index >= 0:
+            self._update_current_overlay()
+            self._refresh_list()
+            self._update_preview()
     
     def _on_appearance_changed(self):
         self._update_current_overlay()

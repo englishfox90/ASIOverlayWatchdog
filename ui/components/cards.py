@@ -125,6 +125,20 @@ class SettingsCard(CardWidget):
         
         self.main_layout.addLayout(header)
         
+        # Separator line
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Plain)
+        separator.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.border_subtle};
+                border: none;
+                height: 1px;
+                margin: {Spacing.sm}px 0px;
+            }}
+        """)
+        self.main_layout.addWidget(separator)
+        
         # Content area
         self.content_layout = QVBoxLayout()
         self.content_layout.setSpacing(Spacing.input_gap)

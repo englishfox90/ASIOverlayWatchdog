@@ -90,6 +90,22 @@ class CameraControllerQt(QObject):
             sdk_path = self.config.get('zwo_sdk_path', '')
             camera_index = self.config.get('zwo_selected_camera', 0)
             
+            # Detect cameras first if not already done (prevents stale camera_index)
+            available_cameras = self.config.get('available_cameras', [])
+            if not available_cameras or camera_index >= len(available_cameras):
+                app_logger.info("No cameras detected, running detection...")
+                from services.camera_connection import CameraConnection
+                conn = CameraConnection(sdk_path)
+                available_cameras = conn.detect_cameras()
+                if not available_cameras:
+                    raise Exception("No cameras detected")
+                if camera_index >= len(available_cameras):
+                    app_logger.warning(f"Saved camera index {camera_index} invalid, using 0")
+                    camera_index = 0
+                    self.config.set('zwo_selected_camera', camera_index)
+                self.config.set('available_cameras', available_cameras)
+                self.config.save()
+            
             # Get settings from config
             exposure_ms = self.config.get('zwo_exposure_ms', 100.0)
             exposure_sec = exposure_ms / 1000.0

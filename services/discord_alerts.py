@@ -206,6 +206,32 @@ Application has been closed."""
             level="info"
         )
     
+    def send_capture_started_message(self):
+        """Send capture started notification"""
+        discord_config = self.config.get('discord', {})
+        
+        if not discord_config.get('post_startup_shutdown', False):
+            return False
+        
+        # Get current mode
+        mode = self.config.get('capture_mode', 'watch')
+        mode_text = "Directory Watch" if mode == 'watch' else "ZWO Camera Capture"
+        
+        # Get output path
+        output_path = self.config.get('output_directory', 'Not configured')
+        
+        description = f"""**Mode:** {mode_text}
+**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Output Path:** {output_path}
+
+Ready to process images."""
+        
+        return self.send_discord_message(
+            f"🚀 Capture Started",
+            description,
+            level="info"
+        )
+    
     def send_error_message(self, error_text):
         """Send error notification"""
         discord_config = self.config.get('discord', {})

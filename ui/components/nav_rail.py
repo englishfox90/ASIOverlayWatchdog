@@ -154,7 +154,6 @@ class NavRail(QFrame):
             (FluentIcon.CLOUD, "Output", 'output'),
             (FluentIcon.PHOTO, "Image Processing", 'processing'),
             (FluentIcon.FONT, "Overlays", 'overlays'),
-            (FluentIcon.GLOBE, "Services", 'services'),
             (FluentIcon.HISTORY, "Logs", 'logs'),
         ]
         
@@ -166,6 +165,12 @@ class NavRail(QFrame):
         
         # Spacer
         layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        
+        # Settings button (bottom)
+        settings_btn = NavButton(FluentIcon.SETTING, "Settings", 'settings', self)
+        settings_btn.clicked.connect(lambda checked: self._on_button_clicked('settings'))
+        layout.addWidget(settings_btn)
+        self._buttons['settings'] = settings_btn
         
         # Set initial selection
         self._buttons['capture'].set_selected(True)
@@ -186,6 +191,17 @@ class NavRail(QFrame):
         """Programmatically set current section"""
         if key in self._buttons:
             self._on_button_clicked(key)
+    
+    def set_active_section(self, key: str):
+        """Set active section without emitting signal (for restoring state)"""
+        if key not in self._buttons:
+            return
+        
+        # Update visual selection
+        for btn_key, btn in self._buttons.items():
+            btn.set_selected(btn_key == key)
+        
+        self._current_section = key
     
     def toggle_collapsed(self):
         """Toggle between collapsed and expanded states"""
