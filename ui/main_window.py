@@ -206,9 +206,9 @@ class MainWindow(QMainWindow):
         self.inspector_stack.addWidget(self.logs_panel)         # Index 4
         self.inspector_stack.addWidget(self.settings_panel)     # Index 5
         
-        # Restore splitter sizes from config
-        saved_sizes = self.config.get('splitter_sizes', [400, 500])
-        self.splitter.setSizes(saved_sizes)
+        # Defer splitter restoration until window is shown
+        # This ensures we have accurate available width
+        QTimer.singleShot(100, self._restore_splitter_sizes)
         
         # Restore inspector visibility from config
         inspector_visible = self.config.get('inspector_visible', True)
@@ -454,8 +454,69 @@ class MainWindow(QMainWindow):
     def _on_splitter_moved(self, pos, index):
         """Save splitter sizes when user adjusts divider"""
         sizes = self.splitter.sizes()
-        self.config.set('splitter_sizes', sizes)
+        total = sum(sizes) if sizes else 1
+        
+        # Save both absolute sizes and ratio for better restoration
+        if total > 0 and len(sizes) >= 2:
+            ratio = sizes[0] / total
+            self.config.set('splitter_sizes', sizes)
+            self.config.set('splitter_ratio', ratio)
     
+    def _restore_splitter_sizes(self):
+        """Restore splitter sizes after window is shown
+        
+        Uses saved ratio as primary method, falls back to absolute sizes.
+        This prevents dramatic shifts when window size differs from saved state.
+        """
+        try:
+            # Get current available width
+            available_width = self.splitter.width()
+            if available_width <= 0:
+                # Splitter not ready yet, use defaults
+                self.splitter.setSizes([400, 500])
+                return
+            
+            # Try ratio-based restoration first (more reliable across window sizes)
+            saved_ratio = self.config.get('splitter_ratio', None)
+            if saved_ratio is not None and 0.1 <= saved_ratio <= 0.9:
+                # Apply ratio to current width
+                left_size = int(available_width * saved_ratio)
+                right_size = available_width - left_size
+                
+                # Ensure minimum sizes
+                left_size = max(250, left_size)
+                right_size = max(300, right_size)
+                
+                self.splitter.setSizes([left_size, right_size])
+                app_logger.debug(f"Splitter restored via ratio: {saved_ratio:.2f} -> [{left_size}, {right_size}]")
+                return
+            
+            # Fallback to absolute sizes with validation
+            saved_sizes = self.config.get('splitter_sizes', None)
+            if saved_sizes and isinstance(saved_sizes, list) and len(saved_sizes) >= 2:
+                # Validate sizes are reasonable
+                if all(s >= 100 for s in saved_sizes[:2]):
+                    # Scale sizes proportionally if they don't fit current width
+                    total_saved = sum(saved_sizes[:2])
+                    if total_saved > available_width * 1.5 or total_saved < available_width * 0.5:
+                        # Saved sizes are way off, use ratio instead
+                        ratio = saved_sizes[0] / total_saved
+                        left_size = int(available_width * ratio)
+                        right_size = available_width - left_size
+                        self.splitter.setSizes([max(250, left_size), max(300, right_size)])
+                    else:
+                        self.splitter.setSizes(saved_sizes)
+                    return
+            
+            # Default: 40% left, 60% right
+            left_size = int(available_width * 0.4)
+            right_size = available_width - left_size
+            self.splitter.setSizes([left_size, right_size])
+            
+        except Exception as e:
+            app_logger.warning(f"Error restoring splitter sizes: {e}")
+            self.splitter.setSizes([400, 500])
+
     # =========================================================================
     # NAVIGATION
     # =========================================================================

@@ -151,6 +151,7 @@ class SystemTrayQt(QObject):
             if not self.window.is_capturing:
                 self.window.start_capture()
                 app_logger.info("Capture started from tray menu")
+                self._update_menu()  # Refresh menu state
         except Exception as e:
             app_logger.error(f"Error starting capture from tray: {e}")
     
@@ -164,8 +165,27 @@ class SystemTrayQt(QObject):
             if self.window.is_capturing:
                 self.window.stop_capture()
                 app_logger.info("Capture stopped from tray menu")
+                self._update_menu()  # Refresh menu state
         except Exception as e:
             app_logger.error(f"Error stopping capture from tray: {e}")
+    
+    def _update_menu(self):
+        """Update the tray menu to reflect current state
+        
+        pystray menus use lambdas for dynamic state, but we need to
+        force a menu rebuild to ensure it reflects current app state.
+        """
+        try:
+            if self.tray_icon:
+                # pystray evaluates the lambda on menu open, but some
+                # implementations cache the menu. Force update by
+                # triggering menu invalidation
+                self.tray_icon.update_menu()
+        except AttributeError:
+            # update_menu() may not exist in all pystray versions
+            pass
+        except Exception as e:
+            app_logger.debug(f"Menu update: {e}")
     
     def _auto_start_capture(self):
         """Auto-start capture after delay"""
