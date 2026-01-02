@@ -2,7 +2,7 @@
 
 **Live Camera Monitoring & Overlay System for Observatories**
 
-A modern, production-ready application that either watches directories for new images or captures directly from ZWO ASI cameras, adding customizable metadata overlays and serving output through multiple channels (file, web server, or RTSP streaming).
+A modern, production-ready application with a Fluent Design UI that either watches directories for new images or captures directly from ZWO ASI cameras, adding customizable metadata overlays with weather data and serving output through multiple channels (file, web server, Discord, or RTSP streaming).
 
 ---
 
@@ -29,9 +29,10 @@ A modern, production-ready application that either watches directories for new i
 The application features multiple output modes:
 - **File Mode**: Save processed images to disk (traditional workflow)
 - **Webserver Mode**: Serve latest image via HTTP (http://127.0.0.1:8080/latest)
+- **Discord Integration**: Periodic image posts with weather data and overlay information
 - **RTSP Streaming Mode**: Live H.264 stream for video applications (rtsp://127.0.0.1:8554/stream)
 
-Built with a modern dark-themed GUI using ttkbootstrap, PFR Sentinel includes live monitoring (preview, RGB histogram, recent logs), 7-day rotating file logs for troubleshooting, and command-line automation support for scheduled tasks.
+Built with a modern Fluent Design UI using PySide6 and qfluentwidgets, PFR Sentinel includes live monitoring (preview, RGB histogram, recent logs), weather integration with OpenWeatherMap, 7-day rotating file logs for troubleshooting, and command-line automation support for scheduled tasks.
 
 ---
 
@@ -48,16 +49,19 @@ Built with a modern dark-themed GUI using ttkbootstrap, PFR Sentinel includes li
 
 ### Output Modes
 - ✅ **File Output**: Traditional save-to-disk workflow
-- ✅ **Web Server**: HTTP server with `/latest` (image) and `/status` (JSON) endpoints
+- ✅ **Web Server**: HTTP server with `/latest` (image) and `/status` (JSON) endpoints, ETag caching support
+- ✅ **Discord Integration**: Periodic image posts with capture info, weather data, and event notifications
 - ✅ **RTSP Streaming**: Live H.264 video stream via ffmpeg (requires ffmpeg installation)
 - ✅ **Smart Detection**: Automatic ffmpeg availability check with helpful UI feedback
+- ✅ **Weather Data**: Optional OpenWeatherMap integration for weather overlays and Discord embeds
 
 ### User Interface
-- ✅ **Modern Dark Theme**: Professional ttkbootstrap-based interface
-- ✅ **Live Monitoring Header**: Mini preview, RGB histogram, and recent log messages
-- ✅ **Tabbed Navigation**: Capture, Settings, Overlays, Preview, Logs
-- ✅ **Real-time Preview**: Auto-fit zoom with manual controls
-- ✅ **Status Indicators**: Visual feedback for all operations
+- ✅ **Modern Fluent Design UI**: Professional PySide6 + qfluentwidgets interface with Windows 11 styling
+- ✅ **Live Monitoring Panel**: Real-time preview, RGB histogram, and mini-log viewer in dedicated panel
+- ✅ **Navigation Interface**: Monitoring, Capture, Output, Overlays, and Logs pages with smooth transitions
+- ✅ **Real-time Preview**: Auto-fit zoom with manual controls and metadata display
+- ✅ **Status Bar**: Visual indicators for capture, calibration, processing, and sending states
+- ✅ **System Tray**: Native Qt system tray with notifications and quick controls
 
 ### Automation & Reliability
 - ✅ **Command Line Support**: `--auto-start`, `--auto-stop`, `--headless`, `--tray` flags for scripting
@@ -78,46 +82,47 @@ Built with a modern dark-themed GUI using ttkbootstrap, PFR Sentinel includes li
 
 ---
 
-## Installation for End Users
+## Installation fInstaller (Recommended)
 
-### Download the Executable (Recommended)
+**→ [Download Latest Release](releases/) ← Get PFRSentinel_Setup.exe**
 
-**→ [Download Latest Release](releases/) ← Click here for portable ZIP**
-
-1. **Download**: Get `ASIOverlayWatchDog-v2.0.0-Portable.zip` from the `releases/` folder
-2. **Extract**: Unzip to a permanent location (e.g., `C:\Program Files\ASIOverlayWatchDog\` or `C:\ASIWatchdog\`)
-3. **Run**: Double-click `ASIOverlayWatchDog.exe` - **That's it!**
+1. **Download**: Get `PFRSentinel_Setup.exe` from the `releases/` folder
+2. **Install**: Run the installer - it will install to `Program Files\PFR Sentinel` by default
+3. **Run**: Launch from Start Menu or desktop shortcut - **That's it!**
 
 **✅ Completely Self-Contained - No Installation Required:**
 - ✅ Python runtime embedded (no Python installation needed)
-- ✅ All dependencies included (Pillow, OpenCV, NumPy, ttkbootstrap, etc.)
+- ✅ All dependencies included (PySide6, qfluentwidgets, Pillow, OpenCV, NumPy, etc.)
 - ✅ ZWO ASI SDK bundled (`ASICamera2.dll` included)
-- ✅ Works on any Windows 7+ machine (64-bit recommended)
-- ✅ No admin rights required (unless installing to Program Files)
+- ✅ Works on Windows 10/11 (64-bit, Windows 7 may work but untested)
+- ✅ Installer handles Start Menu shortcuts and uninstaller registration
 
 **Optional Dependencies:**
 - **ffmpeg** - Only needed for RTSP streaming mode (see [ffmpeg installation](#ffmpeg-installation) below)
+  - File, Webserver, and Discord modes work without ffmpeg
+  - RTSP option will be unavailable if ffmpeg not found
+- **OpenWeatherMap API Key** - Free key for weather data overlays and Discord embeds (optional)see [ffmpeg installation](#ffmpeg-installation) below)
   - File and Webserver modes work without ffmpeg
   - RTSP button will be disabled if ffmpeg not found
 
 ### First Run Setup
 
 On first launch, the application will:
-- Create a default `config.json` in the same folder
-- Create a log directory at `%APPDATA%\ASIOverlayWatchDog\logs`
-- Show the Capture tab with default settings
+- Create a default `config.json` in `%APPDATA%\PFRSentinel`
+- Create a log directory at `%APPDATA%\PFRSentinel\logs`
+- Show the Monitoring panel with live preview and histogram
 
-**No installation or Python required** - it's a standalone executable!
+**No Python required** - it's a standalone application with installer!
 
 #### Windows SmartScreen Warning
-
-When you first run `ASIOverlayWatchDog.exe`, Windows may show a security warning:
+the installer or `PFRSentinel.exe`, Windows may show a security warning:
 
 ```
 Windows protected your PC
 Microsoft Defender SmartScreen prevented an unrecognized app from starting.
 ```
 
+**This is normal for unsigned software.** PFR Sentinel
 **This is normal for unsigned software.** ASIOverlayWatchDog is open-source and safe.
 
 **To proceed:**
@@ -133,43 +138,48 @@ The warning appears because the executable isn't code-signed (costs $200-500/yea
 ### Step 1: Choose Your Capture Mode
 
 **Option A: Directory Watch Mode**
-1. Open the **Capture** tab
+1. Navigate to the **Capture** page
 2. Select "Directory Watch" mode
 3. Click "Browse" for "Watch Directory" and select a folder containing images
-4. Click "Browse" for "Output Directory" and select where processed images should be saved
+4. Configure sidecar file settings if needed (optional)
 5. Click "Start Watching"
 
 **Option B: ZWO Camera Mode**
 1. Connect your ZWO ASI camera via USB
-2. Open the **Capture** tab
+2. Navigate to the **Capture** page
 3. Select "ZWO Camera Capture" mode
 4. Click "Detect Cameras" - your camera should appear in the dropdown
-5. Adjust exposure/gain settings as needed
-6. Click "Start Capture"
+5. Adjust exposure/gain/white balance settings as needed
+6. Enable "Auto Exposure" for automatic brightness calibration
+7. Click "Start Capture"
+s (Optional)
 
-### Step 2: Configure Output Mode (Optional)
+By default, images are saved to files. Multiple output modes can be enabled simultaneously:
 
-By default, images are saved to files. To use web server or RTSP streaming:
-
-1. Open the **Settings** tab
-2. Scroll to "Output Mode" card
-3. Select your preferred mode:
-   - **File**: Save to disk (default)
-   - **Webserver**: Serve via HTTP at http://127.0.0.1:8080/latest
+1. Navigate to the **Output** page
+2. Configure your preferred outputs:
+   - **File Output**: Set output directory, format (PNG/JPEG), and filename pattern
+   - **Web Server**: Enable HTTP server, set host/port, copy URLs for `/latest` and `/status` endpoints
+   - **Discord**: Configure webhook URL, enable periodic posting with interval, weather location
    - **RTSP Stream**: Video stream at rtsp://127.0.0.1:8554/stream (requires ffmpeg)
-4. Click "Apply" and "Start Webserver" or "Start RTSP"
+3. Click "Apply Settings" to save changes
+4. Use "Start/Stop" buttons to control each output service
+5. Status indicators show green when services are activeSP"
 5. Use "Copy URL" button to copy the server address
 
-### Step 3: Customize Overlays (Optional)
-
-1. Open the **Overlay** tab
-2. Add overlays using the "+" button
-3. Edit text, position, font, and color
-4. Use tokens like `{CAMERA}`, `{EXPOSURE}`, `{GAIN}` to show metadata
+###Navigate to the **Overlays** page
+2. Add text overlays using the "Add Text Overlay" button
+3. Select an overlay from the list on the left
+4. Edit text, position, font size, and color in the editor panel
+5. Use tokens like `{CAMERA}`, `{EXPOSURE}`, `{GAIN}`, `{WEATHER}`, `{WEATHER_ICON}` to show metadata
+6. Enable/disable overlays with the checkbox
+7. See live preview on the right side (updates automatically)
+8. Changes save automatically to config, `{EXPOSURE}`, `{GAIN}` to show metadata
 5. See live preview on the right side
-6. Changes save automatically
-
-### Step 4: Monitor Operation
+6. CMonitoring Page**: Dedicated page with real-time preview (200x200), RGB histogram, and last 10 log entries
+- **Status Bar**: Visual indicators at top show current operation state (waiting, capturing, calibrating, processing, sending)
+- **Logs Page**: Full log viewer with search, filter, save, and open log folder options
+- **System Tray**: Minimize to tray with right-click menu for quick status and controls
 
 - **Header**: Check live preview, RGB histogram, and recent logs
 - **Preview Tab**: View latest processed image

@@ -9,6 +9,31 @@ from .logger import app_logger
 from app_config import APP_DISPLAY_NAME
 
 
+def format_exposure_time(exp_seconds):
+    """Format exposure time dynamically as ms/s/m based on value
+    
+    Args:
+        exp_seconds: Exposure time in seconds (float or int)
+    
+    Returns:
+        str: Formatted exposure like "50ms", "2.5s", or "1.5m"
+    """
+    if not isinstance(exp_seconds, (int, float)):
+        return str(exp_seconds)
+    
+    if exp_seconds >= 60:
+        # Minutes
+        minutes = exp_seconds / 60.0
+        return f"{minutes:.2f}m"
+    elif exp_seconds >= 1:
+        # Seconds
+        return f"{exp_seconds:.2f}s"
+    else:
+        # Milliseconds
+        ms = exp_seconds * 1000.0
+        return f"{ms:.2f}ms"
+
+
 class DiscordAlerts:
     """Handles Discord webhook notifications"""
     

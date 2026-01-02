@@ -1044,10 +1044,12 @@ class MainWindow(QMainWindow):
             # Get camera info if capturing
             camera_info = ""
             if self.is_capturing and self.camera_controller and self.camera_controller.zwo_camera:
+                from services.discord_alerts import format_exposure_time
                 camera_settings = self.config.get('zwo_camera', {})
-                exposure_ms = self.camera_controller.zwo_camera.exposure_seconds * 1000
+                exposure_seconds = self.camera_controller.zwo_camera.exposure_seconds
                 gain = self.camera_controller.zwo_camera.gain
-                camera_info = f"\n**Exposure:** {exposure_ms:.2f}ms\n**Gain:** {gain}"
+                exposure_formatted = format_exposure_time(exposure_seconds)
+                camera_info = f"\n**Exposure:** {exposure_formatted}\n**Gain:** {gain}"
             
             message = f"""**Periodic Status Update**
 
@@ -1161,3 +1163,54 @@ class MainWindow(QMainWindow):
         self.system_tray = None
         # Close window (will trigger normal closeEvent)
         self.close()
+    
+    def set_tray_mode(self, enabled: bool):
+        """Enable or disable system tray mode
+        
+        Args:
+            enabled: True to enable tray mode, False to disable
+        """
+        if enabled and self.system_tray is None:
+            # Enable tray mode - initialize system tray
+            try:
+                from .system_tray_qt import SystemTrayQt, PYSTRAY_AVAILABLE
+                
+                if not PYSTRAY_AVAILABLE:
+                    app_logger.warning("System tray mode requires pystray package")
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(
+                        self,
+                        "Missing Dependency",
+                        "System tray mode requires the 'pystray' package.\n\n"
+                        "Install with: pip install pystray"
+                    )
+                    # Reset the setting
+                    self.config.set('tray_mode_enabled', False)
+                    # Update the UI switch if settings panel exists
+                    if hasattr(self, 'settings_panel'):
+                        self.settings_panel.tray_enabled_switch.setChecked(False)
+                    return
+                
+                # Create system tray (hidden initially since window is already visible)
+                self.system_tray = SystemTrayQt(self, QApplication.instance(), auto_start=False)
+                self.system_tray._is_visible = True  # Window is currently visible
+                app_logger.info("System tray enabled - window will minimize to tray on close")
+                
+            except Exception as e:
+                app_logger.error(f"Failed to enable system tray: {e}")
+                self.system_tray = None
+                # Reset the setting
+                self.config.set('tray_mode_enabled', False)
+                if hasattr(self, 'settings_panel'):
+                    self.settings_panel.tray_enabled_switch.setChecked(False)
+        
+        elif not enabled and self.system_tray is not None:
+            # Disable tray mode - stop and remove tray
+            try:
+                if hasattr(self.system_tray, 'tray_icon') and self.system_tray.tray_icon:
+                    self.system_tray.tray_icon.stop()
+                self.system_tray = None
+                app_logger.info("System tray disabled - window will close normally")
+            except Exception as e:
+                app_logger.error(f"Error disabling system tray: {e}")
+                self.system_tray = None

@@ -280,7 +280,13 @@ class SettingsPanel(QScrollArea):
         if self._loading_config:
             return
         if self.main_window and hasattr(self.main_window, 'config'):
-            self.main_window.config.set('tray_mode_enabled', self.tray_enabled_switch.isChecked())
+            tray_enabled = self.tray_enabled_switch.isChecked()
+            self.main_window.config.set('tray_mode_enabled', tray_enabled)
+            
+            # Apply tray mode change immediately
+            if hasattr(self.main_window, 'set_tray_mode'):
+                self.main_window.set_tray_mode(tray_enabled)
+            
             self.settings_changed.emit()
     
     def _on_discord_changed(self):
