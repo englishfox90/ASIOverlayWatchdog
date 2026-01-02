@@ -474,6 +474,9 @@ class CameraConnection:
         """
         Disconnect from camera gracefully (idempotent - safe to call multiple times).
         
+        CRITICAL: Resets camera to factory defaults before closing to prevent SDK
+        contamination that causes other apps (like NINA) to see wrong camera properties.
+        
         Args:
             stop_exposure_callback: Optional callback to stop any in-progress exposure
         """
@@ -491,6 +494,42 @@ class CameraConnection:
                         stop_exposure_callback()
                     except Exception as e:
                         self.log(f"Exposure stop callback error: {e}")
+                
+                # CRITICAL: Reset camera properties to factory defaults BEFORE closing
+                # This prevents SDK state contamination that affects other applications
+                try:
+                    self.log("Resetting camera to factory defaults...")
+                    camera_info = self.camera.get_camera_property()
+                    
+                    # Reset ROI to full frame (most important - prevents size errors)
+                    self.camera.set_roi(
+                        start_x=0, 
+                        start_y=0,
+                        width=camera_info['MaxWidth'],
+                        height=camera_info['MaxHeight'],
+                        bins=1,
+                        image_type=self.asi.ASI_IMG_RAW8
+                    )
+                    self.log(f"  ✓ ROI reset to full frame: {camera_info['MaxWidth']}x{camera_info['MaxHeight']}")
+                    
+                    # Reset common controls to safe defaults
+                    try:
+                        self.camera.set_control_value(self.asi.ASI_GAIN, 0)
+                        self.camera.set_control_value(self.asi.ASI_EXPOSURE, 100000)  # 100ms
+                        self.camera.set_control_value(self.asi.ASI_WB_R, 52)  # Factory default
+                        self.camera.set_control_value(self.asi.ASI_WB_B, 95)  # Factory default
+                        self.camera.set_control_value(self.asi.ASI_BRIGHTNESS, 50)  # Mid-range offset
+                        self.camera.set_control_value(self.asi.ASI_FLIP, 0)  # No flip
+                        self.camera.set_control_value(self.asi.ASI_AUTO_MAX_GAIN, 0)  # Disable auto
+                        self.camera.set_control_value(self.asi.ASI_AUTO_MAX_EXP, 0)  # Disable auto
+                        self.camera.set_control_value(self.asi.ASI_AUTO_TARGET_BRIGHTNESS, 100)
+                        self.log("  ✓ Camera controls reset to factory defaults")
+                    except Exception as e:
+                        self.log(f"  ⚠ Some controls could not be reset (camera may be monochrome): {e}")
+                    
+                except Exception as e:
+                    self.log(f"⚠ Warning: Could not reset camera properties: {e}")
+                    # Continue with disconnect even if reset fails
                 
                 # Close camera connection
                 try:

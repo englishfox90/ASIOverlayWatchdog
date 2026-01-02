@@ -50,6 +50,26 @@ DEFAULT_CONFIG = {
     "zwo_sdk_path": resource_path("ASICamera2.dll"),
     "zwo_camera_index": 0,
     "zwo_camera_name": "",  # Last selected camera name
+    "zwo_selected_camera": 0,  # Last selected camera index
+    
+    # Per-camera profiles (NEW: stores settings per camera to prevent cross-contamination)
+    # NOTE: auto_exposure is NOT stored here - it's a global algorithm setting, not camera-specific
+    # NOTE: auto_wb/WB mode is NOT stored here - stored in global white_balance config
+    "camera_profiles": {
+        # "ZWO ASI676MC": {  # Example camera profile
+        #     "exposure_ms": 100.0,
+        #     "gain": 100,
+        #     "max_exposure_ms": 30000.0,
+        #     "target_brightness": 100,
+        #     "wb_r": 75,  # Manual WB red channel (when mode=manual)
+        #     "wb_b": 99,  # Manual WB blue channel (when mode=manual)
+        #     "offset": 20,
+        #     "flip": 0,
+        #     "bayer_pattern": "BGGR"
+        # }
+    },
+    
+    # Global camera settings (DEPRECATED: kept for backward compatibility, use camera_profiles instead)
     "zwo_exposure_ms": 100.0,  # milliseconds (100ms default)
     "zwo_gain": 100,
     "zwo_interval": 5.0,
@@ -62,7 +82,6 @@ DEFAULT_CONFIG = {
     "zwo_offset": 20,
     "zwo_flip": 0,  # 0=None, 1=Horizontal, 2=Vertical, 3=Both
     "zwo_bayer_pattern": "BGGR",  # "RGGB", "BGGR", "GRBG", "GBRG"
-    "zwo_selected_camera": 0,  # Last selected camera index
     
     # Scheduled capture settings
     "scheduled_capture_enabled": False,
@@ -370,3 +389,91 @@ class Config:
     def set_overlays(self, overlays):
         """Set overlay configurations"""
         self.data["overlays"] = overlays
+    
+    def get_camera_profile(self, camera_name):
+        """Get settings profile for a specific camera (by name).
+        
+        Returns a dict with camera-specific settings. If no profile exists,
+        creates one from current global settings (for backward compatibility).
+        
+        Args:
+            camera_name: Full camera name (e.g., "ZWO ASI676MC")
+        
+        Returns:
+            dict: Camera profile with keys: exposure_ms, gain, auto_exposure, etc.
+        """
+        if not camera_name:
+            return None
+        
+        # Get or create camera profiles dict
+        profiles = self.data.get('camera_profiles', {})
+        
+        if camera_name not in profiles:
+            # Create new profile from current global settings (migration path)
+            # NOTE: auto_exposure is NOT in profiles - it's a global algorithm setting
+            # NOTE: auto_wb is NOT in profiles - white balance mode stored in global white_balance config
+            profiles[camera_name] = {
+                'exposure_ms': self.data.get('zwo_exposure_ms', 100.0),
+                'gain': self.data.get('zwo_gain', 100),
+                'max_exposure_ms': self.data.get('zwo_max_exposure_ms', 30000.0),
+                'target_brightness': self.data.get('zwo_target_brightness', 100),
+                'wb_r': self.data.get('zwo_wb_r', 75),
+                'wb_b': self.data.get('zwo_wb_b', 99),
+                'offset': self.data.get('zwo_offset', 20),
+                'flip': self.data.get('zwo_flip', 0),
+                'bayer_pattern': self.data.get('zwo_bayer_pattern', 'BGGR')
+            }
+            self.data['camera_profiles'] = profiles
+            self.save()
+            print(f"Created new camera profile for: {camera_name}")
+        
+        return profiles[camera_name]
+    
+    def save_camera_profile(self, camera_name, profile_data):
+        """Save settings profile for a specific camera.
+        
+        Args:
+            camera_name: Full camera name (e.g., "ZWO ASI676MC")
+            profile_data: dict with camera settings to save
+        """
+        if not camera_name:
+            return
+        
+        profiles = self.data.get('camera_profiles', {})
+        profiles[camera_name] = profile_data
+        self.data['camera_profiles'] = profiles
+        self.save()
+        print(f"Saved camera profile for: {camera_name}")
+    
+    def update_camera_profile(self, camera_name, **kwargs):
+        """Update specific settings in a camera profile.
+        
+        Args:
+            camera_name: Full camera name
+            **kwargs: Settings to update (e.g., gain=150, exposure_ms=500)
+        """
+        profile = self.get_camera_profile(camera_name)
+        if profile:
+            profile.update(kwargs)
+            self.save_camera_profile(camera_name, profile)
+    
+    def list_camera_profiles(self):
+        """Get list of all camera names with saved profiles.
+        
+        Returns:
+            list: Camera names that have profiles
+        """
+        return list(self.data.get('camera_profiles', {}).keys())
+    
+    def delete_camera_profile(self, camera_name):
+        """Delete a camera profile.
+        
+        Args:
+            camera_name: Full camera name
+        """
+        profiles = self.data.get('camera_profiles', {})
+        if camera_name in profiles:
+            del profiles[camera_name]
+            self.data['camera_profiles'] = profiles
+            self.save()
+            print(f"Deleted camera profile for: {camera_name}")

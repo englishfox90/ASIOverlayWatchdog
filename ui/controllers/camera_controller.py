@@ -110,34 +110,91 @@ class CameraControllerQt(QObject):
                 self.config.set('zwo_selected_camera', camera_index)
                 self.config.save()
             
-            # Get settings from config
-            exposure_ms = self.config.get('zwo_exposure_ms', 100.0)
-            exposure_sec = exposure_ms / 1000.0
-            gain = self.config.get('zwo_gain', 100)
+            # ==================== NEW: Load camera-specific profile ====================
+            # Extract clean camera name (remove index suffix like "(Index: 1)")
+            clean_camera_name = camera_name
+            if '(Index:' in camera_name:
+                clean_camera_name = camera_name.split('(Index:')[0].strip()
+            
+            # Get camera profile (creates default if doesn't exist)
+            profile = self.config.get_camera_profile(clean_camera_name)
+            
+            if profile:
+                app_logger.info(f"Loading settings from camera profile: {clean_camera_name}")
+                exposure_ms = profile.get('exposure_ms', 100.0)
+                gain = profile.get('gain', 100)
+                max_exposure_ms = profile.get('max_exposure_ms', 30000.0)
+                target_brightness = profile.get('target_brightness', 100)
+                wb_r = profile.get('wb_r', 75)
+                wb_b = profile.get('wb_b', 99)
+                offset = profile.get('offset', 20)
+                flip = profile.get('flip', 0)
+                bayer_pattern = profile.get('bayer_pattern', 'BGGR')
+                
+                # Store profile settings back to global config for UI synchronization
+                # (UI reads from global config keys for now)
+                self.config.set('zwo_exposure_ms', exposure_ms)
+                self.config.set('zwo_gain', gain)
+                self.config.set('zwo_max_exposure_ms', max_exposure_ms)
+                self.config.set('zwo_target_brightness', target_brightness)
+                self.config.set('zwo_wb_r', wb_r)
+                self.config.set('zwo_wb_b', wb_b)
+                self.config.set('zwo_offset', offset)
+                self.config.set('zwo_flip', flip)
+                self.config.set('zwo_bayer_pattern', bayer_pattern)
+            else:
+                # Fallback to global settings if profile doesn't exist
+                app_logger.warning(f"No profile found for {clean_camera_name}, using global settings")
+                exposure_ms = self.config.get('zwo_exposure_ms', 100.0)
+                gain = self.config.get('zwo_gain', 100)
+                max_exposure_ms = self.config.get('zwo_max_exposure_ms', 30000.0)
+                target_brightness = self.config.get('zwo_target_brightness', 100)
+                wb_r = self.config.get('zwo_wb_r', 75)
+                wb_b = self.config.get('zwo_wb_b', 99)
+                offset = self.config.get('zwo_offset', 20)
+                flip = self.config.get('zwo_flip', 0)
+                bayer_pattern = self.config.get('zwo_bayer_pattern', 'BGGR')
+            
+            # Auto exposure is GLOBAL (algorithm setting, not camera-specific)
             auto_exposure = self.config.get('zwo_auto_exposure', False)
+            # ============================================================================
+            
+            exposure_sec = exposure_ms / 1000.0
             
             app_logger.debug(f"Camera config: exposure_ms={exposure_ms}, gain={gain}, auto_exposure={auto_exposure}")
             
-            # Initialize camera with all settings
+            # Clean up any existing camera instance first
+            if self.zwo_camera is not None:
+                app_logger.info("Cleaning up existing camera instance...")
+                try:
+                    if self.is_connected:
+                        self.zwo_camera.disconnect()
+                    self.zwo_camera = None
+                except Exception as e:
+                    app_logger.warning(f"Error cleaning up old camera instance: {e}")
+                    self.zwo_camera = None
+            
+            # Initialize camera with all settings (from profile)
             self.zwo_camera = ZWOCamera(
                 sdk_path=sdk_path,
                 camera_index=camera_index,
                 exposure_sec=exposure_sec,
                 gain=gain,
-                white_balance_r=self.config.get('zwo_wb_r', 75),
-                white_balance_b=self.config.get('zwo_wb_b', 99),
-                offset=self.config.get('zwo_offset', 20),
-                flip=self.config.get('zwo_flip', 0),
+                white_balance_r=wb_r,
+                white_balance_b=wb_b,
+                offset=offset,
+                flip=flip,
                 auto_exposure=auto_exposure,
-                max_exposure_sec=self.config.get('zwo_max_exposure_ms', 30000.0) / 1000.0,
-                bayer_pattern=self.config.get('zwo_bayer_pattern', 'BGGR'),
+                max_exposure_sec=max_exposure_ms / 1000.0,
+                bayer_pattern=bayer_pattern,
                 scheduled_capture_enabled=self.config.get('scheduled_capture_enabled', False),
                 scheduled_start_time=self.config.get('scheduled_start_time', '17:00'),
                 scheduled_end_time=self.config.get('scheduled_end_time', '09:00'),
+                camera_name=clean_camera_name  # Pass clean name for profile tracking
             )
             
             # Set target brightness and interval
-            self.zwo_camera.target_brightness = self.config.get('zwo_target_brightness', 100)
+            self.zwo_camera.target_brightness = target_brightness
             self.zwo_camera.set_capture_interval(self.config.get('zwo_interval', 5.0))
             
             # Set error callback for disconnect recovery

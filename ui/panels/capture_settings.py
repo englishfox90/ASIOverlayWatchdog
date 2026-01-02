@@ -490,19 +490,43 @@ class CaptureSettingsPanel(QScrollArea):
             self.main_window.config.set('zwo_selected_camera_name', camera_name)
             self.settings_changed.emit()
     
+    def _save_to_camera_profile(self, **kwargs):
+        """Save settings to both global config AND active camera profile.
+        
+        This ensures each camera has its own settings that don't contaminate others.
+        
+        Args:
+            **kwargs: Settings to save (e.g., exposure_ms=500, gain=150)
+        """
+        if not self.main_window or not hasattr(self.main_window, 'config'):
+            return
+        
+        # Get current camera name (clean, without index)
+        camera_name = self.main_window.config.get('zwo_selected_camera_name', '')
+        if '(Index:' in camera_name:
+            camera_name = camera_name.split('(Index:')[0].strip()
+        
+        # Save to camera-specific profile
+        if camera_name:
+            self.main_window.config.update_camera_profile(camera_name, **kwargs)
+        
+        # Also save to global config for backward compatibility and UI sync
+        for key, value in kwargs.items():
+            self.main_window.config.set(f'zwo_{key}', value)
+    
     def _on_exposure_changed(self, value):
         if self._loading_config:
             return
         if self.main_window and hasattr(self.main_window, 'config'):
             # Store in ms for compatibility
-            self.main_window.config.set('zwo_exposure_ms', value * 1000)
+            self._save_to_camera_profile(exposure_ms=value * 1000)
             self.settings_changed.emit()
     
     def _on_gain_changed(self, value):
         if self._loading_config:
             return
         if self.main_window and hasattr(self.main_window, 'config'):
-            self.main_window.config.set('zwo_gain', value)
+            self._save_to_camera_profile(gain=value)
             self.settings_changed.emit()
     
     def _on_interval_changed(self, value):
@@ -522,43 +546,45 @@ class CaptureSettingsPanel(QScrollArea):
         if self._loading_config:
             return
         if self.main_window and hasattr(self.main_window, 'config'):
-            self.main_window.config.set('zwo_auto_exposure', checked)
+            self._save_to_camera_profile(auto_exposure=checked)
             self.settings_changed.emit()
     
     def _on_target_brightness_changed(self, value):
         if self._loading_config:
             return
         if self.main_window and hasattr(self.main_window, 'config'):
-            self.main_window.config.set('zwo_target_brightness', value)
+            self._save_to_camera_profile(target_brightness=value)
             self.settings_changed.emit()
     
     def _on_max_exposure_changed(self, value):
         if self._loading_config:
             return
         if self.main_window and hasattr(self.main_window, 'config'):
-            self.main_window.config.set('zwo_max_exposure_ms', value * 1000)
+            self._save_to_camera_profile(max_exposure_ms=value * 1000)
             self.settings_changed.emit()
     
     def _on_wb_changed(self):
         if self._loading_config:
             return
         if self.main_window and hasattr(self.main_window, 'config'):
-            self.main_window.config.set('zwo_wb_r', self.wb_r_slider.value())
-            self.main_window.config.set('zwo_wb_b', self.wb_b_slider.value())
+            self._save_to_camera_profile(
+                wb_r=self.wb_r_slider.value(),
+                wb_b=self.wb_b_slider.value()
+            )
             self.settings_changed.emit()
     
     def _on_offset_changed(self, value):
         if self._loading_config:
             return
         if self.main_window and hasattr(self.main_window, 'config'):
-            self.main_window.config.set('zwo_offset', value)
+            self._save_to_camera_profile(offset=value)
             self.settings_changed.emit()
     
     def _on_flip_changed(self, index):
         if self._loading_config:
             return
         if self.main_window and hasattr(self.main_window, 'config'):
-            self.main_window.config.set('zwo_flip', index)
+            self._save_to_camera_profile(flip=index)
             self.settings_changed.emit()
     
     def _on_bayer_changed(self, index):
@@ -566,7 +592,7 @@ class CaptureSettingsPanel(QScrollArea):
             return
         patterns = ["BGGR", "RGGB", "GRBG", "GBRG"]
         if self.main_window and hasattr(self.main_window, 'config'):
-            self.main_window.config.set('zwo_bayer_pattern', patterns[index])
+            self._save_to_camera_profile(bayer_pattern=patterns[index])
             self.settings_changed.emit()
     
     def _on_schedule_enabled_changed(self, checked):
