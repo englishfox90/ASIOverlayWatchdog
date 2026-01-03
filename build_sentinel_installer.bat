@@ -13,8 +13,18 @@ echo.
 echo Building: PySide6 Fluent UI
 echo.
 
+REM Step 0: Sync version.iss from version.py
+echo [0/3] Syncing version from version.py...
+python scripts\update_version.py
+if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: Version sync failed!
+    pause
+    exit /b 1
+)
+echo.
+
 REM Step 1: Build executable
-echo [1/2] Building executable...
+echo [1/3] Building executable...
 call build_sentinel.bat
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Executable build failed!
@@ -24,7 +34,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM Step 2: Build installer
 echo.
-echo [2/2] Building installer...
+echo [2/3] Building installer...
 
 REM Check for Inno Setup
 set ISCC_PATH="C:\Program Files (x86)\Inno Setup 6\ISCC.exe"

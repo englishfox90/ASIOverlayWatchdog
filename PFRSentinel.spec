@@ -27,6 +27,7 @@ try:
         'PySide6.QtGui', 
         'PySide6.QtWidgets',
         'PySide6.QtSvg',  # Used by qfluentwidgets for icons
+        'PySide6.QtXml',  # Used by qfluentwidgets for color dialogs
     ]
     
     pyside6_hiddenimports = []
@@ -50,6 +51,7 @@ try:
             'Qt6Gui.dll', 
             'Qt6Widgets.dll',
             'Qt6Svg.dll',
+            'Qt6Xml.dll',
         ]
         for dll in essential_dlls:
             dll_path = os.path.join(pyside6_path, dll)
@@ -141,6 +143,7 @@ hiddenimports = [
     'PySide6.QtGui',
     'PySide6.QtWidgets',
     'PySide6.QtSvg',
+    'PySide6.QtXml',
     
     # Fluent Widgets
     'qfluentwidgets',
