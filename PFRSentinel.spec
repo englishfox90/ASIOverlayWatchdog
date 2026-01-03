@@ -271,7 +271,7 @@ a = Analysis(
         'PySide6.QtQml',
         'PySide6.QtSql',
         'PySide6.QtTest',
-        'PySide6.QtXml',
+        # 'PySide6.QtXml',  # KEEP - required by qfluentwidgets for color dialogs
         'PySide6.QtBluetooth',
         'PySide6.QtNfc',
         'PySide6.QtSerialPort',
