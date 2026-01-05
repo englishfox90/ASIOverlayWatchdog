@@ -485,7 +485,54 @@ class DevModeDataSaver:
                 'p99': round(p99, 6),
             },
             'corner_analysis': corner_analysis,
-            'color_balance': color_balance
+            'color_balance': color_balance,
+            'time_context': self._compute_time_context(),
+        }
+    
+    def _compute_time_context(self):
+        """
+        Compute time-of-day context for mode classification.
+        
+        Helps distinguish between:
+        - Day + Roof Closed (light leaking through dome)
+        - Night + Roof Open (sky visible)
+        
+        Returns:
+            dict with time context information
+        """
+        now = datetime.now()
+        hour = now.hour
+        
+        # Simple day/night classification based on hour
+        # Could be enhanced with sunrise/sunset calculation using location
+        if 6 <= hour < 18:
+            period = 'day'
+        elif 18 <= hour < 21 or 5 <= hour < 6:
+            period = 'twilight'
+        else:
+            period = 'night'
+        
+        # More granular time periods
+        if 5 <= hour < 8:
+            detailed_period = 'dawn'
+        elif 8 <= hour < 12:
+            detailed_period = 'morning'
+        elif 12 <= hour < 17:
+            detailed_period = 'afternoon'
+        elif 17 <= hour < 20:
+            detailed_period = 'evening'
+        elif 20 <= hour < 22:
+            detailed_period = 'dusk'
+        else:
+            detailed_period = 'night'
+        
+        return {
+            'hour': hour,
+            'minute': now.minute,
+            'period': period,           # 'day', 'twilight', 'night'
+            'detailed_period': detailed_period,  # 'dawn', 'morning', etc.
+            'is_daylight': 6 <= hour < 20,
+            'is_astronomical_night': hour >= 22 or hour < 5,
         }
 
 
