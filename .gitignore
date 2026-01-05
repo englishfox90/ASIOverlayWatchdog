@@ -55,10 +55,8 @@ installer/dist/
 installer/Output/
 *.exe
 *.msi
-# EXCEPT: Allow release installers in releases/ folder
-!releases/*.exe
-!releases/*.msi
-!releases/*.zip
+# Releases - use GitHub Releases for distribution instead
+releases/
 
 # Local DLLs (user-specific paths)
 # Keep ASICamera2.dll in source for bundling
