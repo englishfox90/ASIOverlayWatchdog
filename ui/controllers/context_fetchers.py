@@ -296,6 +296,83 @@ def calculate_dew_point(temp_c, humidity_pct):
     return round(dew_point, 1)
 
 
+def fetch_allsky_snapshot(output_dir: str = None, timestamp: str = None):
+    """
+    Fetch snapshot from all-sky camera for visual sky reference.
+    
+    The pier camera can't see the sky when the roof is closed, but the
+    all-sky camera provides ground truth of actual sky conditions.
+    
+    Args:
+        output_dir: Directory to save snapshot (optional, saves to raw_debug)
+        timestamp: Timestamp string for filename (optional, uses current time)
+    
+    Returns:
+        dict with snapshot info and optional local path
+    """
+    if not REQUESTS_AVAILABLE:
+        return {'available': False, 'reason': 'requests not installed'}
+    
+    try:
+        config = Config()
+        
+        # Get all-sky URL from config, with default
+        allsky_config = config.get('allsky', {})
+        allsky_url = allsky_config.get(
+            'url',
+            'https://zyssufjepmbhqznfuwcw.supabase.co/storage/v1/object/public/status-assets-public/building-0009/allsky/images/image.jpg'
+        )
+        
+        if not allsky_url:
+            return {'available': False, 'reason': 'No all-sky URL configured'}
+        
+        # Fetch the image
+        response = requests.get(allsky_url, timeout=10)
+        response.raise_for_status()
+        
+        content_type = response.headers.get('Content-Type', 'image/jpeg')
+        image_bytes = response.content
+        
+        result = {
+            'available': True,
+            'source': 'allsky_camera',
+            'url': allsky_url,
+            'fetched_at': datetime.now().isoformat(),
+            'size_bytes': len(image_bytes),
+            'content_type': content_type,
+        }
+        
+        # Optionally save to disk
+        if output_dir:
+            import os
+            
+            # Determine extension from content type
+            ext = 'jpg' if 'jpeg' in content_type else 'png'
+            
+            if timestamp is None:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            
+            filename = f"allsky_{timestamp}.{ext}"
+            filepath = os.path.join(output_dir, filename)
+            
+            with open(filepath, 'wb') as f:
+                f.write(image_bytes)
+            
+            result['saved_path'] = filepath
+            result['filename'] = filename
+            app_logger.info(f"DEV MODE: ✓ Saved all-sky snapshot to {filename}")
+        
+        return result
+        
+    except requests.exceptions.ConnectionError:
+        return {'available': False, 'reason': 'All-sky camera not accessible'}
+    except requests.exceptions.Timeout:
+        return {'available': False, 'reason': 'All-sky camera timeout'}
+    except Exception as e:
+        app_logger.debug(f"All-sky snapshot fetch failed: {e}")
+        return {'available': False, 'reason': str(e)}
+
+
 def estimate_seeing_conditions(weather_context):
     """
     Estimate astronomical seeing conditions from weather data.

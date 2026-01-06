@@ -163,6 +163,13 @@ DEFAULT_CONFIG = {
         "include_latest_image": True,
         "username_override": "",
         "avatar_url": ""
+    },
+    
+    # All-sky camera settings (for ML training visual reference)
+    "allsky": {
+        "enabled": True,
+        "url": "https://zyssufjepmbhqznfuwcw.supabase.co/storage/v1/object/public/status-assets-public/building-0009/allsky/images/image.jpg",
+        "timeout_seconds": 10
     }
 }
 

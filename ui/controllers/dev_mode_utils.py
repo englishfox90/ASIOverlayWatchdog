@@ -10,12 +10,13 @@ from datetime import datetime
 
 from services.logger import app_logger
 
-# Import context fetchers (moon, roof, weather)
+# Import context fetchers (moon, roof, weather, allsky)
 from ui.controllers.context_fetchers import (
     compute_moon_context,
     fetch_roof_state,
     fetch_weather_context,
     estimate_seeing_conditions,
+    fetch_allsky_snapshot,
 )
 
 # Import extracted modules
@@ -117,7 +118,8 @@ class DevModeDataSaver:
             
             # === Generate and save stretch calibration JSON ===
             calibration = self._compute_stretch_calibration(
-                lum, norm_array, metadata, denom, denom_reason, denom_details
+                lum, norm_array, metadata, denom, denom_reason, denom_details,
+                raw_dir, timestamp  # Pass for allsky snapshot saving
             )
             json_path = os.path.join(raw_dir, f"calibration_{timestamp}.json")
             write_json(json_path, calibration)
@@ -146,7 +148,8 @@ class DevModeDataSaver:
             app_logger.error(f"DEV MODE: Failed to save debug data: {e}")
             app_logger.error(traceback.format_exc())
     
-    def _compute_stretch_calibration(self, lum, norm_array, metadata, denom, denom_reason, denom_details):
+    def _compute_stretch_calibration(self, lum, norm_array, metadata, denom, denom_reason, denom_details,
+                                       output_dir=None, timestamp=None):
         """
         Compute stretch calibration parameters from luminance.
         
@@ -161,6 +164,7 @@ class DevModeDataSaver:
             - Roof state from NINA
             - Weather conditions
             - Estimated seeing conditions
+            - All-sky camera snapshot (visual sky reference)
         """
         # Extended percentile stats
         p1 = float(np.percentile(lum, 1))
@@ -240,6 +244,7 @@ class DevModeDataSaver:
             'roof_state': fetch_roof_state(),
             'weather_context': weather_ctx,
             'seeing_estimate': estimate_seeing_conditions(weather_ctx),
+            'allsky_snapshot': fetch_allsky_snapshot(output_dir, timestamp),  # Visual sky reference
         }
 
 
