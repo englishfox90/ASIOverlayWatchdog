@@ -7,6 +7,7 @@ ttkbootstrap>=1.10.1
 requests>=2.31.0
 appdirs>=1.4.4
 pystray>=0.19.4
+astral>=3.2  # Accurate sunrise/sunset/twilight calculations
 
 # PySide6 Fluent UI (new modern interface)
 PySide6>=6.6.0
