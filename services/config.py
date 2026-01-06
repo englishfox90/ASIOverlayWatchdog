@@ -167,6 +167,9 @@ DEFAULT_CONFIG = {
 }
 
 class Config:
+    # Class-level flag to track if cleanup has been attempted this session
+    _cleanup_attempted = False
+    
     def __init__(self, config_path=None):
         # Store config in user data directory for persistence across upgrades
         if config_path is None:
@@ -316,7 +319,12 @@ class Config:
         self._cleanup_old_program_files()
     
     def _cleanup_old_program_files(self):
-        """Attempt to remove old ASIOverlayWatchDog from Program Files if it exists"""
+        """Attempt to remove old ASIOverlayWatchDog from Program Files if it exists (once per session)"""
+        # Only attempt cleanup once per application session
+        if Config._cleanup_attempted:
+            return
+        Config._cleanup_attempted = True
+        
         import shutil
         from services.logger import app_logger
         

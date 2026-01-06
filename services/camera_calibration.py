@@ -29,6 +29,11 @@ class CameraCalibration:
         self.exposure_seconds = 1.0
         self.gain = 300
         
+        # Baseline brightness tracking for scene change detection
+        # This tracks brightness AFTER calibration completes, so we can detect
+        # actual scene changes vs just being unable to reach target
+        self.baseline_brightness = None  # Set after first frame post-calibration
+        
         # Algorithm settings
         self.exposure_algorithm = 'percentile'  # 'mean', 'median', or 'percentile'
         self.exposure_percentile = 75  # Use 75th percentile
@@ -54,6 +59,9 @@ class CameraCalibration:
             True if calibration successful, False otherwise
         """
         self.log("Starting rapid calibration...")
+        
+        # Reset baseline - will be set by first frame after calibration
+        self.baseline_brightness = None
         
         # Track exposure/brightness pairs for interpolation
         calibration_history = []
@@ -252,21 +260,55 @@ class CameraCalibration:
             lower_bound = self.target_brightness * 0.8
             upper_bound = self.target_brightness * 1.2
             
-            # DRASTIC CHANGE DETECTION: Trigger recalibration if:
-            # 1. Brightness is >300% off target (extreme change like turning lights on/off)
-            # 2. OR heavy clipping (>50% pixels saturated) indicating sudden bright scene
-            # 3. OR extremely dark (<10% of target) indicating sudden dark scene
-            drastic_change = (
-                deviation_percent > 3.0 or  # More than 300% off target
-                clipped_percent > 50.0 or   # More than 50% pixels clipped (saturated)
-                (brightness < self.target_brightness * 0.1 and self.exposure_seconds >= self.max_exposure_sec * 0.9)  # Very dark at max exposure
+            # DRASTIC CHANGE DETECTION
+            # Compare against BASELINE brightness (post-calibration), not target
+            # This prevents false recalibration when we simply can't reach target (e.g., dark sky at max exposure)
+            
+            # If no baseline yet, use first measurement as baseline
+            if self.baseline_brightness is None:
+                self.baseline_brightness = brightness
+                self.log(f"Auto-exposure: setting baseline brightness to {brightness:.1f}")
+            
+            # Calculate change from baseline (what we actually achieved after calibration)
+            baseline_ratio = brightness / self.baseline_brightness if self.baseline_brightness > 0 else 1.0
+            
+            # Trigger recalibration if brightness changed >2x or <0.5x from baseline
+            # This detects actual scene changes (lights on/off, clouds, sunrise/sunset)
+            drastic_brighter = baseline_ratio > 2.0  # Scene got 2x brighter than baseline
+            drastic_darker = baseline_ratio < 0.5    # Scene got 2x darker than baseline
+            heavy_clipping = clipped_percent > 50.0  # Sudden saturation (bright light turned on)
+            
+            # Also trigger if we can now potentially improve from a dark baseline
+            # (e.g., were at max exposure in dark, now scene is brighter and we could reduce exposure)
+            can_improve_from_dark = (
+                self.baseline_brightness < self.target_brightness * 0.5 and  # Baseline was dark
+                brightness > self.baseline_brightness * 1.5 and  # Current is 50%+ brighter
+                self.exposure_seconds >= self.max_exposure_sec * 0.8  # We're at/near max exposure
             )
             
+            drastic_change = drastic_brighter or drastic_darker or heavy_clipping or can_improve_from_dark
+            
             if drastic_change:
-                self.log(f"⚠ DRASTIC brightness change detected: brightness={brightness:.1f}, target={self.target_brightness}, clipping={clipped_percent:.1f}%")
-                self.log(f"  Triggering rapid recalibration to quickly find optimal exposure")
+                reason = []
+                if drastic_brighter:
+                    reason.append(f"brightness {baseline_ratio:.1f}x baseline")
+                if drastic_darker:
+                    reason.append(f"brightness dropped to {baseline_ratio:.1%} of baseline")
+                if heavy_clipping:
+                    reason.append(f"{clipped_percent:.1f}% clipping")
+                if can_improve_from_dark:
+                    reason.append(f"scene brightened from dark baseline ({self.baseline_brightness:.1f} -> {brightness:.1f})")
+                    
+                self.log(f"⚠ DRASTIC brightness change detected: {', '.join(reason)}")
+                self.log(f"  baseline={self.baseline_brightness:.1f}, current={brightness:.1f}, triggering recalibration")
                 result['needs_recalibration'] = True
+                # Reset baseline so new calibration establishes new baseline
+                self.baseline_brightness = None
                 return result
+            
+            # Update baseline with smoothed value to adapt to gradual changes (sunrise/sunset)
+            # Use exponential moving average: 95% old + 5% new
+            self.baseline_brightness = 0.95 * self.baseline_brightness + 0.05 * brightness
             
             # Determine if we need aggressive or conservative adjustment
             # If brightness is >50% off target, use aggressive adjustment (like calibration)
