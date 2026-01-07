@@ -51,7 +51,7 @@ except ImportError:
     ML_AVAILABLE = False
 
 # Import review tab
-from ml.review_tab import ReviewTab
+from ml.review_tab import ReviewTab, to_bool
 
 
 def find_sample_sets(data_dir: Path) -> list:
@@ -587,7 +587,7 @@ class LabelingTool(QMainWindow):
         # Roof
         rs = cal.get('roof_state', {})
         if rs.get('available'):
-            roof_str = "OPEN" if rs.get('roof_open') else "CLOSED"
+            roof_str = "OPEN" if to_bool(rs.get('roof_open')) else "CLOSED"
             context_lines.append(f"Roof: {roof_str} (from {rs.get('source', '?')})")
         else:
             context_lines.append(f"Roof: Unknown ({rs.get('reason', 'no data')})")
@@ -607,7 +607,7 @@ class LabelingTool(QMainWindow):
         # ML Prediction (from capture time)
         ml = cal.get('ml_prediction')
         if ml:
-            ml_roof = "OPEN" if ml.get('roof_open') else "CLOSED"
+            ml_roof = "OPEN" if to_bool(ml.get('roof_open')) else "CLOSED"
             ml_conf = ml.get('confidence', 0) * 100
             context_lines.append(f"ML Prediction: {ml_roof} ({ml_conf:.1f}% conf) [{ml.get('model_version', '?')}]")
         
@@ -642,8 +642,8 @@ class LabelingTool(QMainWindow):
             self.label_state.setText("✓ Previously labeled")
             self.label_state.setStyleSheet("color: #10b981; font-weight: bold;")
             
-            self.roof_open.setChecked(labels.get('roof_open', False) or False)
-            self.stars_visible.setChecked(labels.get('stars_visible', False) or False)
+            self.roof_open.setChecked(to_bool(labels.get('roof_open', False)))
+            self.stars_visible.setChecked(to_bool(labels.get('stars_visible', False)))
             self.star_density.setValue(labels.get('star_density', 0) or 0)
             self.moon_visible.setChecked(labels.get('moon_visible', False) or False)
             self.clouds_visible.setChecked(labels.get('clouds_visible', False) or False)
@@ -662,7 +662,7 @@ class LabelingTool(QMainWindow):
             
             # Roof: prefer NINA API, fallback to corner ratio heuristic
             if rs.get('available') and rs.get('source') == 'nina_api':
-                self.roof_open.setChecked(rs.get('roof_open', False))
+                self.roof_open.setChecked(to_bool(rs.get('roof_open', False)))
             else:
                 # Corner ratio ~1.0 = roof closed (uniform darkness)
                 ratio = ca.get('corner_to_center_ratio', 1.0)
@@ -736,7 +736,7 @@ class LabelingTool(QMainWindow):
         
         # Determine roof state
         if rs.get('available') and rs.get('source') == 'nina_api':
-            roof_open = rs.get('roof_open', False)
+            roof_open = to_bool(rs.get('roof_open', False))
         else:
             ratio = ca.get('corner_to_center_ratio', 0.95)
             roof_open = ratio < 0.95
@@ -772,14 +772,14 @@ class LabelingTool(QMainWindow):
             # Compare with context data
             rs = self.current_cal.get('roof_state', {})
             if rs.get('available'):
-                context_roof = rs.get('roof_open', False)
+                context_roof = to_bool(rs.get('roof_open', False))
                 match = "✓ MATCH" if context_roof == result.roof_open else "✗ MISMATCH"
                 lines.append(f"vs Context:  {match}")
             
             # Compare with existing label if present
             labels = self.current_cal.get('labels', {})
             if labels.get('labeled_at'):
-                label_roof = labels.get('roof_open', False)
+                label_roof = to_bool(labels.get('roof_open', False))
                 match = "✓ MATCH" if label_roof == result.roof_open else "✗ MISMATCH"
                 lines.append(f"vs Label:    {match}")
             

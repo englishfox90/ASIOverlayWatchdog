@@ -17,6 +17,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QBrush
 
+def to_bool(value) -> bool:
+    """Convert various representations to boolean (handles string 'True'/'False')."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ('true', '1', 'yes')
+    return bool(value)
 
 class ReviewTab(QWidget):
     """Tab for reviewing ML predictions vs ground truth."""
@@ -176,11 +183,11 @@ class ReviewTab(QWidget):
                     self.filtered_data.append(item)
             elif filter_idx == 1:  # ML matches NINA
                 if ml and nina.get('available'):
-                    if ml['roof_open'] == nina.get('roof_open'):
+                    if to_bool(ml.get('roof_open')) == to_bool(nina.get('roof_open')):
                         self.filtered_data.append(item)
             elif filter_idx == 2:  # ML disagrees with NINA
                 if ml and nina.get('available'):
-                    if ml['roof_open'] != nina.get('roof_open'):
+                    if to_bool(ml.get('roof_open')) != to_bool(nina.get('roof_open')):
                         self.filtered_data.append(item)
             elif filter_idx == 3:  # Labeled only
                 if has_label and ml:
@@ -208,7 +215,7 @@ class ReviewTab(QWidget):
             nina = item['nina_state']
             if ml and nina.get('available'):
                 compared += 1
-                if ml['roof_open'] == nina.get('roof_open'):
+                if to_bool(ml.get('roof_open')) == to_bool(nina.get('roof_open')):
                     correct += 1
         
         if compared > 0:
@@ -234,9 +241,10 @@ class ReviewTab(QWidget):
             
             # ML Prediction
             if ml:
-                ml_text = "🟢 OPEN" if ml['roof_open'] else "🔴 CLOSED"
+                ml_open = to_bool(ml.get('roof_open'))
+                ml_text = "🟢 OPEN" if ml_open else "🔴 CLOSED"
                 ml_item = QTableWidgetItem(ml_text)
-                ml_item.setForeground(QBrush(QColor("#10b981" if ml['roof_open'] else "#ef4444")))
+                ml_item.setForeground(QBrush(QColor("#10b981" if ml_open else "#ef4444")))
             else:
                 ml_item = QTableWidgetItem("--")
             self.table.setItem(row, 1, ml_item)
@@ -258,7 +266,8 @@ class ReviewTab(QWidget):
             
             # NINA State
             if nina.get('available'):
-                nina_text = "🟢 OPEN" if nina.get('roof_open') else "🔴 CLOSED"
+                nina_open = to_bool(nina.get('roof_open'))
+                nina_text = "🟢 OPEN" if nina_open else "🔴 CLOSED"
                 nina_item = QTableWidgetItem(nina_text)
             else:
                 nina_item = QTableWidgetItem("⚠️ N/A")
@@ -267,7 +276,7 @@ class ReviewTab(QWidget):
             
             # ML vs NINA
             if ml and nina.get('available'):
-                match = ml['roof_open'] == nina.get('roof_open')
+                match = to_bool(ml.get('roof_open')) == to_bool(nina.get('roof_open'))
                 match_item = QTableWidgetItem("✅" if match else "❌")
                 match_item.setForeground(QBrush(QColor("#10b981" if match else "#ef4444")))
             else:
@@ -276,7 +285,8 @@ class ReviewTab(QWidget):
             
             # Manual Label
             if labels.get('labeled_at'):
-                label_text = "🟢 OPEN" if labels.get('roof_open') else "🔴 CLOSED"
+                label_open = to_bool(labels.get('roof_open'))
+                label_text = "🟢 OPEN" if label_open else "🔴 CLOSED"
                 label_item = QTableWidgetItem(f"📝 {label_text}")
             else:
                 label_item = QTableWidgetItem("⬜ --")
@@ -285,7 +295,7 @@ class ReviewTab(QWidget):
             
             # ML vs Label
             if ml and labels.get('labeled_at'):
-                match = ml['roof_open'] == labels.get('roof_open')
+                match = to_bool(ml.get('roof_open')) == to_bool(labels.get('roof_open'))
                 mlabel_item = QTableWidgetItem("✅" if match else "❌")
                 mlabel_item.setForeground(QBrush(QColor("#10b981" if match else "#ef4444")))
             else:
