@@ -99,9 +99,9 @@ def predict_roof_state(
         result = _classifier.predict(image_array, metadata)
         
         return {
-            'roof_open': result.roof_open,
-            'confidence': round(result.confidence, 4),
-            'raw_logit': round(result.raw_logit, 4),
+            'roof_open': bool(result.roof_open),  # Ensure native bool for JSON
+            'confidence': round(float(result.confidence), 4),
+            'raw_logit': round(float(result.raw_logit), 4),
             'model_version': 'roof_classifier_v1',
         }
         
