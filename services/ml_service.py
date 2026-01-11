@@ -89,10 +89,10 @@ class MLService:
         try:
             from ml.roof_classifier import RoofClassifier
             
-            # Look for model file
+            # Look for model file - prefer ONNX for production (lighter runtime)
             model_paths = [
-                Path(__file__).parent.parent / "ml" / "models" / "roof_classifier_v1.pth",
                 Path(__file__).parent.parent / "ml" / "models" / "roof_classifier_v1.onnx",
+                Path(__file__).parent.parent / "ml" / "models" / "roof_classifier_v1.pth",
             ]
             
             model_path = None
@@ -130,9 +130,19 @@ class MLService:
         try:
             from ml.sky_classifier import SkyClassifier
             
-            model_path = Path(__file__).parent.parent / "ml" / "models" / "sky_classifier_v1.pth"
+            # Look for model file - prefer ONNX for production (lighter runtime)
+            model_paths = [
+                Path(__file__).parent.parent / "ml" / "models" / "sky_classifier_v1.onnx",
+                Path(__file__).parent.parent / "ml" / "models" / "sky_classifier_v1.pth",
+            ]
             
-            if not model_path.exists():
+            model_path = None
+            for p in model_paths:
+                if p.exists():
+                    model_path = p
+                    break
+            
+            if model_path is None:
                 self._sky_error = "Sky model file not found"
                 app_logger.warning(f"ML Service: {self._sky_error}")
                 return False

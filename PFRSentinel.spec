@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec file for PFR Sentinel v3.2.0
+PyInstaller spec file for PFR Sentinel v3.2.1
 LEAN BUILD - Only includes packages actually used by production code
 
 Required packages (from requirements.txt):
@@ -10,9 +10,11 @@ Required packages (from requirements.txt):
 - watchdog (File monitoring)
 - pystray (System tray)
 - zwoasi (ZWO camera - optional)
+- onnxruntime (ML inference - lightweight)
 
 EXCLUDED (ML/dev packages - NOT bundled):
-- torch, torchvision, onnxruntime, scikit-learn, scipy, matplotlib, astropy
+- torch, torchvision (use ONNX models instead)
+- scikit-learn, scipy, matplotlib, astropy
 """
 
 import sys
@@ -65,6 +67,18 @@ except Exception as e:
     print(f"⚠ platformdirs: {e}")
     platformdirs_datas, platformdirs_binaries, platformdirs_hiddenimports = [], [], []
 
+# --- onnxruntime (ML inference - lightweight, minimal collection) ---
+try:
+    # Only collect onnxruntime core, not all the tools/transformers
+    from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+    onnx_datas = collect_data_files('onnxruntime')
+    onnx_binaries = collect_dynamic_libs('onnxruntime')
+    onnx_hiddenimports = ['onnxruntime', 'onnxruntime.capi', 'onnxruntime.capi._pybind_state']
+    print(f"✓ onnxruntime: {len(onnx_datas)} datas, {len(onnx_hiddenimports)} imports")
+except Exception as e:
+    print(f"⚠ onnxruntime: {e}")
+    onnx_datas, onnx_binaries, onnx_hiddenimports = [], [], []
+
 # --- Python 3.13 critical: xml.parsers.expat binary ---
 xml_binaries = []
 try:
@@ -86,6 +100,9 @@ added_files = [
     ('version.py', '.'),
     ('assets/app_icon.ico', 'assets'),
     ('assets/app_icon.png', 'assets'),
+    # ML models (ONNX format for production)
+    ('ml/models/roof_classifier_v1.onnx', 'ml/models'),
+    ('ml/models/sky_classifier_v1.onnx', 'ml/models'),
 ]
 
 # ============================================================================
@@ -135,9 +152,14 @@ hiddenimports = [
     'services.camera_calibration', 'services.camera_utils', 'services.cleanup',
     'services.color_balance', 'services.web_output', 'services.rtsp_output',
     'services.discord_alerts', 'services.headless_runner', 'services.weather',
+    'services.ml_service', 'services.ascom_safety',
     'ui', 'ui.main_window', 'ui.theme', 'ui.components', 'ui.panels',
     'ui.controllers', 'ui.system_tray_qt',
-] + fluent_hiddenimports + requests_hiddenimports + jaraco_hiddenimports + pystray_hiddenimports + platformdirs_hiddenimports
+    
+    # --- ML modules ---
+    'ml', 'ml.roof_classifier', 'ml.sky_classifier',
+    'onnxruntime',
+] + fluent_hiddenimports + requests_hiddenimports + jaraco_hiddenimports + pystray_hiddenimports + platformdirs_hiddenimports + onnx_hiddenimports
 
 # ============================================================================
 # ANALYSIS
@@ -146,16 +168,16 @@ hiddenimports = [
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=fluent_binaries + requests_binaries + jaraco_binaries + pystray_binaries + platformdirs_binaries + xml_binaries,
-    datas=added_files + fluent_datas + requests_datas + jaraco_datas + pystray_datas + platformdirs_datas,
+    binaries=fluent_binaries + requests_binaries + jaraco_binaries + pystray_binaries + platformdirs_binaries + onnx_binaries + xml_binaries,
+    datas=added_files + fluent_datas + requests_datas + jaraco_datas + pystray_datas + platformdirs_datas + onnx_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # === CRITICAL: Exclude ML/heavy packages ===
+        # === CRITICAL: Exclude ML/heavy packages (use ONNX instead) ===
         'torch', 'torchvision', 'torchaudio',
-        'onnx', 'onnxruntime',
+        'onnx',  # onnx package (model format), NOT onnxruntime (inference)
         'tensorflow', 'keras',
         'sklearn', 'scikit-learn',
         'scipy',

@@ -33,7 +33,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-# Check for PyTorch
+# Check for ONNX runtime (lightweight inference - preferred for production)
+try:
+    import onnxruntime as ort
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
+
+# Fallback to PyTorch if ONNX not available
 try:
     import torch
     import torch.nn as nn
@@ -134,6 +141,7 @@ class SkyClassifier:
     Sky/celestial classifier for PFR Sentinel.
     
     Predicts sky condition, stars, and moon from pier camera images.
+    Supports both ONNX (preferred for production) and PyTorch models.
     """
     
     def __init__(self, model_path: Union[str, Path], image_size: int = 256):
@@ -141,35 +149,54 @@ class SkyClassifier:
         Initialize classifier with model.
         
         Args:
-            model_path: Path to model file (.pth)
+            model_path: Path to model file (.onnx or .pth)
             image_size: Expected image size (must match training)
         """
         self.model_path = Path(model_path)
         self.image_size = image_size
         self.model = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model_type = None
+        self.device = None
         
         self._load_model()
     
     def _load_model(self):
-        """Load the PyTorch model."""
-        if not TORCH_AVAILABLE:
-            raise ImportError("PyTorch required for inference")
+        """Load model based on file extension."""
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"Model not found: {self.model_path}")
         
-        checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
+        suffix = self.model_path.suffix.lower()
         
-        # Get model parameters
-        self.image_size = checkpoint.get('image_size', 256)
-        metadata_features = checkpoint.get('metadata_features', 6)
-        
-        # Create and load model
-        self.model = SkyClassifierCNN(
-            image_size=self.image_size,
-            metadata_features=metadata_features
-        )
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.model.to(self.device)
-        self.model.eval()
+        if suffix == '.onnx':
+            if not ONNX_AVAILABLE:
+                raise ImportError("ONNX Runtime not installed. Run: pip install onnxruntime")
+            
+            self.model = ort.InferenceSession(str(self.model_path))
+            self.model_type = 'onnx'
+            # ONNX models use default image_size=256, metadata_features=6
+            print(f"Loaded ONNX sky classifier from: {self.model_path}")
+            
+        elif suffix == '.pth':
+            if not TORCH_AVAILABLE:
+                raise ImportError("PyTorch not installed. Run: pip install torch")
+            
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
+            
+            # Get model parameters
+            self.image_size = checkpoint.get('image_size', 256)
+            metadata_features = checkpoint.get('metadata_features', 6)
+            
+            # Create and load model
+            self.model = SkyClassifierCNN(
+                image_size=self.image_size,
+                metadata_features=metadata_features
+            )
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.model.to(self.device)
+            self.model.eval()
+            self.model_type = 'pytorch'
+            print(f"Loaded PyTorch sky classifier from: {self.model_path}")
         
         print(f"Loaded sky classifier from: {self.model_path}")
     
@@ -244,7 +271,7 @@ class SkyClassifier:
         # Preprocess image
         image_input = self.preprocess_image(image)
         
-        # Build metadata tensor
+        # Build metadata array
         if metadata is not None:
             meta_input = np.array([[
                 metadata.get('corner_to_center_ratio', 1.0),
@@ -257,32 +284,64 @@ class SkyClassifier:
         else:
             meta_input = np.array([[1.0, 0.0, 0.0, 0.5, 0.0, 0.0]], dtype=np.float32)
         
-        # Run inference
-        with torch.no_grad():
-            image_tensor = torch.from_numpy(image_input).float().to(self.device)
-            meta_tensor = torch.from_numpy(meta_input).float().to(self.device)
+        # Run inference based on model type
+        if self.model_type == 'onnx':
+            outputs = self.model.run(None, {
+                'image': image_input.astype(np.float32),
+                'metadata': meta_input.astype(np.float32)
+            })
+            sky_logits = outputs[0]
+            stars_logit = outputs[1]
+            density = outputs[2]
+            moon_logit = outputs[3]
             
-            sky_logits, stars_logit, density, moon_logit = self.model(image_tensor, meta_tensor)
-            
-            # Sky condition
-            sky_probs = F.softmax(sky_logits, dim=1).cpu().numpy()[0]
+            # Sky condition (softmax)
+            sky_exp = np.exp(sky_logits - np.max(sky_logits, axis=1, keepdims=True))
+            sky_probs = (sky_exp / sky_exp.sum(axis=1, keepdims=True))[0]
             sky_idx = int(np.argmax(sky_probs))
             sky_condition = IDX_TO_SKY[sky_idx]
             sky_confidence = float(sky_probs[sky_idx])
             sky_probabilities = {IDX_TO_SKY[i]: float(p) for i, p in enumerate(sky_probs)}
             
-            # Stars
-            stars_prob = float(torch.sigmoid(stars_logit).cpu().numpy()[0, 0])
+            # Stars (sigmoid)
+            stars_prob = float(1 / (1 + np.exp(-stars_logit[0, 0])))
             stars_visible = stars_prob > 0.5
             stars_confidence = stars_prob if stars_visible else (1 - stars_prob)
             
-            # Star density
-            star_density = float(density.cpu().numpy()[0, 0])
+            # Star density (already sigmoid in model)
+            star_density = float(density[0, 0])
             
-            # Moon
-            moon_prob = float(torch.sigmoid(moon_logit).cpu().numpy()[0, 0])
+            # Moon (sigmoid)
+            moon_prob = float(1 / (1 + np.exp(-moon_logit[0, 0])))
             moon_visible = moon_prob > 0.5
             moon_confidence = moon_prob if moon_visible else (1 - moon_prob)
+            
+        elif self.model_type == 'pytorch':
+            with torch.no_grad():
+                image_tensor = torch.from_numpy(image_input).float().to(self.device)
+                meta_tensor = torch.from_numpy(meta_input).float().to(self.device)
+                
+                sky_logits, stars_logit, density, moon_logit = self.model(image_tensor, meta_tensor)
+                
+                # Sky condition
+                sky_probs = F.softmax(sky_logits, dim=1).cpu().numpy()[0]
+                sky_idx = int(np.argmax(sky_probs))
+                sky_condition = IDX_TO_SKY[sky_idx]
+                sky_confidence = float(sky_probs[sky_idx])
+                sky_probabilities = {IDX_TO_SKY[i]: float(p) for i, p in enumerate(sky_probs)}
+                
+                # Stars
+                stars_prob = float(torch.sigmoid(stars_logit).cpu().numpy()[0, 0])
+                stars_visible = stars_prob > 0.5
+                stars_confidence = stars_prob if stars_visible else (1 - stars_prob)
+                
+                # Star density
+                star_density = float(density.cpu().numpy()[0, 0])
+                
+                # Moon
+                moon_prob = float(torch.sigmoid(moon_logit).cpu().numpy()[0, 0])
+                moon_visible = moon_prob > 0.5
+                moon_confidence = moon_prob if moon_visible else (1 - moon_prob)
         
         return SkyPrediction(
             sky_condition=sky_condition,
