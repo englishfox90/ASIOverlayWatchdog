@@ -51,84 +51,86 @@ class RoofPrediction:
 
 # ============================================================================
 # Model Architecture (duplicated from train_roof_classifier.py for inference)
+# Only defined when PyTorch is available (not needed for ONNX inference)
 # ============================================================================
 
-class RoofClassifierCNN(nn.Module):
-    """CNN for roof state classification with metadata fusion."""
-    
-    def __init__(self, image_size: int = 128, num_meta_features: int = 4):
-        super().__init__()
+if TORCH_AVAILABLE:
+    class RoofClassifierCNN(nn.Module):
+        """CNN for roof state classification with metadata fusion."""
         
-        # CNN backbone for image
-        self.conv_layers = nn.Sequential(
-            # Block 1: 128 -> 64
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+        def __init__(self, image_size: int = 128, num_meta_features: int = 4):
+            super().__init__()
+        
+            # CNN backbone for image
+            self.conv_layers = nn.Sequential(
+                # Block 1: 128 -> 64
+                nn.Conv2d(1, 32, kernel_size=3, padding=1),
+                nn.BatchNorm2d(32),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                
+                # Block 2: 64 -> 32
+                nn.Conv2d(32, 64, kernel_size=3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                
+                # Block 3: 32 -> 16
+                nn.Conv2d(64, 128, kernel_size=3, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                
+                # Block 4: 16 -> 8
+                nn.Conv2d(128, 256, kernel_size=3, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                
+                # Block 5: 8 -> 4
+                nn.Conv2d(256, 256, kernel_size=3, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d(4),
+            )
             
-            # Block 2: 64 -> 32
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+            # Calculate flattened size
+            self.cnn_output_size = 256 * 4 * 4  # 4096
             
-            # Block 3: 32 -> 16
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+            # Metadata branch
+            self.meta_layers = nn.Sequential(
+                nn.Linear(num_meta_features, 32),
+                nn.ReLU(),
+                nn.Linear(32, 64),
+                nn.ReLU(),
+            )
             
-            # Block 4: 16 -> 8
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+            # Fusion and classification
+            self.classifier = nn.Sequential(
+                nn.Linear(self.cnn_output_size + 64, 256),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                nn.Linear(256, 64),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(64, 1),
+            )
+        
+        def forward(self, image, metadata):
+            # CNN branch
+            x = self.conv_layers(image)
+            x = x.view(x.size(0), -1)  # Flatten
             
-            # Block 5: 8 -> 4
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(4),
-        )
-        
-        # Calculate flattened size
-        self.cnn_output_size = 256 * 4 * 4  # 4096
-        
-        # Metadata branch
-        self.meta_layers = nn.Sequential(
-            nn.Linear(num_meta_features, 32),
-            nn.ReLU(),
-            nn.Linear(32, 64),
-            nn.ReLU(),
-        )
-        
-        # Fusion and classification
-        self.classifier = nn.Sequential(
-            nn.Linear(self.cnn_output_size + 64, 256),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(256, 64),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(64, 1),
-        )
-    
-    def forward(self, image, metadata):
-        # CNN branch
-        x = self.conv_layers(image)
-        x = x.view(x.size(0), -1)  # Flatten
-        
-        # Metadata branch
-        m = self.meta_layers(metadata)
-        
-        # Fusion
-        combined = torch.cat([x, m], dim=1)
-        
-        # Classification
-        output = self.classifier(combined)
-        
-        return output
+            # Metadata branch
+            m = self.meta_layers(metadata)
+            
+            # Fusion
+            combined = torch.cat([x, m], dim=1)
+            
+            # Classification
+            output = self.classifier(combined)
+            
+            return output
 
 
 # ============================================================================

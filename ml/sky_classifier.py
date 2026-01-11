@@ -80,60 +80,62 @@ class SkyPrediction:
         }
 
 
-class SkyClassifierCNN(nn.Module):
-    """CNN architecture - must match training."""
-    
-    def __init__(self, image_size: int = 256, metadata_features: int = 6):
-        super().__init__()
+# Only define PyTorch model class when torch is available (not needed for ONNX inference)
+if TORCH_AVAILABLE:
+    class SkyClassifierCNN(nn.Module):
+        """CNN architecture - must match training."""
         
-        self.image_size = image_size
+        def __init__(self, image_size: int = 256, metadata_features: int = 6):
+            super().__init__()
+            
+            self.image_size = image_size
+            
+            self.conv1 = nn.Conv2d(1, 32, 3, padding=1)
+            self.bn1 = nn.BatchNorm2d(32)
+            self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+            self.bn2 = nn.BatchNorm2d(64)
+            self.conv3 = nn.Conv2d(64, 128, 3, padding=1)
+            self.bn3 = nn.BatchNorm2d(128)
+            self.conv4 = nn.Conv2d(128, 256, 3, padding=1)
+            self.bn4 = nn.BatchNorm2d(256)
+            self.conv5 = nn.Conv2d(256, 256, 3, padding=1)
+            self.bn5 = nn.BatchNorm2d(256)
+            
+            self.pool = nn.MaxPool2d(2, 2)
+            self.dropout = nn.Dropout(0.3)
+            
+            conv_output_size = (image_size // 32) ** 2 * 256
+            
+            self.fc_image = nn.Linear(conv_output_size, 256)
+            self.fc_meta = nn.Linear(metadata_features, 32)
+            self.fc_fusion = nn.Linear(256 + 32, 128)
+            
+            self.head_sky = nn.Linear(128, len(SKY_CONDITIONS))
+            self.head_stars = nn.Linear(128, 1)
+            self.head_density = nn.Linear(128, 1)
+            self.head_moon = nn.Linear(128, 1)
         
-        self.conv1 = nn.Conv2d(1, 32, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(32)
-        self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
-        self.conv3 = nn.Conv2d(64, 128, 3, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
-        self.conv4 = nn.Conv2d(128, 256, 3, padding=1)
-        self.bn4 = nn.BatchNorm2d(256)
-        self.conv5 = nn.Conv2d(256, 256, 3, padding=1)
-        self.bn5 = nn.BatchNorm2d(256)
-        
-        self.pool = nn.MaxPool2d(2, 2)
-        self.dropout = nn.Dropout(0.3)
-        
-        conv_output_size = (image_size // 32) ** 2 * 256
-        
-        self.fc_image = nn.Linear(conv_output_size, 256)
-        self.fc_meta = nn.Linear(metadata_features, 32)
-        self.fc_fusion = nn.Linear(256 + 32, 128)
-        
-        self.head_sky = nn.Linear(128, len(SKY_CONDITIONS))
-        self.head_stars = nn.Linear(128, 1)
-        self.head_density = nn.Linear(128, 1)
-        self.head_moon = nn.Linear(128, 1)
-    
-    def forward(self, image, metadata):
-        x = self.pool(F.relu(self.bn1(self.conv1(image))))
-        x = self.pool(F.relu(self.bn2(self.conv2(x))))
-        x = self.pool(F.relu(self.bn3(self.conv3(x))))
-        x = self.pool(F.relu(self.bn4(self.conv4(x))))
-        x = self.pool(F.relu(self.bn5(self.conv5(x))))
-        
-        x = x.view(x.size(0), -1)
-        x = self.dropout(F.relu(self.fc_image(x)))
-        
-        m = F.relu(self.fc_meta(metadata))
-        
-        combined = torch.cat([x, m], dim=1)
-        features = self.dropout(F.relu(self.fc_fusion(combined)))
-        
-        sky_logits = self.head_sky(features)
-        stars_logit = self.head_stars(features)
-        density = torch.sigmoid(self.head_density(features))
-        moon_logit = self.head_moon(features)
-        
-        return sky_logits, stars_logit, density, moon_logit
+        def forward(self, image, metadata):
+            x = self.pool(F.relu(self.bn1(self.conv1(image))))
+            x = self.pool(F.relu(self.bn2(self.conv2(x))))
+            x = self.pool(F.relu(self.bn3(self.conv3(x))))
+            x = self.pool(F.relu(self.bn4(self.conv4(x))))
+            x = self.pool(F.relu(self.bn5(self.conv5(x))))
+            
+            x = x.view(x.size(0), -1)
+            x = self.dropout(F.relu(self.fc_image(x)))
+            
+            m = F.relu(self.fc_meta(metadata))
+            
+            combined = torch.cat([x, m], dim=1)
+            features = self.dropout(F.relu(self.fc_fusion(combined)))
+            
+            sky_logits = self.head_sky(features)
+            stars_logit = self.head_stars(features)
+            density = torch.sigmoid(self.head_density(features))
+            moon_logit = self.head_moon(features)
+            
+            return sky_logits, stars_logit, density, moon_logit
 
 
 class SkyClassifier:
