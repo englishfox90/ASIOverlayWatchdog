@@ -60,6 +60,11 @@ TOKENS = [
     ("Sunrise", "{WEATHER_SUNRISE}"),
     ("Sunset", "{WEATHER_SUNSET}"),
     ("City", "{WEATHER_CITY}"),
+    ("━━━ ML Models (Beta) ━━━", None),
+    ("Roof Status", "{ROOF_STATUS}"),
+    ("Sky Condition", "{SKY_CONDITION}"),
+    ("Stars Visible", "{STARS_VISIBLE}"),
+    ("Star Density", "{STAR_DENSITY}"),
 ]
 
 ANCHOR_POSITIONS = [
@@ -484,6 +489,11 @@ class OverlaySettingsPanel(QWidget):
         result = result.replace('{WEATHER_SUNSET}', '18:30')
         result = result.replace('{WEATHER_CITY}', 'Rockwood')
         result = result.replace('{WEATHER_ICON_CODE}', '01d')
+        # ML tokens (Beta)
+        result = result.replace('{ROOF_STATUS}', 'Open (95%)')
+        result = result.replace('{SKY_CONDITION}', 'Clear (87%)')
+        result = result.replace('{STARS_VISIBLE}', 'Yes')
+        result = result.replace('{STAR_DENSITY}', 'High (0.85)')
         return result
     
     def _create_editor_card(self) -> QScrollArea:

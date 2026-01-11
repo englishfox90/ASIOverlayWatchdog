@@ -278,6 +278,37 @@ class ImageProcessingPanel(QScrollArea):
         
         layout.addWidget(stretch_card)
         
+        # === ML MODELS (Beta) ===
+        ml_card = CollapsibleCard("ML Models (Beta)", FluentIcon.IOT)
+        
+        self.ml_enabled_switch = SwitchRow(
+            "Enable ML Analysis",
+            "Use machine learning to analyze observatory conditions"
+        )
+        self.ml_enabled_switch.toggled.connect(self._on_ml_enabled_changed)
+        ml_card.add_widget(self.ml_enabled_switch)
+        
+        # Info about what ML models do
+        ml_info = CaptionLabel(
+            "🔭 Roof Classifier: Detects if observatory roof is open or closed\n"
+            "🌤️ Sky Classifier: Identifies sky conditions (Clear, Cloudy, etc.) when roof is open\n\n"
+            "New overlay tokens available:\n"
+            "• {ROOF_STATUS} - \"Open (95%)\" or \"Closed (98%)\"\n"
+            "• {SKY_CONDITION} - \"Clear (87%)\" or \"Partly Cloudy (72%)\"\n"
+            "• {STARS_VISIBLE} - \"Yes\" or \"No\"\n"
+            "• {STAR_DENSITY} - \"High (0.85)\" or \"Low (0.12)\""
+        )
+        ml_info.setStyleSheet(f"color: {Colors.text_secondary}; padding: 8px;")
+        ml_info.setWordWrap(True)
+        ml_card.add_widget(ml_info)
+        
+        # ML status label
+        self.ml_status_label = CaptionLabel("Status: Not initialized")
+        self.ml_status_label.setStyleSheet(f"color: {Colors.text_muted}; padding: 8px;")
+        ml_card.add_widget(self.ml_status_label)
+        
+        layout.addWidget(ml_card)
+        
         # === DEV MODE === (Only show in development builds)
         if is_dev_mode_available():
             dev_card = CollapsibleCard("Developer Mode", FluentIcon.DEVELOPER_TOOLS)
@@ -403,6 +434,54 @@ class ImageProcessingPanel(QScrollArea):
             self.main_window.config.set('dev_mode', dev_mode)
             self.settings_changed.emit()
     
+    def _on_ml_enabled_changed(self, checked):
+        """Handle ML Models enable/disable toggle"""
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            ml_config = self.main_window.config.get('ml_models', {})
+            ml_config['enabled'] = checked
+            self.main_window.config.set('ml_models', ml_config)
+            self.main_window.config.save()
+            self.settings_changed.emit()
+            
+            from services.logger import app_logger
+            if checked:
+                app_logger.info("ML Models enabled - initializing classifiers...")
+                self._initialize_ml_service()
+            else:
+                app_logger.info("ML Models disabled")
+                self.ml_status_label.setText("Status: Disabled")
+    
+    def _initialize_ml_service(self):
+        """Initialize ML service and update status label"""
+        try:
+            from services.ml_service import get_ml_service
+            ml = get_ml_service()
+            ml.initialize()
+            
+            status = ml.get_status()
+            roof_ok = status['roof_classifier']['available']
+            sky_ok = status['sky_classifier']['available']
+            
+            if roof_ok and sky_ok:
+                self.ml_status_label.setText("Status: ✓ Both models loaded")
+                self.ml_status_label.setStyleSheet(f"color: #4ade80; padding: 8px;")  # Green
+            elif roof_ok:
+                self.ml_status_label.setText("Status: ✓ Roof model only")
+                self.ml_status_label.setStyleSheet(f"color: #facc15; padding: 8px;")  # Yellow
+            elif sky_ok:
+                self.ml_status_label.setText("Status: ✓ Sky model only")
+                self.ml_status_label.setStyleSheet(f"color: #facc15; padding: 8px;")  # Yellow
+            else:
+                roof_err = status['roof_classifier'].get('error', 'Unknown')
+                self.ml_status_label.setText(f"Status: ✗ No models available ({roof_err})")
+                self.ml_status_label.setStyleSheet(f"color: #f87171; padding: 8px;")  # Red
+                
+        except Exception as e:
+            self.ml_status_label.setText(f"Status: ✗ Error: {str(e)[:50]}")
+            self.ml_status_label.setStyleSheet(f"color: #f87171; padding: 8px;")
+
     # === CONFIG LOADING ===
     
     def load_from_config(self, config):
@@ -456,7 +535,19 @@ class ImageProcessingPanel(QScrollArea):
             
             # Dev mode
             dev_mode = config.get('dev_mode', {})
-            self.dev_mode_switch.set_checked(dev_mode.get('enabled', False))
-            self.dev_stats_switch.set_checked(dev_mode.get('save_histogram_stats', True))
+            if hasattr(self, 'dev_mode_switch'):
+                self.dev_mode_switch.set_checked(dev_mode.get('enabled', False))
+                self.dev_stats_switch.set_checked(dev_mode.get('save_histogram_stats', True))
+            
+            # ML Models
+            ml_config = config.get('ml_models', {})
+            self.ml_enabled_switch.set_checked(ml_config.get('enabled', False))
+            
+            # Initialize ML service if enabled
+            if ml_config.get('enabled', False):
+                self._initialize_ml_service()
+            else:
+                self.ml_status_label.setText("Status: Disabled")
+                self.ml_status_label.setStyleSheet(f"color: {Colors.text_muted}; padding: 8px;")
         finally:
             self._loading_config = False

@@ -114,6 +114,15 @@ DEFAULT_CONFIG = {
         "dark_scene_threshold": 0.05  # Median below this triggers dark scene mode (0.0-0.2)
     },
     
+    # ML Models (Beta) - Observatory condition classification
+    # These models analyze images to detect roof state and sky conditions
+    "ml_models": {
+        "enabled": False,  # Enable ML-based image analysis (Beta)
+        "roof_classifier": True,  # Predict roof open/closed state
+        "sky_classifier": True,   # Predict sky condition (Clear/Cloudy/etc) when roof is open
+        "show_in_preview": True,  # Display predictions in live monitoring metadata
+    },
+    
     # Developer Mode settings - for troubleshooting raw image data
     "dev_mode": {
         "enabled": False,  # Save raw images before any processing
@@ -121,7 +130,7 @@ DEFAULT_CONFIG = {
         "save_histogram_stats": True,  # Log detailed per-channel statistics
         "use_raw16": False,  # Use RAW16 mode for full bit depth (requires camera support)
         "ml_predictions": {
-            "enabled": True,  # Run ML model predictions on each capture
+            "enabled": True,  # Run ML model predictions on each capture (for dev JSON)
             "roof_classifier": True,  # Predict roof open/closed state
             "sky_classifier": True,   # Predict sky condition (only when roof open)
         }

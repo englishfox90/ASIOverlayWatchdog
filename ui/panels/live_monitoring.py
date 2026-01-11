@@ -271,10 +271,11 @@ class HistogramWidget(QFrame):
 
 
 class MetadataWidget(QFrame):
-    """Compact metadata display"""
+    """Compact metadata display with ML predictions support"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._ml_enabled = False
         self._setup_ui()
     
     def _setup_ui(self):
@@ -321,6 +322,37 @@ class MetadataWidget(QFrame):
         layout.addWidget(self.exp_value, 1, 1)
         layout.addWidget(self.gain_label, 1, 2)
         layout.addWidget(self.gain_value, 1, 3)
+        
+        # Row 2: ML Predictions (Roof, Sky) - hidden by default
+        self.roof_label = CaptionLabel("🔭 Roof:")
+        self.roof_label.setStyleSheet(f"color: {Colors.text_muted};")
+        self.roof_value = BodyLabel("-")
+        self.roof_value.setStyleSheet(f"color: {Colors.text_secondary};")
+        
+        self.sky_label = CaptionLabel("🌤️ Sky:")
+        self.sky_label.setStyleSheet(f"color: {Colors.text_muted};")
+        self.sky_value = BodyLabel("-")
+        self.sky_value.setStyleSheet(f"color: {Colors.text_secondary};")
+        
+        layout.addWidget(self.roof_label, 2, 0)
+        layout.addWidget(self.roof_value, 2, 1)
+        layout.addWidget(self.sky_label, 2, 2)
+        layout.addWidget(self.sky_value, 2, 3)
+        
+        # Hide ML row by default
+        self._set_ml_visible(False)
+    
+    def _set_ml_visible(self, visible: bool):
+        """Show/hide ML prediction row"""
+        self.roof_label.setVisible(visible)
+        self.roof_value.setVisible(visible)
+        self.sky_label.setVisible(visible)
+        self.sky_value.setVisible(visible)
+    
+    def set_ml_enabled(self, enabled: bool):
+        """Enable/disable ML predictions display"""
+        self._ml_enabled = enabled
+        self._set_ml_visible(enabled)
     
     def update_metadata(self, metadata: dict):
         """Update displayed metadata"""
@@ -360,6 +392,49 @@ class MetadataWidget(QFrame):
         
         gain = metadata.get('gain') or metadata.get('GAIN', '-')
         self.gain_value.setText(str(gain))
+        
+        # Update ML predictions if enabled
+        if self._ml_enabled:
+            ml_results = metadata.get('_ML_RESULTS', {})
+            if ml_results:
+                # Roof status with confidence
+                roof_status = ml_results.get('roof_status', 'N/A')
+                roof_conf = ml_results.get('roof_confidence')
+                if roof_conf is not None:
+                    roof_text = f"{roof_status} ({int(roof_conf * 100)}%)"
+                    # Color code based on status
+                    if roof_status == 'Open':
+                        self.roof_value.setStyleSheet("color: #4ade80;")  # Green
+                    elif roof_status == 'Closed':
+                        self.roof_value.setStyleSheet("color: #f87171;")  # Red
+                    else:
+                        self.roof_value.setStyleSheet(f"color: {Colors.text_secondary};")
+                else:
+                    roof_text = roof_status
+                self.roof_value.setText(roof_text)
+                
+                # Sky condition with confidence
+                sky_cond = ml_results.get('sky_condition', 'N/A')
+                sky_conf = ml_results.get('sky_confidence')
+                if sky_conf is not None and sky_cond != 'N/A':
+                    sky_text = f"{sky_cond} ({int(sky_conf * 100)}%)"
+                    # Color code based on condition
+                    if sky_cond == 'Clear':
+                        self.sky_value.setStyleSheet("color: #4ade80;")  # Green
+                    elif sky_cond in ('Mostly Clear', 'Partly Cloudy'):
+                        self.sky_value.setStyleSheet("color: #facc15;")  # Yellow
+                    else:
+                        self.sky_value.setStyleSheet("color: #f87171;")  # Red/Orange
+                else:
+                    sky_text = sky_cond
+                    self.sky_value.setStyleSheet(f"color: {Colors.text_secondary};")
+                self.sky_value.setText(sky_text)
+            else:
+                # No ML results in metadata
+                self.roof_value.setText("-")
+                self.sky_value.setText("-")
+                self.roof_value.setStyleSheet(f"color: {Colors.text_secondary};")
+                self.sky_value.setStyleSheet(f"color: {Colors.text_secondary};")
 
 
 class ActivityLog(QFrame):

@@ -13,7 +13,7 @@ import os
 # - Other experimental features
 #
 # RAW16 camera mode remains available regardless of this flag (user-facing feature).
-DEV_MODE_AVAILABLE = True  # Set to False before building release
+DEV_MODE_AVAILABLE = False  # Set to False before building release
 
 # Environment variable override for easy testing
 # PFRSENTINEL_DEV_MODE=1 to force enable, =0 to force disable

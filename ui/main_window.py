@@ -821,6 +821,11 @@ class MainWindow(QMainWindow):
         # Re-init weather service in case weather config changed
         self._init_weather_service()
         
+        # Update ML display in live panel if ML settings changed
+        ml_config = self.config.get('ml_models', {})
+        ml_enabled = ml_config.get('enabled', False) and ml_config.get('show_in_preview', True)
+        self.live_panel.metadata.set_ml_enabled(ml_enabled)
+        
         # Update status chips based on new settings
         self._update_service_status()
         
@@ -862,6 +867,11 @@ class MainWindow(QMainWindow):
             self.processing_panel.load_from_config(self.config)
             self.overlay_panel.load_from_config(self.config)
             self.settings_panel.load_from_config(self.config)
+            
+            # Update ML display in live panel based on config
+            ml_config = self.config.get('ml_models', {})
+            ml_enabled = ml_config.get('enabled', False) and ml_config.get('show_in_preview', True)
+            self.live_panel.metadata.set_ml_enabled(ml_enabled)
             
             # Update status chips based on config
             self._update_service_status()

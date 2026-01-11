@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from services.logger import app_logger
 from services.processor import add_overlays, auto_stretch_image
+from services.ml_service import get_ml_service, analyze_image_for_tokens
 from .dev_mode_utils import dev_mode_saver
 
 
@@ -218,6 +219,27 @@ class ImageProcessorWorker(QThread):
                     font = ImageFont.load_default()
                 draw.text((img.width - 200, 10), timestamp_text, fill='white', font=font)
             
+            # === ML Models: Add predictions to metadata for overlay tokens ===
+            ml_config = config.get('ml_models', {})
+            if ml_config.get('enabled', False):
+                try:
+                    ml_service = get_ml_service()
+                    if not ml_service.is_available():
+                        ml_service.initialize()
+                    
+                    if ml_service.is_available():
+                        # Get ML predictions formatted for overlay tokens
+                        ml_tokens = analyze_image_for_tokens(raw_array, config=ml_config)
+                        metadata.update(ml_tokens)
+                        
+                        # Store full results for preview display
+                        ml_results = ml_service.get_last_results()
+                        metadata['_ML_RESULTS'] = ml_results
+                        
+                        app_logger.debug(f"ML predictions: roof={ml_tokens.get('ROOF_STATUS')}, sky={ml_tokens.get('SKY_CONDITION')}")
+                except Exception as e:
+                    app_logger.debug(f"ML prediction skipped: {e}")
+            
             # Add overlays using services/processor.py function
             img = add_overlays(img, overlays, metadata, weather_service=self._weather_service)
             
@@ -367,6 +389,7 @@ class ImageProcessor(QObject):
             'auto_stretch': auto_stretch,
             'overlays': mw.config.get('overlays', []),
             'dev_mode': mw.config.get('dev_mode', {'enabled': False, 'raw_folder': 'raw_debug', 'save_histogram_stats': True}),
+            'ml_models': mw.config.get('ml_models', {'enabled': False}),
         }
         
         return config
