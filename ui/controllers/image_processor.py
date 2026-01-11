@@ -237,6 +237,12 @@ class ImageProcessorWorker(QThread):
                         metadata['_ML_RESULTS'] = ml_results
                         
                         app_logger.debug(f"ML predictions: roof={ml_tokens.get('ROOF_STATUS')}, sky={ml_tokens.get('SKY_CONDITION')}")
+                        
+                        # Write ASCOM Safety Monitor file if enabled
+                        ascom_config = ml_config.get('ascom_safety_file', {})
+                        if ascom_config.get('enabled', False):
+                            from services.ascom_safety import write_ascom_safety_file
+                            write_ascom_safety_file(ml_results, ascom_config)
                 except Exception as e:
                     app_logger.debug(f"ML prediction skipped: {e}")
             

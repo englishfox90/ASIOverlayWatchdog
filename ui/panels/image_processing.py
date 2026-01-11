@@ -4,13 +4,13 @@ Settings for resize, brightness, saturation, timestamp, and auto-stretch
 """
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame,
-    QSizePolicy
+    QSizePolicy, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal
 from qfluentwidgets import (
     CardWidget, SubtitleLabel, BodyLabel, CaptionLabel,
     PushButton, ComboBox, SpinBox, DoubleSpinBox, 
-    SwitchButton, FluentIcon
+    SwitchButton, FluentIcon, LineEdit
 )
 
 from ..theme.tokens import Colors, Typography, Spacing, Layout
@@ -307,6 +307,43 @@ class ImageProcessingPanel(QScrollArea):
         self.ml_status_label.setStyleSheet(f"color: {Colors.text_muted}; padding: 8px;")
         ml_card.add_widget(self.ml_status_label)
         
+        # ASCOM Safety Monitor file output
+        self.ascom_safety_switch = SwitchRow(
+            "ASCOM Safety File",
+            "Write roof status to file for NINA GenericFile safety monitor"
+        )
+        self.ascom_safety_switch.toggled.connect(self._on_ascom_safety_changed)
+        ml_card.add_widget(self.ascom_safety_switch)
+        
+        # File path input
+        ascom_path_row = QHBoxLayout()
+        ascom_path_row.setSpacing(Spacing.sm)
+        
+        self.ascom_file_path = LineEdit()
+        self.ascom_file_path.setPlaceholderText("%LOCALAPPDATA%\\PFRSentinel\\RoofStatusFile.txt")
+        self.ascom_file_path.editingFinished.connect(self._on_ascom_path_changed)
+        ascom_path_row.addWidget(self.ascom_file_path, 1)
+        
+        self.ascom_browse_btn = PushButton("Browse")
+        self.ascom_browse_btn.setFixedWidth(70)
+        self.ascom_browse_btn.clicked.connect(self._browse_ascom_path)
+        ascom_path_row.addWidget(self.ascom_browse_btn)
+        
+        ascom_path_widget = QWidget()
+        ascom_path_widget.setLayout(ascom_path_row)
+        ml_card.add_row("File Path", ascom_path_widget, "Path where NINA monitors for status")
+        
+        # ASCOM info
+        ascom_info = CaptionLabel(
+            "Configure NINA GenericFile with:\n"
+            "• Preamble: \"Roof Status:\"\n"
+            "• Safe trigger: \"OPEN\"\n"
+            "• Unsafe trigger: \"CLOSED\""
+        )
+        ascom_info.setStyleSheet(f"color: {Colors.text_muted}; padding: 8px;")
+        ascom_info.setWordWrap(True)
+        ml_card.add_widget(ascom_info)
+        
         layout.addWidget(ml_card)
         
         # === DEV MODE === (Only show in development builds)
@@ -481,6 +518,51 @@ class ImageProcessingPanel(QScrollArea):
         except Exception as e:
             self.ml_status_label.setText(f"Status: ✗ Error: {str(e)[:50]}")
             self.ml_status_label.setStyleSheet(f"color: #f87171; padding: 8px;")
+    
+    def _on_ascom_safety_changed(self, checked):
+        """Handle ASCOM Safety file toggle"""
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            ml_config = self.main_window.config.get('ml_models', {})
+            ascom_config = ml_config.get('ascom_safety_file', {})
+            ascom_config['enabled'] = checked
+            ml_config['ascom_safety_file'] = ascom_config
+            self.main_window.config.set('ml_models', ml_config)
+            self.main_window.config.save()
+            self.settings_changed.emit()
+            
+            from services.logger import app_logger
+            if checked:
+                path = ascom_config.get('file_path', '')
+                app_logger.info(f"ASCOM Safety file output enabled: {path or '(no path set)'}")
+            else:
+                app_logger.info("ASCOM Safety file output disabled")
+    
+    def _on_ascom_path_changed(self):
+        """Handle ASCOM file path change"""
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            ml_config = self.main_window.config.get('ml_models', {})
+            ascom_config = ml_config.get('ascom_safety_file', {})
+            ascom_config['file_path'] = self.ascom_file_path.text().strip()
+            ml_config['ascom_safety_file'] = ascom_config
+            self.main_window.config.set('ml_models', ml_config)
+            self.main_window.config.save()
+            self.settings_changed.emit()
+    
+    def _browse_ascom_path(self):
+        """Browse for ASCOM safety file location"""
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Select ASCOM Safety File Location",
+            self.ascom_file_path.text() or "",
+            "Text Files (*.txt);;All Files (*.*)"
+        )
+        if path:
+            self.ascom_file_path.setText(path)
+            self._on_ascom_path_changed()
 
     # === CONFIG LOADING ===
     
@@ -542,6 +624,11 @@ class ImageProcessingPanel(QScrollArea):
             # ML Models
             ml_config = config.get('ml_models', {})
             self.ml_enabled_switch.set_checked(ml_config.get('enabled', False))
+            
+            # ASCOM Safety file settings
+            ascom_config = ml_config.get('ascom_safety_file', {})
+            self.ascom_safety_switch.set_checked(ascom_config.get('enabled', False))
+            self.ascom_file_path.setText(ascom_config.get('file_path', ''))
             
             # Initialize ML service if enabled
             if ml_config.get('enabled', False):

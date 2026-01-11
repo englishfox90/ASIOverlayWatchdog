@@ -121,6 +121,17 @@ DEFAULT_CONFIG = {
         "roof_classifier": True,  # Predict roof open/closed state
         "sky_classifier": True,   # Predict sky condition (Clear/Cloudy/etc) when roof is open
         "show_in_preview": True,  # Display predictions in live monitoring metadata
+        # ASCOM Safety Monitor file output (for NINA integration)
+        "ascom_safety_file": {
+            "enabled": False,  # Write roof status to file for NINA GenericFile safety monitor
+            "file_path": os.path.join(os.getenv('LOCALAPPDATA'), APP_DATA_FOLDER, 'RoofStatusFile.txt'),  # Default to AppData
+            "preamble": "Roof Status:",  # Text before the status value
+            "open_trigger": "OPEN",  # Value when roof is open (Safe in NINA)
+            "closed_trigger": "CLOSED",  # Value when roof is closed (Unsafe in NINA)
+            "include_confidence": True,  # Include confidence % in file
+            "include_sky_condition": True,  # Include sky condition on separate line
+            "min_confidence": 0.7,  # Only write if confidence >= this threshold
+        },
     },
     
     # Developer Mode settings - for troubleshooting raw image data
