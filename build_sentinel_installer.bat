@@ -34,7 +34,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM Step 2: Build installer
 echo.
-echo [2/3] Building installer...
+echo [2/3] Building installer (UPX disabled to avoid false positives)...
 
 REM Check for Inno Setup
 set ISCC_PATH="C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
@@ -68,5 +68,14 @@ echo.
 echo Installer location:
 echo   releases\PFRSentinel_Setup.exe
 echo.
-
+echo ========================================
+echo   Next: Upload to VirusTotal
+echo ========================================
+echo.
+echo To scan for false positives and get results for GitHub:
+echo   python scripts\upload_to_virustotal.py
+echo.
+echo Requires free API key from: https://www.virustotal.com/gui/join-us
+echo Set via: set VIRUSTOTAL_API_KEY=your_key_here
+echo.
 pause

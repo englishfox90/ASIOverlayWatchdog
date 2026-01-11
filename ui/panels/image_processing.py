@@ -4,17 +4,18 @@ Settings for resize, brightness, saturation, timestamp, and auto-stretch
 """
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame,
-    QSizePolicy
+    QSizePolicy, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal
 from qfluentwidgets import (
     CardWidget, SubtitleLabel, BodyLabel, CaptionLabel,
     PushButton, ComboBox, SpinBox, DoubleSpinBox, 
-    SwitchButton, FluentIcon
+    SwitchButton, FluentIcon, LineEdit
 )
 
 from ..theme.tokens import Colors, Typography, Spacing, Layout
 from ..components.cards import SettingsCard, FormRow, SwitchRow, CollapsibleCard, ClickSlider
+from services.dev_mode_config import is_dev_mode_available
 
 
 class ImageProcessingPanel(QScrollArea):
@@ -203,6 +204,36 @@ class ImageProcessingPanel(QScrollArea):
         self.preserve_blacks_switch.toggled.connect(self._on_stretch_settings_changed)
         stretch_card.add_widget(self.preserve_blacks_switch)
         
+        # Normalize channels (dark scene fix)
+        self.normalize_channels_switch = SwitchRow(
+            "Dark Scene Color Fix",
+            "Equalize R/G/B medians before stretch (fixes purple/magenta in dark images)"
+        )
+        self.normalize_channels_switch.set_checked(True)
+        self.normalize_channels_switch.toggled.connect(self._on_stretch_settings_changed)
+        stretch_card.add_widget(self.normalize_channels_switch)
+        
+        # Dark scene threshold
+        threshold_row = QHBoxLayout()
+        threshold_row.setSpacing(Spacing.md)
+        
+        self.dark_threshold_slider = ClickSlider(Qt.Horizontal)
+        self.dark_threshold_slider.setRange(1, 15)  # 0.01 to 0.15 scaled by 100
+        self.dark_threshold_slider.setValue(5)  # 0.05 default
+        self.dark_threshold_slider.setToolTip("Dark scene threshold: 0.05")
+        self.dark_threshold_slider.valueChanged.connect(self._on_stretch_settings_changed)
+        self.dark_threshold_slider.valueChanged.connect(lambda v: self.dark_threshold_slider.setToolTip(f"Dark scene threshold: {v/100.0:.2f}"))
+        threshold_row.addWidget(self.dark_threshold_slider, 1)
+        
+        self.dark_threshold_label = BodyLabel("0.05")
+        self.dark_threshold_label.setFixedWidth(50)
+        self.dark_threshold_label.setStyleSheet(f"color: {Colors.text_primary};")
+        threshold_row.addWidget(self.dark_threshold_label)
+        
+        threshold_widget = QWidget()
+        threshold_widget.setLayout(threshold_row)
+        stretch_card.add_row("Dark Threshold", threshold_widget, "Median below this enables color fix")
+        
         # Shadow aggressiveness
         shadow_row = QHBoxLayout()
         shadow_row.setSpacing(Spacing.md)
@@ -246,6 +277,104 @@ class ImageProcessingPanel(QScrollArea):
         stretch_card.add_row("Saturation Boost", boost_widget, "Post-stretch saturation enhancement")
         
         layout.addWidget(stretch_card)
+        
+        # === ML MODELS (Beta) ===
+        ml_card = CollapsibleCard("ML Models (Beta)", FluentIcon.IOT)
+        
+        self.ml_enabled_switch = SwitchRow(
+            "Enable ML Analysis",
+            "Use machine learning to analyze observatory conditions"
+        )
+        self.ml_enabled_switch.toggled.connect(self._on_ml_enabled_changed)
+        ml_card.add_widget(self.ml_enabled_switch)
+        
+        # Info about what ML models do
+        ml_info = CaptionLabel(
+            "🔭 Roof Classifier: Detects if observatory roof is open or closed\n"
+            "🌤️ Sky Classifier: Identifies sky conditions (Clear, Cloudy, etc.) when roof is open\n\n"
+            "New overlay tokens available:\n"
+            "• {ROOF_STATUS} - \"Open (95%)\" or \"Closed (98%)\"\n"
+            "• {SKY_CONDITION} - \"Clear (87%)\" or \"Partly Cloudy (72%)\"\n"
+            "• {STARS_VISIBLE} - \"Yes\" or \"No\"\n"
+            "• {STAR_DENSITY} - \"High (0.85)\" or \"Low (0.12)\""
+        )
+        ml_info.setStyleSheet(f"color: {Colors.text_secondary}; padding: 8px;")
+        ml_info.setWordWrap(True)
+        ml_card.add_widget(ml_info)
+        
+        # ML status label
+        self.ml_status_label = CaptionLabel("Status: Not initialized")
+        self.ml_status_label.setStyleSheet(f"color: {Colors.text_muted}; padding: 8px;")
+        ml_card.add_widget(self.ml_status_label)
+        
+        # ASCOM Safety Monitor file output
+        self.ascom_safety_switch = SwitchRow(
+            "ASCOM Safety File",
+            "Write roof status to file for NINA GenericFile safety monitor"
+        )
+        self.ascom_safety_switch.toggled.connect(self._on_ascom_safety_changed)
+        ml_card.add_widget(self.ascom_safety_switch)
+        
+        # File path input
+        ascom_path_row = QHBoxLayout()
+        ascom_path_row.setSpacing(Spacing.sm)
+        
+        self.ascom_file_path = LineEdit()
+        self.ascom_file_path.setPlaceholderText("%LOCALAPPDATA%\\PFRSentinel\\RoofStatusFile.txt")
+        self.ascom_file_path.editingFinished.connect(self._on_ascom_path_changed)
+        ascom_path_row.addWidget(self.ascom_file_path, 1)
+        
+        self.ascom_browse_btn = PushButton("Browse")
+        self.ascom_browse_btn.setFixedWidth(70)
+        self.ascom_browse_btn.clicked.connect(self._browse_ascom_path)
+        ascom_path_row.addWidget(self.ascom_browse_btn)
+        
+        ascom_path_widget = QWidget()
+        ascom_path_widget.setLayout(ascom_path_row)
+        ml_card.add_row("File Path", ascom_path_widget, "Path where NINA monitors for status")
+        
+        # ASCOM info
+        ascom_info = CaptionLabel(
+            "Configure NINA GenericFile with:\n"
+            "• Preamble: \"Roof Status:\"\n"
+            "• Safe trigger: \"OPEN\"\n"
+            "• Unsafe trigger: \"CLOSED\""
+        )
+        ascom_info.setStyleSheet(f"color: {Colors.text_muted}; padding: 8px;")
+        ascom_info.setWordWrap(True)
+        ml_card.add_widget(ascom_info)
+        
+        layout.addWidget(ml_card)
+        
+        # === DEV MODE === (Only show in development builds)
+        if is_dev_mode_available():
+            dev_card = CollapsibleCard("Developer Mode", FluentIcon.DEVELOPER_TOOLS)
+            
+            self.dev_mode_switch = SwitchRow(
+                "Enable Dev Mode",
+                "Save raw images to raw_debug folder for troubleshooting"
+            )
+            self.dev_mode_switch.toggled.connect(self._on_dev_mode_changed)
+            dev_card.add_widget(self.dev_mode_switch)
+            
+            self.dev_stats_switch = SwitchRow(
+                "Log Channel Statistics",
+                "Log detailed per-channel histogram stats (R, G, B medians, MAD, etc.)"
+            )
+            self.dev_stats_switch.set_checked(True)
+            self.dev_stats_switch.toggled.connect(self._on_dev_stats_changed)
+            dev_card.add_widget(self.dev_stats_switch)
+            
+            # Info label
+            dev_info = CaptionLabel(
+                "When enabled, raw images are saved before any processing (stretch, overlays). "
+                "Check logs for per-channel statistics to diagnose color balance issues."
+            )
+            dev_info.setStyleSheet(f"color: {Colors.text_secondary}; padding: 8px;")
+            dev_info.setWordWrap(True)
+            dev_card.add_widget(dev_info)
+            
+            layout.addWidget(dev_card)
         
         layout.addStretch()
     
@@ -305,6 +434,7 @@ class ImageProcessingPanel(QScrollArea):
         self.target_median_label.setText(f"{self.target_median_slider.value() / 100:.2f}")
         self.shadow_label.setText(f"{self.shadow_slider.value() / 10:.1f}")
         self.sat_boost_label.setText(f"{self.sat_boost_slider.value() / 10:.1f}x")
+        self.dark_threshold_label.setText(f"{self.dark_threshold_slider.value() / 100:.2f}")
         
         if self._loading_config:
             return
@@ -313,11 +443,127 @@ class ImageProcessingPanel(QScrollArea):
             stretch['target_median'] = self.target_median_slider.value() / 100
             stretch['linked_stretch'] = self.linked_stretch_switch.is_checked()
             stretch['preserve_blacks'] = self.preserve_blacks_switch.is_checked()
+            stretch['normalize_channels'] = self.normalize_channels_switch.is_checked()
+            stretch['dark_scene_threshold'] = self.dark_threshold_slider.value() / 100
             stretch['shadow_aggressiveness'] = self.shadow_slider.value() / 10
             stretch['saturation_boost'] = self.sat_boost_slider.value() / 10
             self.main_window.config.set('auto_stretch', stretch)
             self.settings_changed.emit()
     
+    def _on_dev_mode_changed(self, checked):
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            dev_mode = self.main_window.config.get('dev_mode', {})
+            dev_mode['enabled'] = checked
+            self.main_window.config.set('dev_mode', dev_mode)
+            self.main_window.config.save()  # CRITICAL: Save immediately so setting persists
+            self.settings_changed.emit()
+            from services.logger import app_logger
+            app_logger.info(f"Dev Mode {'enabled' if checked else 'disabled'}: raw images will {'be saved to raw_debug/' if checked else 'not be saved'}")
+    
+    def _on_dev_stats_changed(self, checked):
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            dev_mode = self.main_window.config.get('dev_mode', {})
+            dev_mode['save_histogram_stats'] = checked
+            self.main_window.config.set('dev_mode', dev_mode)
+            self.settings_changed.emit()
+    
+    def _on_ml_enabled_changed(self, checked):
+        """Handle ML Models enable/disable toggle"""
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            ml_config = self.main_window.config.get('ml_models', {})
+            ml_config['enabled'] = checked
+            self.main_window.config.set('ml_models', ml_config)
+            self.main_window.config.save()
+            self.settings_changed.emit()
+            
+            from services.logger import app_logger
+            if checked:
+                app_logger.info("ML Models enabled - initializing classifiers...")
+                self._initialize_ml_service()
+            else:
+                app_logger.info("ML Models disabled")
+                self.ml_status_label.setText("Status: Disabled")
+    
+    def _initialize_ml_service(self):
+        """Initialize ML service and update status label"""
+        try:
+            from services.ml_service import get_ml_service
+            ml = get_ml_service()
+            ml.initialize()
+            
+            status = ml.get_status()
+            roof_ok = status['roof_classifier']['available']
+            sky_ok = status['sky_classifier']['available']
+            
+            if roof_ok and sky_ok:
+                self.ml_status_label.setText("Status: ✓ Both models loaded")
+                self.ml_status_label.setStyleSheet(f"color: #4ade80; padding: 8px;")  # Green
+            elif roof_ok:
+                self.ml_status_label.setText("Status: ✓ Roof model only")
+                self.ml_status_label.setStyleSheet(f"color: #facc15; padding: 8px;")  # Yellow
+            elif sky_ok:
+                self.ml_status_label.setText("Status: ✓ Sky model only")
+                self.ml_status_label.setStyleSheet(f"color: #facc15; padding: 8px;")  # Yellow
+            else:
+                roof_err = status['roof_classifier'].get('error', 'Unknown')
+                self.ml_status_label.setText(f"Status: ✗ No models available ({roof_err})")
+                self.ml_status_label.setStyleSheet(f"color: #f87171; padding: 8px;")  # Red
+                
+        except Exception as e:
+            self.ml_status_label.setText(f"Status: ✗ Error: {str(e)[:50]}")
+            self.ml_status_label.setStyleSheet(f"color: #f87171; padding: 8px;")
+    
+    def _on_ascom_safety_changed(self, checked):
+        """Handle ASCOM Safety file toggle"""
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            ml_config = self.main_window.config.get('ml_models', {})
+            ascom_config = ml_config.get('ascom_safety_file', {})
+            ascom_config['enabled'] = checked
+            ml_config['ascom_safety_file'] = ascom_config
+            self.main_window.config.set('ml_models', ml_config)
+            self.main_window.config.save()
+            self.settings_changed.emit()
+            
+            from services.logger import app_logger
+            if checked:
+                path = ascom_config.get('file_path', '')
+                app_logger.info(f"ASCOM Safety file output enabled: {path or '(no path set)'}")
+            else:
+                app_logger.info("ASCOM Safety file output disabled")
+    
+    def _on_ascom_path_changed(self):
+        """Handle ASCOM file path change"""
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            ml_config = self.main_window.config.get('ml_models', {})
+            ascom_config = ml_config.get('ascom_safety_file', {})
+            ascom_config['file_path'] = self.ascom_file_path.text().strip()
+            ml_config['ascom_safety_file'] = ascom_config
+            self.main_window.config.set('ml_models', ml_config)
+            self.main_window.config.save()
+            self.settings_changed.emit()
+    
+    def _browse_ascom_path(self):
+        """Browse for ASCOM safety file location"""
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Select ASCOM Safety File Location",
+            self.ascom_file_path.text() or "",
+            "Text Files (*.txt);;All Files (*.*)"
+        )
+        if path:
+            self.ascom_file_path.setText(path)
+            self._on_ascom_path_changed()
+
     # === CONFIG LOADING ===
     
     def load_from_config(self, config):
@@ -354,6 +600,13 @@ class ImageProcessingPanel(QScrollArea):
             self.linked_stretch_switch.set_checked(stretch.get('linked_stretch', True))
             self.preserve_blacks_switch.set_checked(stretch.get('preserve_blacks', True))
             
+            # Dark scene color fix
+            self.normalize_channels_switch.set_checked(stretch.get('normalize_channels', True))
+            
+            dark_threshold = int(stretch.get('dark_scene_threshold', 0.05) * 100)
+            self.dark_threshold_slider.setValue(dark_threshold)
+            self.dark_threshold_label.setText(f"{dark_threshold / 100:.2f}")
+            
             shadow = int(stretch.get('shadow_aggressiveness', 2.8) * 10)
             self.shadow_slider.setValue(shadow)
             self.shadow_label.setText(f"{shadow / 10:.1f}")
@@ -361,5 +614,27 @@ class ImageProcessingPanel(QScrollArea):
             boost = int(stretch.get('saturation_boost', 1.5) * 10)
             self.sat_boost_slider.setValue(boost)
             self.sat_boost_label.setText(f"{boost / 10:.1f}x")
+            
+            # Dev mode
+            dev_mode = config.get('dev_mode', {})
+            if hasattr(self, 'dev_mode_switch'):
+                self.dev_mode_switch.set_checked(dev_mode.get('enabled', False))
+                self.dev_stats_switch.set_checked(dev_mode.get('save_histogram_stats', True))
+            
+            # ML Models
+            ml_config = config.get('ml_models', {})
+            self.ml_enabled_switch.set_checked(ml_config.get('enabled', False))
+            
+            # ASCOM Safety file settings
+            ascom_config = ml_config.get('ascom_safety_file', {})
+            self.ascom_safety_switch.set_checked(ascom_config.get('enabled', False))
+            self.ascom_file_path.setText(ascom_config.get('file_path', ''))
+            
+            # Initialize ML service if enabled
+            if ml_config.get('enabled', False):
+                self._initialize_ml_service()
+            else:
+                self.ml_status_label.setText("Status: Disabled")
+                self.ml_status_label.setStyleSheet(f"color: {Colors.text_muted}; padding: 8px;")
         finally:
             self._loading_config = False

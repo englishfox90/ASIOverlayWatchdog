@@ -55,10 +55,8 @@ installer/dist/
 installer/Output/
 *.exe
 *.msi
-# EXCEPT: Allow release installers in releases/ folder
-!releases/*.exe
-!releases/*.msi
-!releases/*.zip
+# Releases - use GitHub Releases for distribution instead
+releases/
 
 # Local DLLs (user-specific paths)
 # Keep ASICamera2.dll in source for bundling
@@ -68,6 +66,10 @@ installer/Output/
 output/
 watch_dir_test/
 test_output/
+stretch_tuner_out/
+noise_models/
+colorize_out/
+stacked_out/
 
 # Temporary Files
 *.tmp

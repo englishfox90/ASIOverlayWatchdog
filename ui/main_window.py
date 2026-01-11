@@ -245,6 +245,9 @@ class MainWindow(QMainWindow):
         self.overlay_panel.settings_changed.connect(self._on_settings_changed)
         self.settings_panel.settings_changed.connect(self._on_settings_changed)
         
+        # RAW16 mode toggle - update camera on the fly if capturing
+        self.capture_panel.raw16_mode_changed.connect(self._on_raw16_mode_changed)
+        
         # Settings panel actions
         self.settings_panel.test_discord_requested.connect(self._on_test_discord)
         
@@ -594,7 +597,8 @@ class MainWindow(QMainWindow):
             if not discord_config.get('enabled', False):
                 return
             
-            if not discord_config.get('error_enabled', True):
+            # Check post_errors setting (config key is 'post_errors', not 'error_enabled')
+            if not discord_config.get('post_errors', False):
                 return
             
             from services.discord_alerts import DiscordAlerts
@@ -605,6 +609,18 @@ class MainWindow(QMainWindow):
                 app_logger.debug("Discord error notification sent")
         except Exception as e:
             app_logger.error(f"Failed to send Discord error notification: {e}")
+    
+    def _on_camera_error(self, error_msg: str):
+        """Handle camera error signal - update UI and send Discord notification"""
+        app_logger.error(f"Camera error received: {error_msg}")
+        
+        # Update UI status
+        if hasattr(self, 'app_bar') and self.app_bar:
+            self.app_bar.camera_chip.set_status('error')
+            self.app_bar.camera_chip.set_label('Camera Error')
+        
+        # Send Discord notification
+        self._send_discord_error(f"Camera Error: {error_msg}")
     
     def _send_discord_shutdown(self):
         """Send Discord shutdown notification if enabled"""
@@ -691,6 +707,9 @@ class MainWindow(QMainWindow):
             
             if mode == 'camera' and self.camera_controller:
                 self.camera_controller.stop_capture()
+                # Reset camera capabilities in capture settings panel
+                if hasattr(self, 'capture_panel'):
+                    self.capture_panel.reset_camera_capabilities()
             elif self.watch_controller:
                 self.watch_controller.stop_watching()
             
@@ -717,6 +736,8 @@ class MainWindow(QMainWindow):
             self.camera_controller = CameraControllerQt(self)
             # Connect calibration signal
             self.camera_controller.calibration_status.connect(self.on_calibration_status)
+            # Connect error signal to send Discord alerts
+            self.camera_controller.error.connect(self._on_camera_error)
         
         self.camera_controller.start_capture()
         
@@ -726,6 +747,15 @@ class MainWindow(QMainWindow):
             self.app_bar.camera_chip.set_status('connected')
             self.app_bar.camera_chip.set_label('Connected')
             app_logger.info("Camera capture started")
+            
+            # Update capture settings panel with camera capabilities (RAW16 support)
+            if self.camera_controller.zwo_camera and hasattr(self, 'capture_panel'):
+                try:
+                    supports_raw16 = self.camera_controller.zwo_camera.supports_raw16
+                    bit_depth = self.camera_controller.zwo_camera.sensor_bit_depth
+                    self.capture_panel.update_camera_capabilities(supports_raw16, bit_depth)
+                except Exception as e:
+                    app_logger.debug(f"Could not update camera capabilities: {e}")
         else:
             # Connection failed - camera_controller already logged the error
             self.app_bar.camera_chip.set_status('error')
@@ -791,10 +821,31 @@ class MainWindow(QMainWindow):
         # Re-init weather service in case weather config changed
         self._init_weather_service()
         
+        # Update ML display in live panel if ML settings changed
+        ml_config = self.config.get('ml_models', {})
+        ml_enabled = ml_config.get('enabled', False) and ml_config.get('show_in_preview', True)
+        self.live_panel.metadata.set_ml_enabled(ml_enabled)
+        
         # Update status chips based on new settings
         self._update_service_status()
         
         self.config_changed.emit()
+    
+    def _on_raw16_mode_changed(self, enabled: bool):
+        """Handle RAW16 mode toggle from capture settings panel"""
+        if not self.camera_controller or not self.camera_controller.is_capturing:
+            # Not capturing - setting will apply on next capture start
+            return
+        
+        # Camera is capturing - apply change immediately
+        if self.camera_controller.zwo_camera:
+            success = self.camera_controller.zwo_camera.set_raw16_mode(enabled)
+            if not success:
+                # Revert toggle if mode change failed
+                if hasattr(self, 'capture_panel'):
+                    self.capture_panel._loading_config = True
+                    self.capture_panel.raw16_switch.set_checked(not enabled)
+                    self.capture_panel._loading_config = False
     
     def save_config(self):
         """Save current configuration"""
@@ -816,6 +867,11 @@ class MainWindow(QMainWindow):
             self.processing_panel.load_from_config(self.config)
             self.overlay_panel.load_from_config(self.config)
             self.settings_panel.load_from_config(self.config)
+            
+            # Update ML display in live panel based on config
+            ml_config = self.config.get('ml_models', {})
+            ml_enabled = ml_config.get('enabled', False) and ml_config.get('show_in_preview', True)
+            self.live_panel.metadata.set_ml_enabled(ml_enabled)
             
             # Update status chips based on config
             self._update_service_status()

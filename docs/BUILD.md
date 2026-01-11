@@ -311,18 +311,22 @@ Edit `ASIOverlayWatchDog.spec` to:
 ## Release Checklist
 
 - [ ] Update `version.py` with new version number
+- [ ] **Disable dev mode** in `services\dev_mode_config.py` (set `DEV_MODE_AVAILABLE = False`)
 - [ ] Update `installer\ASIOverlayWatchDog.iss` version
 - [ ] Test application from source (`python main.py`)
 - [ ] Build executable (`build_exe.bat`)
 - [ ] Test executable (`dist\ASIOverlayWatchDog\ASIOverlayWatchDog.exe`)
+- [ ] **Verify dev mode disabled** (no raw_debug files created, no Developer Mode UI section)
 - [ ] Build installer (`build_installer.bat`)
+- [ ] **Upload to VirusTotal** (`python scripts\upload_to_virustotal.py`) - [See guide](VIRUSTOTAL_SCANNING.md)
 - [ ] Test fresh install on clean system
 - [ ] Test upgrade from previous version
 - [ ] Verify logs rotation working
 - [ ] Verify uninstall doesn't remove logs
-- [ ] Create release notes
+- [ ] Create release notes (include VirusTotal scan link)
 - [ ] Tag git commit with version number
 - [ ] Upload installer to distribution location
+- [ ] **Re-enable dev mode** in `services\dev_mode_config.py` for continued development
 
 ## File Size Expectations
 

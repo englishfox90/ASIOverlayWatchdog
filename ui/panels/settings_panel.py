@@ -298,7 +298,7 @@ class SettingsPanel(QScrollArea):
             discord['enabled'] = self.discord_enabled_switch.isChecked()
             discord['webhook_url'] = self.webhook_input.text()
             discord['post_startup_shutdown'] = self.discord_startup_switch.isChecked()
-            discord['error_enabled'] = self.discord_error_switch.isChecked()
+            discord['post_errors'] = self.discord_error_switch.isChecked()
             discord['periodic_enabled'] = self.discord_periodic_switch.isChecked()
             discord['periodic_interval_minutes'] = self.periodic_interval_spin.value()
             self.main_window.config.set('discord', discord)
@@ -387,7 +387,7 @@ class SettingsPanel(QScrollArea):
             self.discord_enabled_switch.setChecked(discord.get('enabled', False))
             self.webhook_input.setText(discord.get('webhook_url', ''))
             self.discord_startup_switch.setChecked(discord.get('post_startup_shutdown', True))
-            self.discord_error_switch.setChecked(discord.get('error_enabled', True))
+            self.discord_error_switch.setChecked(discord.get('post_errors', False))
             self.discord_periodic_switch.setChecked(discord.get('periodic_enabled', False))
             self.periodic_interval_spin.setValue(discord.get('periodic_interval_minutes', 15))
             

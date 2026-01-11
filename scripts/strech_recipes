@@ -1,0 +1,20 @@
+-- Roof Closed Night
+
+--black_pct 5 --white_pct 99.9 --asinh 30 --gamma 1.05
+--color_strength 1.20 --chroma_clip 0.55
+--blue_suppress 0.92 --blue_floor 0.020 --desaturate 0.05
+--corner_roi 50 --corner_margin 5
+--corner_sigma_bp 1.0
+--hp_dab 1 --hp_k 11 --hp_max_luma 0.25
+--shadow_denoise 0.25 --shadow_start 0.02 --shadow_end 0.14
+--chroma_blur 1
+
+-- Roof Closed Day
+
+--black_pct 1 --white_pct 99.7 --asinh 12 --gamma 1.10 `
+--color_strength 1.55 --chroma_clip 0.85 --blue_suppress 0.45 --blue_floor 0.02 --desaturate 0.00 `
+--corner_roi 50 --corner_margin 5 `
+--corner_sigma_bp 0 `
+--hp_dab 0 `
+--shadow_denoise 0 `
+--chroma_blur 0 `

@@ -31,6 +31,7 @@ class CaptureSettingsPanel(QScrollArea):
     
     settings_changed = Signal()
     detect_cameras_clicked = Signal()
+    raw16_mode_changed = Signal(bool)  # Emitted when user toggles RAW16 mode
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -428,6 +429,20 @@ class CaptureSettingsPanel(QScrollArea):
         self.bayer_combo.currentIndexChanged.connect(self._on_bayer_changed)
         advanced_card.add_row("Bayer Pattern", self.bayer_combo, "BGGR for most ASI cameras")
         
+        # RAW16 mode toggle (requires camera support)
+        self.raw16_switch = SwitchRow(
+            "Use RAW16 Mode",
+            "Capture full sensor bit depth (12-14 bit) instead of RAW8"
+        )
+        self.raw16_switch.toggled.connect(self._on_raw16_changed)
+        self.raw16_switch.setEnabled(False)  # Disabled until camera connected
+        advanced_card.add_widget(self.raw16_switch)
+        
+        # RAW16 status label
+        self.raw16_status = CaptionLabel("Connect camera to check RAW16 support")
+        self.raw16_status.setStyleSheet(f"color: {Colors.text_secondary}; padding: 4px 8px;")
+        advanced_card.add_widget(self.raw16_status)
+        
         layout.addWidget(advanced_card)
         
         layout.addStretch()
@@ -594,6 +609,61 @@ class CaptureSettingsPanel(QScrollArea):
         if self.main_window and hasattr(self.main_window, 'config'):
             self._save_to_camera_profile(bayer_pattern=patterns[index])
             self.settings_changed.emit()
+    
+    def _on_raw16_changed(self, checked):
+        """Handle RAW16 mode toggle"""
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            dev_mode = self.main_window.config.get('dev_mode', {})
+            dev_mode['use_raw16'] = checked
+            self.main_window.config.set('dev_mode', dev_mode)
+            self.main_window.config.save()
+            self.settings_changed.emit()
+            
+            # Emit signal to update camera if capturing
+            self.raw16_mode_changed.emit(checked)
+            
+            from services.logger import app_logger
+            app_logger.info(f"RAW16 mode {'enabled' if checked else 'disabled'}: {'Full' if checked else 'Standard 8-bit'} sensor bit depth will be used")
+    
+    def update_camera_capabilities(self, supports_raw16: bool, bit_depth: int):
+        """
+        Update RAW16 toggle based on connected camera's capabilities.
+        Called by main_window when camera connects.
+        
+        Args:
+            supports_raw16: Whether camera supports RAW16 mode
+            bit_depth: Camera's native ADC bit depth (e.g., 12)
+        """
+        self._loading_config = True
+        try:
+            if supports_raw16:
+                self.raw16_switch.setEnabled(True)
+                self.raw16_status.setText(f"✓ Camera supports RAW16 ({bit_depth}-bit ADC)")
+                self.raw16_status.setStyleSheet(f"color: {Colors.success_text}; padding: 4px 8px;")
+                # Restore saved preference
+                if self.main_window and hasattr(self.main_window, 'config'):
+                    dev_mode = self.main_window.config.get('dev_mode', {})
+                    self.raw16_switch.set_checked(dev_mode.get('use_raw16', False))
+            else:
+                self.raw16_switch.setEnabled(False)
+                self.raw16_switch.set_checked(False)
+                self.raw16_status.setText(f"✗ Camera does not support RAW16 ({bit_depth}-bit ADC, RAW8 only)")
+                self.raw16_status.setStyleSheet(f"color: {Colors.text_secondary}; padding: 4px 8px;")
+        finally:
+            self._loading_config = False
+    
+    def reset_camera_capabilities(self):
+        """Reset RAW16 toggle when camera disconnects"""
+        self._loading_config = True
+        try:
+            self.raw16_switch.setEnabled(False)
+            self.raw16_switch.set_checked(False)
+            self.raw16_status.setText("Connect camera to check RAW16 support")
+            self.raw16_status.setStyleSheet(f"color: {Colors.text_secondary}; padding: 4px 8px;")
+        finally:
+            self._loading_config = False
     
     def _on_schedule_enabled_changed(self, checked):
         # Show/hide conditional settings

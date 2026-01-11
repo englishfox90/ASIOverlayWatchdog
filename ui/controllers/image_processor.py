@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from services.logger import app_logger
 from services.processor import add_overlays, auto_stretch_image
+from services.ml_service import get_ml_service, analyze_image_for_tokens
+from .dev_mode_utils import dev_mode_saver
 
 
 class ImageProcessingTask:
@@ -107,6 +109,10 @@ class ImageProcessorWorker(QThread):
             filename_pattern = config.get('filename_pattern', '{filename}')
             overlays = config.get('overlays', [])
             auto_stretch_config = config.get('auto_stretch', {})
+            dev_mode_config = config.get('dev_mode', {})
+            
+            # DEBUG: Log dev mode status
+            app_logger.debug(f"Dev mode config: enabled={dev_mode_config.get('enabled', False)}, save_stats={dev_mode_config.get('save_histogram_stats', True)}")
             
             if not output_dir:
                 app_logger.error("Output directory not configured")
@@ -116,7 +122,16 @@ class ImageProcessorWorker(QThread):
             os.makedirs(output_dir, exist_ok=True)
             
             # Calculate RAW histogram before processing
-            raw_array = np.asarray(img)
+            # For dev mode: prefer 16-bit raw if available, then 8-bit no-WB, then image
+            raw_array = metadata.get('RAW_RGB_16BIT')  # Full 16-bit if RAW16 mode
+            if raw_array is None:
+                raw_array = metadata.get('RAW_RGB_NO_WB')  # 8-bit pre-WB fallback
+            if raw_array is None:
+                raw_array = np.asarray(img)  # Final fallback for watch mode
+            
+            # === DEV MODE: Save raw image and log detailed stats ===
+            if dev_mode_config.get('enabled', False):
+                dev_mode_saver.save_dev_mode_data(img, raw_array, output_dir, metadata, dev_mode_config)
             
             # Get auto-exposure settings for histogram display
             # Check if camera controller exists and has auto_exposure enabled
@@ -130,24 +145,42 @@ class ImageProcessorWorker(QThread):
                         target_brightness = self._main_window.camera_controller.zwo_camera.target_brightness
                         app_logger.debug(f"Histogram config from camera: auto_exposure={zwo_auto_exposure}, target={target_brightness}")
             
+            # Calculate histogram - use appropriate range based on bit depth
+            # 16-bit data needs to be scaled down for 256-bin histogram display
+            if raw_array.dtype == np.uint16:
+                # Scale 16-bit to 8-bit range for histogram display
+                hist_array = (raw_array / 257).astype(np.uint8)
+            else:
+                hist_array = raw_array
+            
             hist_data = {
-                'r': np.histogram(raw_array[:, :, 0], bins=256, range=(0, 256))[0],
-                'g': np.histogram(raw_array[:, :, 1], bins=256, range=(0, 256))[0],
-                'b': np.histogram(raw_array[:, :, 2], bins=256, range=(0, 256))[0],
+                'r': np.histogram(hist_array[:, :, 0], bins=256, range=(0, 256))[0],
+                'g': np.histogram(hist_array[:, :, 1], bins=256, range=(0, 256))[0],
+                'b': np.histogram(hist_array[:, :, 2], bins=256, range=(0, 256))[0],
                 'auto_exposure': zwo_auto_exposure,
                 'target_brightness': target_brightness
             }
-            del raw_array
+            del hist_array
+            # Note: We keep metadata['RAW_RGB_16BIT'] alive for auto-stretch below
             
-            # Resize if needed
+            # Resize if needed (only for 8-bit PIL image, 16-bit handled in stretch)
             if resize_percent < 100:
                 new_width = int(img.width * resize_percent / 100)
                 new_height = int(img.height * resize_percent / 100)
                 img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
             
             # Apply auto-stretch (MTF) if enabled
+            # Use 16-bit raw data when available for higher precision stretching
             if auto_stretch_config.get('enabled', False):
-                img = auto_stretch_image(img, auto_stretch_config)
+                raw_16bit = metadata.get('RAW_RGB_16BIT')  # Will be None if RAW8 mode
+                if raw_16bit is not None:
+                    # Resize 16-bit data if needed to match PIL image size
+                    if resize_percent < 100:
+                        import cv2
+                        new_height = int(raw_16bit.shape[0] * resize_percent / 100)
+                        new_width = int(raw_16bit.shape[1] * resize_percent / 100)
+                        raw_16bit = cv2.resize(raw_16bit, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+                img = auto_stretch_image(img, auto_stretch_config, raw_16bit=raw_16bit)
                 app_logger.debug("Applied auto-stretch")
             
             # Cache stretched image for preview
@@ -186,6 +219,33 @@ class ImageProcessorWorker(QThread):
                     font = ImageFont.load_default()
                 draw.text((img.width - 200, 10), timestamp_text, fill='white', font=font)
             
+            # === ML Models: Add predictions to metadata for overlay tokens ===
+            ml_config = config.get('ml_models', {})
+            if ml_config.get('enabled', False):
+                try:
+                    ml_service = get_ml_service()
+                    if not ml_service.is_available():
+                        ml_service.initialize()
+                    
+                    if ml_service.is_available():
+                        # Get ML predictions formatted for overlay tokens
+                        ml_tokens = analyze_image_for_tokens(raw_array, config=ml_config)
+                        metadata.update(ml_tokens)
+                        
+                        # Store full results for preview display
+                        ml_results = ml_service.get_last_results()
+                        metadata['_ML_RESULTS'] = ml_results
+                        
+                        app_logger.debug(f"ML predictions: roof={ml_tokens.get('ROOF_STATUS')}, sky={ml_tokens.get('SKY_CONDITION')}")
+                        
+                        # Write ASCOM Safety Monitor file if enabled
+                        ascom_config = ml_config.get('ascom_safety_file', {})
+                        if ascom_config.get('enabled', False):
+                            from services.ascom_safety import write_ascom_safety_file
+                            write_ascom_safety_file(ml_results, ascom_config)
+                except Exception as e:
+                    app_logger.debug(f"ML prediction skipped: {e}")
+            
             # Add overlays using services/processor.py function
             img = add_overlays(img, overlays, metadata, weather_service=self._weather_service)
             
@@ -206,6 +266,10 @@ class ImageProcessorWorker(QThread):
                 img.save(output_path, 'JPEG', quality=jpg_quality)
             
             app_logger.info(f"Saved: {os.path.basename(output_path)}")
+            
+            # Clean up large arrays from metadata before emitting (avoid memory leaks)
+            metadata.pop('RAW_RGB_16BIT', None)
+            metadata.pop('RAW_RGB_NO_WB', None)
             
             # Emit preview signal with stretched image and histogram
             self.preview_ready.emit(stretched_for_preview, hist_data)
@@ -330,6 +394,8 @@ class ImageProcessor(QObject):
             'filename_pattern': mw.config.get('filename_pattern', '{filename}'),
             'auto_stretch': auto_stretch,
             'overlays': mw.config.get('overlays', []),
+            'dev_mode': mw.config.get('dev_mode', {'enabled': False, 'raw_folder': 'raw_debug', 'save_histogram_stats': True}),
+            'ml_models': mw.config.get('ml_models', {'enabled': False}),
         }
         
         return config

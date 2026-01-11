@@ -42,6 +42,15 @@ class CameraConnection:
         self.camera_name: Optional[str] = None
         self.camera_index: int = 0
         
+        # Camera capabilities (populated on connect)
+        self.camera_info: dict = {}
+        self.supports_raw16: bool = False
+        self.bit_depth: int = 8  # Sensor ADC bit depth
+        
+        # Current capture mode
+        self.current_image_type = None  # ASI_IMG_RAW8 or ASI_IMG_RAW16
+        self.current_bit_depth: int = 8  # 8 for RAW8, 16 for RAW16
+        
         # Thread safety
         self._cleanup_lock = threading.Lock()
         
@@ -251,10 +260,17 @@ class CameraConnection:
                 self.config_callback('zwo_selected_camera_name', self.camera_name)
                 self.log(f"Saved camera name to config: {self.camera_name}")
             
+            # Store camera capabilities for later access
+            self.camera_info = camera_info
+            self.supports_raw16 = 2 in camera_info.get('SupportedVideoFormat', [0])  # ASI_IMG_RAW16 = 2
+            self.bit_depth = camera_info.get('BitDepth', 8)
+            
             self.log(f"✓ Connected to camera: {camera_info['Name']}")
             self.log(f"  Camera ID: {camera_info.get('CameraID', 'N/A')}")
             self.log(f"  Max Resolution: {camera_info['MaxWidth']}x{camera_info['MaxHeight']}")
             self.log(f"  Pixel Size: {camera_info['PixelSize']} µm")
+            self.log(f"  Sensor ADC: {self.bit_depth}-bit")
+            self.log(f"  RAW16 Support: {'Yes' if self.supports_raw16 else 'No'}")
             
             # Get controls info
             controls = self.camera.get_controls()
@@ -430,11 +446,19 @@ class CameraConnection:
             if flip in (2, 3):
                 self.camera.set_control_value(self.asi.ASI_FLIP, 2)
             
+            # Determine image type (RAW8 or RAW16)
+            use_raw16 = settings.get('use_raw16', False) and self.supports_raw16
+            image_type = self.asi.ASI_IMG_RAW16 if use_raw16 else self.asi.ASI_IMG_RAW8
+            self.current_image_type = image_type
+            self.current_bit_depth = 16 if use_raw16 else 8
+            
             # Set ROI to full frame
             self.camera.set_roi(start_x=0, start_y=0, width=camera_info['MaxWidth'], 
-                               height=camera_info['MaxHeight'], bins=1, image_type=self.asi.ASI_IMG_RAW8)
-            self.camera.set_image_type(self.asi.ASI_IMG_RAW8)
-            self.log(f"  ROI: Full frame {camera_info['MaxWidth']}x{camera_info['MaxHeight']}")
+                               height=camera_info['MaxHeight'], bins=1, image_type=image_type)
+            self.camera.set_image_type(image_type)
+            
+            mode_str = "RAW16" if use_raw16 else "RAW8"
+            self.log(f"  ROI: Full frame {camera_info['MaxWidth']}x{camera_info['MaxHeight']} ({mode_str})")
             self.log("Camera configuration applied")
             
         except Exception as e:

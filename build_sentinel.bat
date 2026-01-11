@@ -2,6 +2,8 @@
 REM Build script for PFR Sentinel executable
 REM Creates a Windows executable using PyInstaller
 REM
+REM IMPORTANT: For production releases, set DEV_MODE_AVAILABLE = False in services\dev_mode_config.py
+REM
 REM Usage:
 REM   build_sentinel.bat
 
@@ -48,6 +50,15 @@ echo ========================================
 echo.
 echo Executable location:
 echo   dist\PFRSentinel\PFRSentinel.exe
+echo.
+echo ========================================
+echo   REMINDER: Production Build Checklist
+echo ========================================
+echo.
+echo Before releasing, verify:
+echo   1. services\dev_mode_config.py has DEV_MODE_AVAILABLE = False
+echo   2. Test executable doesn't create raw_debug files
+echo   3. Test executable doesn't show Developer Mode section in UI
 echo.
 echo You can now run:
 echo   dist\PFRSentinel\PFRSentinel.exe

@@ -8,7 +8,7 @@ from .camera_utils import calculate_brightness, check_clipping
 class CameraCalibration:
     """Handles camera calibration and auto-exposure adjustments"""
     
-    def __init__(self, camera, asi, logger_callback=None):
+    def __init__(self, camera, asi, logger_callback=None, bit_depth=8):
         """
         Initialize calibration manager
         
@@ -16,16 +16,23 @@ class CameraCalibration:
             camera: ZWO camera instance
             asi: ZWO ASI SDK instance
             logger_callback: Optional callback for logging
+            bit_depth: Current capture bit depth (8 for RAW8, 16 for RAW16)
         """
         self.camera = camera
         self.asi = asi
         self.logger_callback = logger_callback
+        self.bit_depth = bit_depth  # RAW8 = 8, RAW16 = 16
         
         # Auto-exposure settings
         self.target_brightness = 30
         self.max_exposure_sec = 30.0
         self.exposure_seconds = 1.0
         self.gain = 300
+        
+        # Baseline brightness tracking for scene change detection
+        # This tracks brightness AFTER calibration completes, so we can detect
+        # actual scene changes vs just being unable to reach target
+        self.baseline_brightness = None  # Set after first frame post-calibration
         
         # Algorithm settings
         self.exposure_algorithm = 'percentile'  # 'mean', 'median', or 'percentile'
@@ -52,6 +59,9 @@ class CameraCalibration:
             True if calibration successful, False otherwise
         """
         self.log("Starting rapid calibration...")
+        
+        # Reset baseline - will be set by first frame after calibration
+        self.baseline_brightness = None
         
         # Track exposure/brightness pairs for interpolation
         calibration_history = []
@@ -90,7 +100,13 @@ class CameraCalibration:
                 height = camera_info['MaxHeight']
                 
                 # Convert to numpy array for brightness calculation
-                img_array = np.frombuffer(data, dtype=np.uint8).reshape((height, width))
+                # Use correct dtype based on RAW mode (RAW8 = uint8, RAW16 = uint16)
+                dtype = np.uint16 if self.bit_depth == 16 else np.uint8
+                img_array = np.frombuffer(data, dtype=dtype).reshape((height, width))
+                
+                # For brightness calculation, scale RAW16 to 8-bit range
+                if self.bit_depth == 16:
+                    img_array = (img_array / 256).astype(np.uint8)
                 
                 # Calculate brightness
                 brightness = calculate_brightness(
@@ -187,6 +203,9 @@ class CameraCalibration:
                     # Check if we want to go higher but are at max
                     if new_exposure > self.max_exposure_sec and brightness < self.target_brightness:
                         self.log(f"  Reached maximum exposure limit ({self.max_exposure_sec*1000:.0f}ms)")
+                        # Actually SET the exposure to max before completing
+                        self.exposure_seconds = self.max_exposure_sec
+                        self.camera.set_control_value(self.asi.ASI_EXPOSURE, int(self.max_exposure_sec * 1000000))
                         self.log(f"Calibration complete at max exposure. Brightness: {brightness:.1f} (target was {self.target_brightness})")
                         return True
                     
@@ -211,7 +230,19 @@ class CameraCalibration:
         
         Args:
             img_array: Image as numpy array
+            
+        Returns:
+            dict with:
+                - 'needs_recalibration': True if drastic change detected and recalibration needed
+                - 'brightness': Current brightness value
+                - 'clipping_percent': Percentage of clipped pixels (if clipping)
         """
+        result = {
+            'needs_recalibration': False,
+            'brightness': 0,
+            'clipping_percent': 0
+        }
+        
         try:
             # Calculate brightness using selected algorithm
             brightness = calculate_brightness(
@@ -219,9 +250,11 @@ class CameraCalibration:
                 self.exposure_algorithm, 
                 self.exposure_percentile
             )
+            result['brightness'] = brightness
             
             # Check for clipping
             clipped_percent, is_clipping = check_clipping(img_array, self.clipping_threshold)
+            result['clipping_percent'] = clipped_percent
             
             # Calculate how far off target we are
             deviation_percent = abs(brightness - self.target_brightness) / self.target_brightness
@@ -229,6 +262,56 @@ class CameraCalibration:
             # Calculate acceptable range (±20% of target)
             lower_bound = self.target_brightness * 0.8
             upper_bound = self.target_brightness * 1.2
+            
+            # DRASTIC CHANGE DETECTION
+            # Compare against BASELINE brightness (post-calibration), not target
+            # This prevents false recalibration when we simply can't reach target (e.g., dark sky at max exposure)
+            
+            # If no baseline yet, use first measurement as baseline
+            if self.baseline_brightness is None:
+                self.baseline_brightness = brightness
+                self.log(f"Auto-exposure: setting baseline brightness to {brightness:.1f}")
+            
+            # Calculate change from baseline (what we actually achieved after calibration)
+            baseline_ratio = brightness / self.baseline_brightness if self.baseline_brightness > 0 else 1.0
+            
+            # Trigger recalibration if brightness changed >2x or <0.5x from baseline
+            # This detects actual scene changes (lights on/off, clouds, sunrise/sunset)
+            drastic_brighter = baseline_ratio > 2.0  # Scene got 2x brighter than baseline
+            drastic_darker = baseline_ratio < 0.5    # Scene got 2x darker than baseline
+            heavy_clipping = clipped_percent > 50.0  # Sudden saturation (bright light turned on)
+            
+            # Also trigger if we can now potentially improve from a dark baseline
+            # (e.g., were at max exposure in dark, now scene is brighter and we could reduce exposure)
+            can_improve_from_dark = (
+                self.baseline_brightness < self.target_brightness * 0.5 and  # Baseline was dark
+                brightness > self.baseline_brightness * 1.5 and  # Current is 50%+ brighter
+                self.exposure_seconds >= self.max_exposure_sec * 0.8  # We're at/near max exposure
+            )
+            
+            drastic_change = drastic_brighter or drastic_darker or heavy_clipping or can_improve_from_dark
+            
+            if drastic_change:
+                reason = []
+                if drastic_brighter:
+                    reason.append(f"brightness {baseline_ratio:.1f}x baseline")
+                if drastic_darker:
+                    reason.append(f"brightness dropped to {baseline_ratio:.1%} of baseline")
+                if heavy_clipping:
+                    reason.append(f"{clipped_percent:.1f}% clipping")
+                if can_improve_from_dark:
+                    reason.append(f"scene brightened from dark baseline ({self.baseline_brightness:.1f} -> {brightness:.1f})")
+                    
+                self.log(f"⚠ DRASTIC brightness change detected: {', '.join(reason)}")
+                self.log(f"  baseline={self.baseline_brightness:.1f}, current={brightness:.1f}, triggering recalibration")
+                result['needs_recalibration'] = True
+                # Reset baseline so new calibration establishes new baseline
+                self.baseline_brightness = None
+                return result
+            
+            # Update baseline with smoothed value to adapt to gradual changes (sunrise/sunset)
+            # Use exponential moving average: 95% old + 5% new
+            self.baseline_brightness = 0.95 * self.baseline_brightness + 0.05 * brightness
             
             # Determine if we need aggressive or conservative adjustment
             # If brightness is >50% off target, use aggressive adjustment (like calibration)
@@ -240,7 +323,7 @@ class CameraCalibration:
                 # But respect clipping prevention
                 if self.clipping_prevention and is_clipping:
                     self.log(f"Image dark but clipping detected ({clipped_percent:.1f}%) - not increasing exposure")
-                    return
+                    return result
                 
                 if needs_aggressive_adjustment:
                     # Significant deviation - use aggressive adjustment
@@ -307,8 +390,11 @@ class CameraCalibration:
                 # Within acceptable range - no adjustment needed
                 self.log(f"Auto-exposure: maintaining {self.exposure_seconds*1000:.2f}ms (brightness={brightness:.1f} within target range)")
             
+            return result
+            
         except Exception as e:
             self.log(f"Error adjusting exposure: {e}")
+            return result
     
     def update_settings(self, exposure_seconds=None, gain=None, target_brightness=None,
                        max_exposure_sec=None, algorithm=None, percentile=None,

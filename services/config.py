@@ -109,7 +109,42 @@ DEFAULT_CONFIG = {
         "preserve_blacks": True,  # Keep true blacks dark instead of lifting to grey
         "black_point": 0.0,  # Manual black point (0.0-0.1) - pixels below this stay black
         "shadow_aggressiveness": 2.8,  # MAD multiplier for shadow clipping (1.5=aggressive, 2.8=standard, 4.0=gentle)
-        "saturation_boost": 1.5  # Post-stretch saturation boost (1.0=none, 1.5=moderate, 2.0=strong)
+        "saturation_boost": 1.5,  # Post-stretch saturation boost (1.0=none, 1.5=moderate, 2.0=strong)
+        "normalize_channels": True,  # Equalize R/G/B medians before stretch (fixes color cast in dark scenes)
+        "dark_scene_threshold": 0.05  # Median below this triggers dark scene mode (0.0-0.2)
+    },
+    
+    # ML Models (Beta) - Observatory condition classification
+    # These models analyze images to detect roof state and sky conditions
+    "ml_models": {
+        "enabled": False,  # Enable ML-based image analysis (Beta)
+        "roof_classifier": True,  # Predict roof open/closed state
+        "sky_classifier": True,   # Predict sky condition (Clear/Cloudy/etc) when roof is open
+        "show_in_preview": True,  # Display predictions in live monitoring metadata
+        # ASCOM Safety Monitor file output (for NINA integration)
+        "ascom_safety_file": {
+            "enabled": False,  # Write roof status to file for NINA GenericFile safety monitor
+            "file_path": os.path.join(os.getenv('LOCALAPPDATA'), APP_DATA_FOLDER, 'RoofStatusFile.txt'),  # Default to AppData
+            "preamble": "Roof Status:",  # Text before the status value
+            "open_trigger": "OPEN",  # Value when roof is open (Safe in NINA)
+            "closed_trigger": "CLOSED",  # Value when roof is closed (Unsafe in NINA)
+            "include_confidence": True,  # Include confidence % in file
+            "include_sky_condition": True,  # Include sky condition on separate line
+            "min_confidence": 0.7,  # Only write if confidence >= this threshold
+        },
+    },
+    
+    # Developer Mode settings - for troubleshooting raw image data
+    "dev_mode": {
+        "enabled": False,  # Save raw images before any processing
+        "raw_folder": "raw_debug",  # Subfolder name for raw images (relative to output_directory)
+        "save_histogram_stats": True,  # Log detailed per-channel statistics
+        "use_raw16": False,  # Use RAW16 mode for full bit depth (requires camera support)
+        "ml_predictions": {
+            "enabled": True,  # Run ML model predictions on each capture (for dev JSON)
+            "roof_classifier": True,  # Predict roof open/closed state
+            "sky_classifier": True,   # Predict sky condition (only when roof open)
+        }
     },
     
     # Overlay settings
@@ -153,10 +188,20 @@ DEFAULT_CONFIG = {
         "include_latest_image": True,
         "username_override": "",
         "avatar_url": ""
+    },
+    
+    # All-sky camera settings (for ML training visual reference)
+    "allsky": {
+        "enabled": True,
+        "url": "https://zyssufjepmbhqznfuwcw.supabase.co/storage/v1/object/public/status-assets-public/building-0009/allsky/images/image.jpg",
+        "timeout_seconds": 10
     }
 }
 
 class Config:
+    # Class-level flag to track if cleanup has been attempted this session
+    _cleanup_attempted = False
+    
     def __init__(self, config_path=None):
         # Store config in user data directory for persistence across upgrades
         if config_path is None:
@@ -306,7 +351,12 @@ class Config:
         self._cleanup_old_program_files()
     
     def _cleanup_old_program_files(self):
-        """Attempt to remove old ASIOverlayWatchDog from Program Files if it exists"""
+        """Attempt to remove old ASIOverlayWatchDog from Program Files if it exists (once per session)"""
+        # Only attempt cleanup once per application session
+        if Config._cleanup_attempted:
+            return
+        Config._cleanup_attempted = True
+        
         import shutil
         from services.logger import app_logger
         

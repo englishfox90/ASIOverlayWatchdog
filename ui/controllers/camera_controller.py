@@ -197,6 +197,10 @@ class CameraControllerQt(QObject):
             self.zwo_camera.target_brightness = target_brightness
             self.zwo_camera.set_capture_interval(self.config.get('zwo_interval', 5.0))
             
+            # Set RAW16 mode from dev_mode config (for full bit depth capture)
+            dev_mode = self.config.get('dev_mode', {})
+            self.zwo_camera.use_raw16 = dev_mode.get('use_raw16', False)
+            
             # Set error callback for disconnect recovery
             self.zwo_camera.on_error_callback = self._on_camera_error
             

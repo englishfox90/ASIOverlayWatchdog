@@ -541,7 +541,7 @@ def mtf_stretch(value, midtone):
     return np.clip(result, 0.0, 1.0)
 
 
-def auto_stretch_image(img, config):
+def auto_stretch_image(img, config, raw_16bit=None):
     """
     Apply automatic MTF stretch to enhance image contrast.
     
@@ -549,8 +549,11 @@ def auto_stretch_image(img, config):
     Function) stretch to bring out detail in the shadows and midtones while protecting
     highlights. This is the standard approach used in astrophotography software.
     
+    When raw_16bit data is provided, processing happens in 16-bit precision for
+    better dynamic range preservation before converting to 8-bit output.
+    
     Args:
-        img: PIL Image object
+        img: PIL Image object (8-bit)
         config: Dictionary with stretch settings:
                - target_median: Target median brightness (0.0-1.0)
                - linked_stretch: Apply same stretch to all channels (prevents color shifts)
@@ -558,13 +561,24 @@ def auto_stretch_image(img, config):
                - black_point: Manual black point (0.0-0.1) - pixels below this stay black
                - shadow_aggressiveness: MAD multiplier (1.5=aggressive, 2.8=standard, 4.0=gentle)
                - saturation_boost: Post-stretch saturation multiplier
+               - normalize_channels: Equalize channel medians before stretch (for dark scenes with color cast)
+               - dark_scene_threshold: Median below this triggers dark scene mode (default 0.05)
+        raw_16bit: Optional numpy array with 16-bit RGB data (H, W, 3) dtype=uint16.
+                   When provided, stretching uses full 16-bit precision for better results.
     
     Returns:
-        PIL Image with stretch applied
+        PIL Image with stretch applied (8-bit output)
     """
     try:
-        # Convert to numpy array for processing
-        img_array = np.array(img).astype(np.float32) / 255.0
+        # Use 16-bit data if available for higher precision processing
+        if raw_16bit is not None and raw_16bit.dtype == np.uint16:
+            # 16-bit input: normalize to 0-1 range using full 16-bit range
+            img_array = raw_16bit.astype(np.float32) / 65535.0
+            bit_depth_str = "16-bit"
+        else:
+            # 8-bit input: convert from PIL Image
+            img_array = np.array(img).astype(np.float32) / 255.0
+            bit_depth_str = "8-bit"
         
         # Get stretch parameters
         target_median = config.get('target_median', 0.25)
@@ -573,6 +587,8 @@ def auto_stretch_image(img, config):
         black_point = config.get('black_point', 0.0)
         shadow_aggressiveness = config.get('shadow_aggressiveness', 2.8)
         saturation_boost = config.get('saturation_boost', 1.5)
+        normalize_channels = config.get('normalize_channels', False)
+        dark_scene_threshold = config.get('dark_scene_threshold', 0.05)
         
         # Clamp parameters to valid ranges
         target_median = np.clip(target_median, 0.05, 0.95)
@@ -594,10 +610,17 @@ def auto_stretch_image(img, config):
         
         # Skip stretch if image is already brighter than target (e.g., daylight capture)
         if current_brightness > target_median + 0.1:
-            app_logger.debug(f"Auto-stretch skipped: image already bright (median={current_brightness:.3f} > target={target_median:.3f})")
+            app_logger.debug(f"Auto-stretch skipped ({bit_depth_str}): image already bright (median={current_brightness:.3f} > target={target_median:.3f})")
             return img
         
-        app_logger.debug(f"Auto-stretch starting: current_median={current_brightness:.3f}, target={target_median:.3f}, preserve_blacks={preserve_blacks}")
+        app_logger.debug(f"Auto-stretch starting ({bit_depth_str}): current_median={current_brightness:.3f}, target={target_median:.3f}, preserve_blacks={preserve_blacks}")
+        
+        # === DARK SCENE CHANNEL NORMALIZATION ===
+        # For very dark images, color channel imbalance gets amplified by stretch.
+        # This equalizes channel medians before stretching to prevent color casts.
+        is_dark_scene = current_brightness < dark_scene_threshold
+        if normalize_channels and is_dark_scene and len(img_array.shape) == 3 and img_array.shape[2] >= 3:
+            img_array = _normalize_channel_medians(img_array)
         
         # Determine if image is grayscale or color
         if len(img_array.shape) == 2:
@@ -656,6 +679,63 @@ def auto_stretch_image(img, config):
     except Exception as e:
         app_logger.error(f"Auto-stretch error: {e}")
         return img
+
+
+def _normalize_channel_medians(img_array):
+    """
+    Normalize RGB channel medians to remove color casts in dark scenes.
+    
+    In very dark images (closed roof, artificial lighting), channels can have
+    very different medians (e.g., B=0.04, R=G=0.02). When stretched, this 
+    imbalance gets amplified, causing purple/magenta tints.
+    
+    This function uses luminance-weighted normalization to gently balance channels
+    without over-correcting and causing new color casts.
+    
+    Args:
+        img_array: 3D numpy array (H, W, 3) in 0-1 range
+    
+    Returns:
+        Normalized RGB array with balanced channel medians
+    """
+    r_median = np.median(img_array[:,:,0])
+    g_median = np.median(img_array[:,:,1])
+    b_median = np.median(img_array[:,:,2])
+    
+    # Calculate luminance-weighted target (prevents over-correction)
+    # This maintains natural color balance better than equalizing to single channel
+    target_median = 0.299 * r_median + 0.587 * g_median + 0.114 * b_median
+    
+    # Avoid division by zero for very dark channels
+    min_median = 0.001
+    
+    app_logger.debug(f"Dark scene normalization: R={r_median:.4f}, G={g_median:.4f}, B={b_median:.4f}")
+    app_logger.debug(f"  Luminance target: {target_median:.4f}")
+    
+    result = img_array.copy()
+    
+    # Apply gentle scaling (50% correction to avoid over-correction)
+    # This removes most color cast while preserving some natural color
+    if r_median > min_median:
+        r_scale = target_median / r_median
+        # Blend 50% toward target (full correction can over-correct)
+        r_scale = 1.0 + 0.5 * (r_scale - 1.0)
+        result[:,:,0] = np.clip(img_array[:,:,0] * r_scale, 0, 1)
+        app_logger.debug(f"  R scaled by {r_scale:.3f}")
+    
+    if g_median > min_median:
+        g_scale = target_median / g_median
+        g_scale = 1.0 + 0.5 * (g_scale - 1.0)
+        result[:,:,1] = np.clip(img_array[:,:,1] * g_scale, 0, 1)
+        app_logger.debug(f"  G scaled by {g_scale:.3f}")
+    
+    if b_median > min_median:
+        b_scale = target_median / b_median
+        b_scale = 1.0 + 0.5 * (b_scale - 1.0)
+        result[:,:,2] = np.clip(img_array[:,:,2] * b_scale, 0, 1)
+        app_logger.debug(f"  B scaled by {b_scale:.3f}")
+    
+    return result
 
 
 def _stretch_linked_rgb(img_array, target_median, preserve_blacks=True, 

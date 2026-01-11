@@ -69,6 +69,7 @@ class ZWOCamera:
         self.flip = flip  # 0=none, 1=horizontal, 2=vertical, 3=both
         self.offset = offset
         self.bayer_pattern = bayer_pattern  # RGGB, BGGR, GRBG, GBRG
+        self.use_raw16 = False  # Use RAW16 mode for full bit depth (set by dev mode)
         
         # Scheduled capture settings
         self.scheduled_capture_enabled = scheduled_capture_enabled
@@ -119,6 +120,26 @@ class ZWOCamera:
     def cameras(self, value):
         """Set cameras list"""
         self._connection.cameras = value
+    
+    @property
+    def supports_raw16(self) -> bool:
+        """Whether camera supports RAW16 mode (delegated to connection manager)"""
+        return self._connection.supports_raw16
+    
+    @property
+    def sensor_bit_depth(self) -> int:
+        """Camera's native ADC bit depth (delegated to connection manager)"""
+        return self._connection.bit_depth
+    
+    @property
+    def camera_info(self) -> dict:
+        """Camera properties dict (delegated to connection manager)"""
+        return self._connection.camera_info
+    
+    @property
+    def current_bit_depth(self) -> int:
+        """Current capture bit depth (8 for RAW8, 16 for RAW16)"""
+        return self._connection.current_bit_depth
     
     def __del__(self):
         """Destructor to ensure camera is disconnected when object is destroyed"""
@@ -189,6 +210,7 @@ class ZWOCamera:
             'wb_mode': self.wb_mode,
             'offset': self.offset,
             'flip': self.flip,
+            'use_raw16': self.use_raw16,  # Preserve RAW16 mode after reconnection
         }
         
         success = self._connection.reconnect_safe(
@@ -220,6 +242,7 @@ class ZWOCamera:
             'wb_mode': self.wb_mode,
             'offset': self.offset,
             'flip': self.flip,
+            'use_raw16': self.use_raw16,  # RAW16 mode for full bit depth
         }
         
         # Delegate connection to connection manager
@@ -245,7 +268,10 @@ class ZWOCamera:
             return
         
         self.log("Initializing calibration manager...")
-        self.calibration_manager = CameraCalibration(self.camera, self.asi, self.log)
+        self.calibration_manager = CameraCalibration(
+            self.camera, self.asi, self.log, 
+            bit_depth=self.current_bit_depth  # Pass current RAW mode bit depth
+        )
         self.calibration_manager.update_settings(
             exposure_seconds=self.exposure_seconds,
             gain=self.gain,
@@ -270,9 +296,59 @@ class ZWOCamera:
             'wb_mode': self.wb_mode,
             'offset': self.offset,
             'flip': self.flip,
+            'use_raw16': self.use_raw16,  # RAW16 mode for full bit depth
         }
         self._connection.configure(settings)
     
+    def set_raw16_mode(self, enabled: bool) -> bool:
+        """
+        Change RAW mode (RAW8/RAW16) during live capture.
+        
+        Args:
+            enabled: True for RAW16, False for RAW8
+            
+        Returns:
+            True if mode changed successfully
+        """
+        if not self.camera:
+            self.log("Cannot change RAW mode: camera not connected")
+            return False
+        
+        if enabled and not self.supports_raw16:
+            self.log("Camera does not support RAW16 mode")
+            return False
+        
+        try:
+            # Update our setting
+            self.use_raw16 = enabled
+            
+            # Get camera info for ROI
+            camera_info = self.camera.get_camera_property()
+            width = camera_info['MaxWidth']
+            height = camera_info['MaxHeight']
+            
+            # Set new image type
+            image_type = self.asi.ASI_IMG_RAW16 if enabled else self.asi.ASI_IMG_RAW8
+            self.camera.set_roi(start_x=0, start_y=0, width=width, height=height, 
+                               bins=1, image_type=image_type)
+            self.camera.set_image_type(image_type)
+            
+            # Update connection manager state
+            self._connection.current_image_type = image_type
+            self._connection.current_bit_depth = 16 if enabled else 8
+            
+            # Update calibration manager bit depth
+            if self.calibration_manager:
+                self.calibration_manager.bit_depth = self.current_bit_depth
+            
+            mode_str = "RAW16" if enabled else "RAW8"
+            self.log(f"Switched to {mode_str} mode ({self.current_bit_depth}-bit capture)")
+            return True
+            
+        except Exception as e:
+            self.log(f"Error changing RAW mode: {e}")
+            return False
+
     def disconnect_camera(self):
         """Disconnect from camera gracefully (idempotent - safe to call multiple times)"""
         # Stop capture first if active
@@ -357,7 +433,13 @@ class ZWOCamera:
             temp_info = self._get_temperature()
             
             # Convert raw Bayer to RGB using utility functions
-            img_rgb = debayer_raw_image(img_data, width, height, self.bayer_pattern)
+            # Pass bit_depth for RAW16 mode support, request raw16 for dev mode
+            img_rgb, img_rgb_raw16 = debayer_raw_image(
+                img_data, width, height, self.bayer_pattern, 
+                bit_depth=self.current_bit_depth,
+                return_raw16=(self.current_bit_depth == 16)  # Get raw uint16 for RAW16 mode
+            )
+            img_rgb_no_wb = img_rgb.copy()  # 8-bit pre-WB version for display
             img_rgb = apply_white_balance(img_rgb, self.wb_config)
             img = Image.fromarray(img_rgb, mode='RGB')
             
@@ -386,7 +468,15 @@ class ZWOCamera:
                 'STD_DEV': f"{stats['std_dev']:.2f}",
                 'P25': f"{stats['p25']:.1f}",
                 'P75': f"{stats['p75']:.1f}",
-                'P95': f"{stats['p95']:.1f}"
+                'P95': f"{stats['p95']:.1f}",
+                'RAW_RGB_NO_WB': img_rgb_no_wb,  # Pre-white-balance RGB (uint8) for display
+                'RAW_RGB_16BIT': img_rgb_raw16,  # Full uint16 RGB for dev mode (None if RAW8)
+                # Camera sensor info for proper FITS saving
+                'CAMERA_BIT_DEPTH': camera_info.get('BitDepth', 8),  # ADC bit depth (e.g., 12)
+                'IMAGE_BIT_DEPTH': self.current_bit_depth,  # Current capture mode (RAW8=8, RAW16=16)
+                'BAYER_PATTERN': self.bayer_pattern,
+                'PIXEL_SIZE': camera_info.get('PixelSize', 0),
+                'ELEC_PER_ADU': camera_info.get('ElecPerADU', 1.0),
             }
             
             return img, metadata
@@ -420,6 +510,15 @@ class ZWOCamera:
         consecutive_errors = 0
         max_reconnect_attempts = 5
         last_schedule_log = None  # Track last schedule status to avoid log spam
+        
+        # Recalibration rate limiting to prevent infinite loops
+        # (e.g., someone turning lights on/off repeatedly)
+        last_recalibration_time = 0
+        recalibration_cooldown_sec = 60  # Minimum 60 seconds between recalibrations
+        recalibration_count = 0  # Count recalibrations in current window
+        recalibration_window_start = time.time()
+        max_recalibrations_per_window = 3  # Max 3 recalibrations per 10-minute window
+        recalibration_window_sec = 600  # 10-minute window
         
         try:
             # Run rapid calibration if auto exposure is enabled
@@ -508,18 +607,63 @@ class ZWOCamera:
                     consecutive_errors = 0
                     
                     # Auto-adjust exposure based on image brightness
+                    # Check if drastic brightness change requires recalibration
                     if self.auto_exposure:
                         img_array = np.array(img)
-                        self.adjust_exposure_auto(img_array)
+                        exposure_result = self.adjust_exposure_auto(img_array)
+                        if exposure_result and exposure_result.get('needs_recalibration', False):
+                            current_time = time.time()
+                            
+                            # Reset recalibration window if expired
+                            if current_time - recalibration_window_start > recalibration_window_sec:
+                                recalibration_count = 0
+                                recalibration_window_start = current_time
+                            
+                            # Check rate limits before allowing recalibration
+                            time_since_last = current_time - last_recalibration_time
+                            can_recalibrate = (
+                                time_since_last >= recalibration_cooldown_sec and
+                                recalibration_count < max_recalibrations_per_window
+                            )
+                            
+                            if can_recalibrate:
+                                self.log(f"⚠ Drastic scene change detected - running rapid calibration")
+                                self.log(f"  (Recalibration {recalibration_count + 1}/{max_recalibrations_per_window} in current window)")
+                                
+                                # Notify calibration starting
+                                if self.on_calibration_callback:
+                                    self.on_calibration_callback(True)
+                                
+                                # Run rapid calibration to quickly find optimal exposure
+                                try:
+                                    self.run_calibration()
+                                    last_recalibration_time = time.time()
+                                    recalibration_count += 1
+                                except Exception as cal_error:
+                                    self.log(f"Recalibration error: {cal_error} - continuing with adjusted exposure")
+                                
+                                # Notify calibration complete
+                                if self.on_calibration_callback:
+                                    self.on_calibration_callback(False)
+                                
+                                # Skip publishing this badly-exposed frame
+                                # Next iteration will capture with calibrated exposure
+                                continue
+                            else:
+                                # Rate limited - log why and continue with normal aggressive adjustment
+                                if time_since_last < recalibration_cooldown_sec:
+                                    wait_time = int(recalibration_cooldown_sec - time_since_last)
+                                    self.log(f"⚠ Scene change detected but recalibration on cooldown ({wait_time}s remaining)")
+                                else:
+                                    self.log(f"⚠ Scene change detected but max recalibrations reached ({max_recalibrations_per_window} per {recalibration_window_sec//60}min window)")
+                                self.log(f"  Using aggressive auto-exposure adjustment instead")
+                                # Don't skip frame - let normal aggressive adjustment handle it
                     
                     # Call callback with image and metadata
                     if self.on_frame_callback:
                         self.on_frame_callback(img, metadata)
                     
                     self.log(f"Captured frame: {metadata['FILENAME']}")
-                    
-                    # Reset error counter on successful capture
-                    consecutive_errors = 0
                     
                     # Check for dropped frames (helps diagnose USB bandwidth issues)
                     try:
@@ -536,10 +680,15 @@ class ZWOCamera:
                 
                 except Exception as e:
                     consecutive_errors += 1
-                    self.log(f"✗ ERROR in capture loop: {e}")
+                    error_msg = str(e)
+                    self.log(f"✗ ERROR in capture loop: {error_msg}")
                     self.log(f"Consecutive errors: {consecutive_errors}/{max_reconnect_attempts}")
                     import traceback
                     self.log(f"Stack trace: {traceback.format_exc()}")
+                    
+                    # Notify error callback on first error (for Discord alerts etc.)
+                    if consecutive_errors == 1 and hasattr(self, 'on_error_callback') and self.on_error_callback:
+                        self.on_error_callback(f"Capture error: {error_msg} - attempting recovery...")
                     
                     # Try to recover from camera disconnect
                     if consecutive_errors <= max_reconnect_attempts:
@@ -684,12 +833,19 @@ class ZWOCamera:
             self.on_calibration_callback(False)
     
     def adjust_exposure_auto(self, img_array):
-        """Adjust exposure based on image brightness with intelligent step sizing"""
+        """
+        Adjust exposure based on image brightness with intelligent step sizing.
+        
+        Returns:
+            dict with 'needs_recalibration' flag and brightness info, or None if auto-exposure disabled
+        """
         if not self.auto_exposure or not self.calibration_manager:
-            return
+            return None
         
         # Use calibration manager to adjust exposure
-        self.calibration_manager.adjust_exposure_auto(img_array)
+        result = self.calibration_manager.adjust_exposure_auto(img_array)
         
         # Update our exposure from calibration manager
         self.exposure_seconds = self.calibration_manager.exposure_seconds
+        
+        return result

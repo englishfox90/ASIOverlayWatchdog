@@ -134,7 +134,7 @@ def check_clipping(img_array, clipping_threshold=245):
     return clipped_percent, is_clipping
 
 
-def debayer_raw_image(raw_data, width, height, bayer_pattern='BGGR'):
+def debayer_raw_image(raw_data, width, height, bayer_pattern='BGGR', bit_depth=8, return_raw16=False):
     """
     Convert raw Bayer data to RGB using OpenCV (or fallback).
     
@@ -143,11 +143,19 @@ def debayer_raw_image(raw_data, width, height, bayer_pattern='BGGR'):
         width: Image width
         height: Image height
         bayer_pattern: Bayer pattern string (RGGB, BGGR, GRBG, GBRG)
+        bit_depth: Bit depth of raw data (8 for RAW8, 16 for RAW16)
+        return_raw16: If True and bit_depth=16, include the full uint16 RGB in tuple
         
     Returns:
-        RGB numpy array (height, width, 3)
+        tuple: (img_rgb_uint8, img_rgb_raw16_or_None)
+            - img_rgb_uint8: Always uint8 RGB array for display/processing pipeline
+            - img_rgb_raw16_or_None: uint16 RGB if bit_depth=16 AND return_raw16=True, else None
     """
-    img_array = np.frombuffer(raw_data, dtype=np.uint8).reshape((height, width))
+    # Choose dtype based on bit depth
+    if bit_depth == 16:
+        img_array = np.frombuffer(raw_data, dtype=np.uint16).reshape((height, width))
+    else:
+        img_array = np.frombuffer(raw_data, dtype=np.uint8).reshape((height, width))
     
     try:
         import cv2
@@ -158,9 +166,22 @@ def debayer_raw_image(raw_data, width, height, bayer_pattern='BGGR'):
             'GBRG': cv2.COLOR_BayerGB2RGB
         }
         bayer_code = bayer_map.get(bayer_pattern, cv2.COLOR_BayerBG2RGB)
-        return cv2.cvtColor(img_array, bayer_code)
+        img_rgb = cv2.cvtColor(img_array, bayer_code)
+        
+        # For 16-bit data, create both versions
+        if bit_depth == 16:
+            img_rgb_raw16 = img_rgb.copy() if return_raw16 else None
+            # Scale 16-bit to 8-bit for standard processing pipeline (0-65535 -> 0-255)
+            img_rgb = (img_rgb / 257).astype(np.uint8)
+        else:
+            img_rgb_raw16 = None
+        
+        # Always return tuple for consistent unpacking (img_rgb, img_rgb_raw16_or_None)
+        return img_rgb, img_rgb_raw16
     except ImportError:
-        return simple_debayer_rggb(img_array, width, height)
+        result = simple_debayer_rggb(img_array, width, height)
+        # Always return tuple for consistent unpacking
+        return result, None
 
 
 def apply_white_balance(img_rgb, wb_config):
