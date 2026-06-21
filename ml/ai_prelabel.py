@@ -21,6 +21,7 @@ import time
 import argparse
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -49,8 +50,8 @@ def main():
                         help="Send night/moon context to the model. OFF by default so the "
                              "prediction is purely image-derived and can be validated cleanly "
                              "against the config's existing labels.")
-    parser.add_argument("--sleep", type=float, default=0.0,
-                        help="Seconds to pause between calls (rate limiting)")
+    parser.add_argument("--workers", type=int, default=6,
+                        help="Number of concurrent classifiers (default 6)")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -61,43 +62,58 @@ def main():
     samples = [s for s in find_sample_sets(data_dir) if "lum" in s]
     print(f"Found {len(samples)} samples with lum frames in {data_dir}")
 
-    done = skipped = failed = 0
+    # Decide the work-list up front (cheap local JSON reads) so the pool only
+    # spends paid API calls on frames that actually need a suggestion.
+    jobs, skipped = [], 0
     for sample in samples:
-        if args.limit and done >= args.limit:
-            break
-
-        cal_path = sample["calibration"]
-        with open(cal_path, "r") as f:
+        with open(sample["calibration"], "r") as f:
             cal = json.load(f)
-
         if not _should_process(cal, args.include_labeled, args.overwrite):
             skipped += 1
             continue
+        jobs.append((sample, cal))
+        if args.limit and len(jobs) >= args.limit:
+            break
 
-        context = build_context_from_cal(cal) if args.hints else None
-        try:
-            result = label_lum_frame(sample["lum"], context, model=args.model)
-        except Exception as e:
-            failed += 1
-            print(f"  ✗ {sample['timestamp']}: {e}")
-            continue
+    total = len(jobs)
+    print(f"To label: {total}  (skipped {skipped})  with {args.workers} workers\n")
+    if not total:
+        return
 
+    use_hints = args.hints
+
+    def process_one(job):
+        sample, cal = job
+        context = build_context_from_cal(cal) if use_hints else None
+        result = label_lum_frame(sample["lum"], context, model=args.model)
         result["suggested_at"] = datetime.now().isoformat()
-        result["hints_used"] = bool(args.hints)
+        result["hints_used"] = bool(use_hints)
         cal["ai_suggestion"] = result
-        with open(cal_path, "w") as f:
+        with open(sample["calibration"], "w") as f:
             json.dump(cal, f, indent=2)
+        return result
 
-        done += 1
-        roof = "OPEN" if result["roof_open"] else "CLOSED"
-        sky = result["sky_condition"] or "-"
-        print(f"  ✓ {sample['timestamp']}: roof={roof} ({result['roof_confidence']:.0%}) "
-              f"sky={sky} ({result['sky_confidence']:.0%})")
+    done = failed = 0
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {pool.submit(process_one, job): job for job in jobs}
+        for i, fut in enumerate(as_completed(futures), 1):
+            sample = futures[fut][0]
+            try:
+                result = fut.result()
+                done += 1
+                roof = "OPEN" if result["roof_open"] else "CLOSED"
+                sky = result["sky_condition"] or "-"
+                print(f"  [{i}/{total}] OK  {sample['timestamp']}: roof={roof} "
+                      f"({result['roof_confidence']:.0%}) sky={sky}")
+            except Exception as e:
+                failed += 1
+                print(f"  [{i}/{total}] ERR {sample['timestamp']}: {e}")
 
-        if args.sleep:
-            time.sleep(args.sleep)
-
-    print(f"\nDone. labelled={done}  skipped={skipped}  failed={failed}")
+    elapsed = time.monotonic() - started
+    rate = done / elapsed * 60 if elapsed else 0
+    print(f"\nDone. labelled={done}  failed={failed}  "
+          f"in {elapsed:.0f}s ({rate:.0f}/min)")
 
 
 if __name__ == "__main__":

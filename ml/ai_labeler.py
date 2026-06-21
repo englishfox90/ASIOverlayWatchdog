@@ -12,6 +12,7 @@ OPENROUTER_MODEL (defaults to google/gemini-2.5-flash).
 """
 import os
 import json
+import time
 import base64
 
 import requests
@@ -87,9 +88,17 @@ def _context_hint(context: dict | None) -> str:
     return "Context hint (may be wrong): " + ", ".join(parts) + "."
 
 
+TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+
+
 def label_lum_frame(fits_path, context: dict | None = None,
-                    model: str | None = None, timeout: int = 60) -> dict:
-    """Call OpenRouter to label a single lum frame. Raises on API/parse failure."""
+                    model: str | None = None, timeout: int = 60,
+                    max_retries: int = 4) -> dict:
+    """Call OpenRouter to label a single lum frame. Raises on API/parse failure.
+
+    Retries transient failures (429 rate-limit, 5xx, network/timeout) with
+    exponential backoff — important when many classifiers run concurrently.
+    """
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY environment variable is not set")
@@ -117,13 +126,22 @@ def label_lum_frame(fits_path, context: dict | None = None,
         "X-Title": "PFR Sentinel AI Labeler",
     }
 
-    resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=timeout)
-    resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"]
-
-    parsed = _parse_response(content)
-    parsed["model"] = model
-    return parsed
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=timeout)
+        except requests.RequestException:
+            if attempt < max_retries:
+                time.sleep(min(2 ** attempt, 30))
+                continue
+            raise
+        if resp.status_code in TRANSIENT_STATUS and attempt < max_retries:
+            time.sleep(min(2 ** attempt, 30))
+            continue
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        parsed = _parse_response(content)
+        parsed["model"] = model
+        return parsed
 
 
 def _parse_response(content: str) -> dict:

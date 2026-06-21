@@ -124,6 +124,15 @@ class LabelingTool(QMainWindow):
         images_widget = QWidget()
         images_layout = QVBoxLayout(images_widget)
 
+        self.mismatch_banner = QLabel("")
+        self.mismatch_banner.setAlignment(Qt.AlignCenter)
+        self.mismatch_banner.setWordWrap(True)
+        self.mismatch_banner.setVisible(False)
+        self.mismatch_banner.setStyleSheet(
+            "background: #7f1d1d; color: white; font-weight: bold; "
+            "font-size: 14px; padding: 8px; border-radius: 5px;")
+        images_layout.addWidget(self.mismatch_banner)
+
         lum_group = QGroupBox("Luminance (Stretched)")
         lum_layout = QVBoxLayout(lum_group)
         self.lum_label = QLabel()
@@ -180,6 +189,7 @@ class LabelingTool(QMainWindow):
             with open(sample['calibration'], 'r') as f:
                 self.current_cal = json.load(f)
             self.context_panel.populate(self.current_cal)
+            self._update_mismatch_banner(self.current_cal)
             # Only push the AI result into the form if the user has no in-progress edits.
             if not self.labels_widget.unsaved_changes:
                 roof_pred, sky_pred = self.run_model_prediction(sample, self.current_cal)
@@ -252,7 +262,27 @@ class LabelingTool(QMainWindow):
             self.context_panel.set_model_text("⚠️ No calibration file found")
             self.labels_widget.populate_fields({}, None, None)
 
+        self._update_mismatch_banner(self.current_cal)
         self.labels_widget.mark_saved()
+
+    def _update_mismatch_banner(self, cal: dict):
+        """Flag frames where the AI roof call disagrees with the NINA roof state."""
+        ai = cal.get('ai_suggestion')
+        rs = cal.get('roof_state', {})
+        if not ai or not rs.get('available') or rs.get('roof_open') is None:
+            self.mismatch_banner.setVisible(False)
+            return
+
+        ai_open = bool(ai.get('roof_open'))
+        nina_open = to_bool(rs.get('roof_open'))
+        if ai_open == nina_open:
+            self.mismatch_banner.setVisible(False)
+            return
+
+        self.mismatch_banner.setText(
+            f"⚠️ MISMATCH — AI: roof {'OPEN' if ai_open else 'CLOSED'}  vs  "
+            f"NINA: roof {'OPEN' if nina_open else 'CLOSED'}  ·  worth reviewing")
+        self.mismatch_banner.setVisible(True)
 
     def run_model_prediction(self, sample: dict, cal: dict):
         """Run ML models on the current image. Returns (roof_pred, sky_pred)."""
