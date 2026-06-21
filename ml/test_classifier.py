@@ -8,7 +8,7 @@ print("Loading model...")
 classifier = RoofClassifier.load('ml/models/roof_classifier_v1.pth', image_size=128)
 
 # Test on samples using LABELS from calibration JSON
-data_dir = Path('E:/Pier Camera ML Data')
+data_dir = Path('D:/Pier Camera ML Data')
 
 print("\n" + "="*60)
 print("ROOF CLASSIFIER TEST (vs Manual Labels)")

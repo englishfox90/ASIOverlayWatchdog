@@ -6,7 +6,7 @@ Analyzes labeled calibration data and reports on sample distribution,
 missing categories, and suggested targets for balanced training.
 
 Usage:
-    python ml/label_report.py "E:\\Pier Camera ML Data"
+    python ml/label_report.py "D:\\Pier Camera ML Data"
     python ml/label_report.py  # Uses default path
 """
 import sys
@@ -279,7 +279,7 @@ def print_report(stats: dict):
 
 def main():
     parser = argparse.ArgumentParser(description="Label distribution report for ML data")
-    parser.add_argument("data_dir", nargs="?", default=r"E:\Pier Camera ML Data",
+    parser.add_argument("data_dir", nargs="?", default=r"D:\Pier Camera ML Data",
                         help="Directory containing calibration files")
     args = parser.parse_args()
     

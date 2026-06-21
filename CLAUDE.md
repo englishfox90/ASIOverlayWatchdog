@@ -150,7 +150,7 @@ pytest
 | `test_ml_classifiers.py` | 6 | `ml.roof_classifier` / `ml.sky_classifier` + production `ui/controllers/ml_prediction.py` — ONNX load + inference smoke tests (`requires_ml_models`) |
 
 Standalone (not in pytest suite):
-- `ml/test_classifier.py` — interactive accuracy eval against a user-specific labelled dataset (walks `E:/Pier Camera ML Data`). Use this to validate a new model checkpoint, not for CI.
+- `ml/test_classifier.py` — interactive accuracy eval against a user-specific labelled dataset (walks `D:/Pier Camera ML Data`). Use this to validate a new model checkpoint, not for CI.
 - `scripts/dev/test_usb_reset.py` — interactive USB reset, requires camera
 
 ## Key dependencies

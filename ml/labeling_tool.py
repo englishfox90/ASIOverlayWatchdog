@@ -2,11 +2,12 @@
 """
 ML Labeling Tool for PFR Sentinel
 
-Simple GUI to view lum FITS + all-sky images and add/edit labels
-in calibration JSON files. Shows model predictions alongside for comparison.
+Three-column GUI: lum FITS image | data (context, ML + AI predictions) | manual
+label form. Edits labels in the calibration JSON. Shows ML and AI pre-label
+predictions alongside for comparison/validation.
 
 Usage:
-    python ml/labeling_tool.py "E:\\Pier Camera ML Data"
+    python ml/labeling_tool.py "D:\\Pier Camera ML Data"
     python ml/labeling_tool.py  # Uses default path
 """
 import sys
@@ -24,8 +25,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 
-from ml.labeling_io import find_sample_sets, load_fits_as_qpixmap, load_jpg_as_qpixmap, create_placeholder_pixmap
+from ml.labeling_io import find_sample_sets, load_fits_as_qpixmap, create_placeholder_pixmap
 from ml.labels_widget import LabelsWidget
+from ml.context_widget import ContextPanel
+from ml.ai_worker import AiLabelWorker
 from ml.review_tab import ReviewTab, to_bool
 from services.logger import app_logger
 
@@ -117,18 +120,9 @@ class LabelingTool(QMainWindow):
         self.tabs.currentChanged.connect(self.on_tab_changed)
 
     def setup_labeling_ui(self, main_layout):
-        # Left side: image viewers
+        # Left side: image viewer
         images_widget = QWidget()
         images_layout = QVBoxLayout(images_widget)
-
-        allsky_group = QGroupBox("All-Sky Camera")
-        allsky_layout = QVBoxLayout(allsky_group)
-        self.allsky_label = QLabel()
-        self.allsky_label.setAlignment(Qt.AlignCenter)
-        self.allsky_label.setMinimumSize(400, 400)
-        self.allsky_label.setStyleSheet("background: #1a1a1a; border: 1px solid #333;")
-        allsky_layout.addWidget(self.allsky_label)
-        images_layout.addWidget(allsky_group)
 
         lum_group = QGroupBox("Luminance (Stretched)")
         lum_layout = QVBoxLayout(lum_group)
@@ -140,6 +134,10 @@ class LabelingTool(QMainWindow):
         images_layout.addWidget(lum_group)
 
         main_layout.addWidget(images_widget, 1)
+
+        self.context_panel = ContextPanel()
+        self.context_panel.ai_requested.connect(self.request_ai_suggestion)
+        main_layout.addWidget(self.context_panel, 1)
 
         self.labels_widget = LabelsWidget()
         main_layout.addWidget(self.labels_widget, 1)
@@ -157,6 +155,39 @@ class LabelingTool(QMainWindow):
     def go_to_sample_from_review(self, index: int):
         self.tabs.setCurrentIndex(0)
         self.load_sample(index)
+
+    def request_ai_suggestion(self):
+        """Run the AI labeler on the currently displayed frame (background thread)."""
+        sample = self.samples[self.current_index]
+        if 'calibration' not in sample or 'lum' not in sample:
+            QMessageBox.information(self, "AI Suggest", "This sample has no lum frame to send.")
+            return
+
+        self.context_panel.set_ai_busy(True)
+        jobs = [{
+            'cal_path': str(sample['calibration']),
+            'lum_path': str(sample['lum']),
+            'timestamp': sample['timestamp'],
+        }]
+        self._ai_worker = AiLabelWorker(jobs)
+        self._ai_worker.completed.connect(self._on_ai_suggestion_done)
+        self._ai_worker.start()
+
+    def _on_ai_suggestion_done(self, labelled: int, failed: int):
+        self.context_panel.set_ai_busy(False)
+        sample = self.samples[self.current_index]
+        if labelled and 'calibration' in sample:
+            with open(sample['calibration'], 'r') as f:
+                self.current_cal = json.load(f)
+            self.context_panel.populate(self.current_cal)
+            # Only push the AI result into the form if the user has no in-progress edits.
+            if not self.labels_widget.unsaved_changes:
+                roof_pred, sky_pred = self.run_model_prediction(sample, self.current_cal)
+                self.labels_widget.populate_fields(self.current_cal, roof_pred, sky_pred)
+                self.labels_widget.mark_saved()
+        if failed:
+            QMessageBox.warning(self, "AI Suggest",
+                                "AI request failed. Check OPENROUTER_API_KEY and your connection.")
 
     def setup_shortcuts(self):
         QShortcut(QKeySequence("A"), self, self.prev_sample)
@@ -204,11 +235,6 @@ class LabelingTool(QMainWindow):
         self.labels_widget.set_navigation(index, len(self.samples), prev_enabled, next_enabled,
                                           folder_name, sample['timestamp'])
 
-        if 'allsky' in sample:
-            self.allsky_label.setPixmap(load_jpg_as_qpixmap(sample['allsky'], 380))
-        else:
-            self.allsky_label.setPixmap(create_placeholder_pixmap("No all-sky image", 380))
-
         if 'lum' in sample:
             self.lum_label.setPixmap(load_fits_as_qpixmap(sample['lum'], 380))
         else:
@@ -217,11 +243,13 @@ class LabelingTool(QMainWindow):
         if 'calibration' in sample:
             with open(sample['calibration'], 'r') as f:
                 self.current_cal = json.load(f)
+            self.context_panel.populate(self.current_cal)
             roof_pred, sky_pred = self.run_model_prediction(sample, self.current_cal)
             self.labels_widget.populate_fields(self.current_cal, roof_pred, sky_pred)
         else:
             self.current_cal = {}
-            self.labels_widget.set_model_text("⚠️ No calibration file found")
+            self.context_panel.populate({})
+            self.context_panel.set_model_text("⚠️ No calibration file found")
             self.labels_widget.populate_fields({}, None, None)
 
         self.labels_widget.mark_saved()
@@ -233,7 +261,7 @@ class LabelingTool(QMainWindow):
         sky_pred = None
 
         if not self.roof_classifier and not self.sky_classifier:
-            self.labels_widget.set_model_text(
+            self.context_panel.set_model_text(
                 "⚠️ No ML models loaded\n\nTo train models:\n"
                 "  python ml/train_roof_classifier.py\n"
                 "  python ml/train_sky_classifier.py"
@@ -241,7 +269,7 @@ class LabelingTool(QMainWindow):
             return roof_pred, sky_pred
 
         if 'lum' not in sample:
-            self.labels_widget.set_model_text("⚠️ No FITS image available for prediction")
+            self.context_panel.set_model_text("⚠️ No FITS image available for prediction")
             return roof_pred, sky_pred
 
         metadata = None
@@ -331,7 +359,7 @@ class LabelingTool(QMainWindow):
                 except Exception as e:
                     lines.append(f"⚠️ Error: {e}")
 
-        self.labels_widget.set_model_text("\n".join(lines))
+        self.context_panel.set_model_text("\n".join(lines))
         return roof_pred, sky_pred
 
     def _do_save(self):
@@ -389,7 +417,7 @@ class LabelingTool(QMainWindow):
 
 def main():
     parser = argparse.ArgumentParser(description="ML Labeling Tool for calibration data")
-    parser.add_argument("data_dir", nargs="?", default=r"E:\Pier Camera ML Data",
+    parser.add_argument("data_dir", nargs="?", default=r"D:\Pier Camera ML Data",
                         help="Directory containing calibration files")
     args = parser.parse_args()
 

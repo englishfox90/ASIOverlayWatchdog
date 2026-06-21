@@ -12,7 +12,7 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QLabel, QPushButton, QGroupBox, QHeaderView, QAbstractItemView,
-    QComboBox, QProgressBar
+    QComboBox, QProgressBar, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QBrush
@@ -67,7 +67,11 @@ class ReviewTab(QWidget):
             QProgressBar::chunk { background: #10b981; border-radius: 4px; }
         """)
         stats_layout.addWidget(self.accuracy_bar)
-        
+
+        self.ai_accuracy_label = QLabel("AI vs NINA: --")
+        self.ai_accuracy_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #0EA5E9;")
+        stats_layout.addWidget(self.ai_accuracy_label)
+
         stats_layout.addStretch()
         
         # Filter
@@ -78,23 +82,40 @@ class ReviewTab(QWidget):
             "ML matches NINA",
             "ML disagrees with NINA",
             "Labeled samples only",
-            "Unlabeled only"
+            "Unlabeled only",
+            "Has AI suggestion",
+            "Missing AI suggestion",
+            "AI disagrees with NINA",
+            "AI disagrees with manual label",
         ])
         self.filter_combo.currentIndexChanged.connect(self.apply_filter)
         stats_layout.addWidget(self.filter_combo)
-        
+
         self.refresh_btn = QPushButton("🔄 Refresh")
         self.refresh_btn.clicked.connect(self.refresh_data)
         stats_layout.addWidget(self.refresh_btn)
-        
+
+        self.ai_run_btn = QPushButton("🌐 Run AI on filtered")
+        self.ai_run_btn.setStyleSheet("background: #0EA5E9; color: white; font-weight: bold;")
+        self.ai_run_btn.setToolTip("Send every filtered frame that has a lum image to the AI labeler")
+        self.ai_run_btn.clicked.connect(self.run_ai_on_filtered)
+        stats_layout.addWidget(self.ai_run_btn)
+
+        self.ai_progress = QProgressBar()
+        self.ai_progress.setRange(0, 100)
+        self.ai_progress.setMaximumWidth(160)
+        self.ai_progress.setVisible(False)
+        stats_layout.addWidget(self.ai_progress)
+
         layout.addWidget(stats_group)
         
         # Results table
         self.table = QTableWidget()
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(12)
         self.table.setHorizontalHeaderLabels([
             "Timestamp", "ML Prediction", "Confidence", "NINA State",
-            "ML vs NINA", "Manual Label", "ML vs Label", "Folder", "Go"
+            "ML vs NINA", "Manual Label", "ML vs Label",
+            "AI Pred", "AI vs NINA", "AI vs Label", "Folder", "Go"
         ])
         
         # Table styling
@@ -123,8 +144,11 @@ class ReviewTab(QWidget):
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # ML vs NINA
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Manual
         header.setSectionResizeMode(6, QHeaderView.ResizeToContents)  # ML vs Label
-        header.setSectionResizeMode(7, QHeaderView.Stretch)          # Folder
-        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)  # Go
+        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)  # AI Pred
+        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)  # AI vs NINA
+        header.setSectionResizeMode(9, QHeaderView.ResizeToContents)  # AI vs Label
+        header.setSectionResizeMode(10, QHeaderView.Stretch)          # Folder
+        header.setSectionResizeMode(11, QHeaderView.ResizeToContents)  # Go
         
         layout.addWidget(self.table)
         
@@ -153,7 +177,8 @@ class ReviewTab(QWidget):
             ml = cal.get('ml_prediction')
             roof = cal.get('roof_state', {})
             labels = cal.get('labels', {})
-            
+            ai = cal.get('ai_suggestion')
+
             self.all_data.append({
                 'index': idx,
                 'timestamp': sample['timestamp'],
@@ -161,6 +186,9 @@ class ReviewTab(QWidget):
                 'ml_prediction': ml,
                 'nina_state': roof,
                 'labels': labels,
+                'ai': ai,
+                'lum': sample.get('lum'),
+                'cal_path': sample['calibration'],
                 'cal': cal
             })
         
@@ -176,8 +204,9 @@ class ReviewTab(QWidget):
             ml = item['ml_prediction']
             nina = item['nina_state']
             labels = item['labels']
+            ai = item['ai']
             has_label = bool(labels.get('labeled_at'))
-            
+
             if filter_idx == 0:  # All with ML
                 if ml:
                     self.filtered_data.append(item)
@@ -195,7 +224,21 @@ class ReviewTab(QWidget):
             elif filter_idx == 4:  # Unlabeled only
                 if not has_label and ml:
                     self.filtered_data.append(item)
-        
+            elif filter_idx == 5:  # Has AI suggestion
+                if ai:
+                    self.filtered_data.append(item)
+            elif filter_idx == 6:  # Missing AI suggestion
+                if not ai:
+                    self.filtered_data.append(item)
+            elif filter_idx == 7:  # AI disagrees with NINA
+                if ai and nina.get('available'):
+                    if bool(ai.get('roof_open')) != to_bool(nina.get('roof_open')):
+                        self.filtered_data.append(item)
+            elif filter_idx == 8:  # AI disagrees with manual label
+                if ai and has_label:
+                    if bool(ai.get('roof_open')) != to_bool(labels.get('roof_open')):
+                        self.filtered_data.append(item)
+
         self.update_table()
         self.update_stats()
     
@@ -225,6 +268,20 @@ class ReviewTab(QWidget):
         else:
             self.accuracy_label.setText("Accuracy vs NINA: -- (no comparisons)")
             self.accuracy_bar.setValue(0)
+
+        ai_correct = ai_compared = 0
+        for item in self.all_data:
+            ai = item['ai']
+            nina = item['nina_state']
+            if ai and nina.get('available'):
+                ai_compared += 1
+                if bool(ai.get('roof_open')) == to_bool(nina.get('roof_open')):
+                    ai_correct += 1
+        if ai_compared:
+            self.ai_accuracy_label.setText(
+                f"AI vs NINA: {ai_correct / ai_compared * 100:.1f}% ({ai_correct}/{ai_compared})")
+        else:
+            self.ai_accuracy_label.setText("AI vs NINA: --")
     
     def update_table(self):
         """Update table with filtered data."""
@@ -234,7 +291,8 @@ class ReviewTab(QWidget):
             ml = item['ml_prediction']
             nina = item['nina_state']
             labels = item['labels']
-            
+            ai = item['ai']
+
             # Timestamp
             ts_item = QTableWidgetItem(item['timestamp'])
             self.table.setItem(row, 0, ts_item)
@@ -301,18 +359,95 @@ class ReviewTab(QWidget):
             else:
                 mlabel_item = QTableWidgetItem("--")
             self.table.setItem(row, 6, mlabel_item)
-            
+
+            # AI Prediction
+            if ai:
+                ai_open = bool(ai.get('roof_open'))
+                ai_item = QTableWidgetItem("🟢 OPEN" if ai_open else "🔴 CLOSED")
+                ai_item.setForeground(QBrush(QColor("#10b981" if ai_open else "#ef4444")))
+            else:
+                ai_item = QTableWidgetItem("--")
+                ai_item.setForeground(QBrush(QColor("#888")))
+            self.table.setItem(row, 7, ai_item)
+
+            # AI vs NINA
+            self.table.setItem(row, 8, self._match_cell(
+                ai and nina.get('available'),
+                ai and bool(ai.get('roof_open')) == to_bool(nina.get('roof_open'))))
+
+            # AI vs Label
+            self.table.setItem(row, 9, self._match_cell(
+                ai and labels.get('labeled_at'),
+                ai and bool(ai.get('roof_open')) == to_bool(labels.get('roof_open'))))
+
             # Folder
             folder_item = QTableWidgetItem(item['folder'])
-            self.table.setItem(row, 7, folder_item)
-            
+            self.table.setItem(row, 10, folder_item)
+
             # Go button
             go_btn = QPushButton("→")
             go_btn.setMaximumWidth(40)
             go_btn.setToolTip("Go to this sample in Labeling tab")
             go_btn.clicked.connect(lambda checked, idx=item['index']: self.go_to_sample(idx))
-            self.table.setCellWidget(row, 8, go_btn)
+            self.table.setCellWidget(row, 11, go_btn)
     
+    def _match_cell(self, applicable, is_match) -> QTableWidgetItem:
+        """Build a ✅/❌ cell, or '--' when the comparison doesn't apply."""
+        if not applicable:
+            return QTableWidgetItem("--")
+        item = QTableWidgetItem("✅" if is_match else "❌")
+        item.setForeground(QBrush(QColor("#10b981" if is_match else "#ef4444")))
+        return item
+
     def go_to_sample(self, index: int):
         """Emit signal to navigate to sample."""
         self.navigate_to_sample.emit(index)
+
+    # ── AI batch run ──────────────────────────────────────────────────────────
+
+    def run_ai_on_filtered(self):
+        """Send every currently-filtered frame that has a lum image to the AI labeler."""
+        jobs = [
+            {'cal_path': str(item['cal_path']), 'lum_path': str(item['lum']),
+             'timestamp': item['timestamp']}
+            for item in self.filtered_data if item.get('lum')
+        ]
+        if not jobs:
+            QMessageBox.information(self, "Run AI", "No filtered rows have a lum frame to send.")
+            return
+
+        est = len(jobs) * 0.0008
+        reply = QMessageBox.question(
+            self, "Run AI on filtered",
+            f"Send {len(jobs)} frame(s) to OpenRouter (~${est:.2f})?\n\n"
+            f"This overwrites any existing AI suggestion on these frames and runs "
+            f"image-only (no hints).",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        from ml.ai_worker import AiLabelWorker
+        self.ai_run_btn.setEnabled(False)
+        self.refresh_btn.setEnabled(False)
+        self.filter_combo.setEnabled(False)
+        self.ai_progress.setVisible(True)
+        self.ai_progress.setValue(0)
+
+        self._batch_worker = AiLabelWorker(jobs)
+        self._batch_worker.progress.connect(self._on_batch_progress)
+        self._batch_worker.completed.connect(self._on_batch_done)
+        self._batch_worker.start()
+
+    def _on_batch_progress(self, done: int, total: int, msg: str):
+        self.ai_progress.setValue(int(done / total * 100) if total else 0)
+        self.ai_accuracy_label.setText(f"AI: {done}/{total} — {msg[:40]}")
+
+    def _on_batch_done(self, labelled: int, failed: int):
+        self.ai_run_btn.setEnabled(True)
+        self.refresh_btn.setEnabled(True)
+        self.filter_combo.setEnabled(True)
+        self.ai_progress.setVisible(False)
+        QMessageBox.information(self, "Run AI complete",
+                                f"AI labelled {labelled} frame(s); {failed} failed.")
+        self.refresh_data()

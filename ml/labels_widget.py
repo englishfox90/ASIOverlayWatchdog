@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox, QCheckBox,
     QDoubleSpinBox, QPushButton, QScrollArea, QComboBox, QLineEdit,
-    QTextEdit, QFrame,
+    QFrame,
 )
 from PySide6.QtCore import Qt, Signal
 
@@ -68,25 +68,6 @@ class LabelsWidget(QWidget):
         scroll_content = QWidget()
         scroll_layout = QVBoxLayout(scroll_content)
 
-        context_group = QGroupBox("Auto-Populated Context (from APIs/sensors)")
-        context_layout = QVBoxLayout(context_group)
-        self.context_text = QTextEdit()
-        self.context_text.setReadOnly(True)
-        self.context_text.setMaximumHeight(150)
-        self.context_text.setStyleSheet("background: #2a2a2a; font-family: monospace;")
-        context_layout.addWidget(self.context_text)
-        scroll_layout.addWidget(context_group)
-
-        model_group = QGroupBox("🤖 ML Model Predictions")
-        model_group.setStyleSheet("QGroupBox { font-weight: bold; color: #8b5cf6; }")
-        model_layout = QVBoxLayout(model_group)
-        self.model_text = QTextEdit()
-        self.model_text.setReadOnly(True)
-        self.model_text.setMaximumHeight(220)
-        self.model_text.setStyleSheet("background: #1e1b2e; font-family: monospace; border: 2px solid #8b5cf6;")
-        model_layout.addWidget(self.model_text)
-        scroll_layout.addWidget(model_group)
-
         labels_group = QGroupBox("Manual Labels (Edit These)")
         labels_group.setStyleSheet("QGroupBox { font-weight: bold; color: #10b981; }")
         labels_layout = QVBoxLayout(labels_group)
@@ -106,7 +87,7 @@ class LabelsWidget(QWidget):
         sky_frame = QFrame()
         sky_frame.setStyleSheet("background: #1e3a5f; border-radius: 5px; padding: 8px;")
         sky_layout = QVBoxLayout(sky_frame)
-        sky_layout.addWidget(QLabel("SKY CONDITIONS (label from all-sky, applies when roof open):"))
+        sky_layout.addWidget(QLabel("SKY CONDITIONS (cloud cover from lum frame, applies when roof open):"))
         sky_row = QHBoxLayout()
         sky_row.addWidget(QLabel("Overall sky:"))
         self.sky_condition = QComboBox()
@@ -147,14 +128,6 @@ class LabelsWidget(QWidget):
         labels_layout.addWidget(notes_frame)
 
         scroll_layout.addWidget(labels_group)
-
-        mode_group = QGroupBox("Classified Mode")
-        mode_layout = QHBoxLayout(mode_group)
-        self.mode_label = QLabel("")
-        self.mode_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #f59e0b;")
-        mode_layout.addWidget(self.mode_label)
-        scroll_layout.addWidget(mode_group)
-
         scroll_layout.addStretch()
         scroll.setWidget(scroll_content)
         layout.addWidget(scroll, 1)
@@ -211,9 +184,6 @@ class LabelsWidget(QWidget):
 
     # ── Display setters ───────────────────────────────────────────────────────
 
-    def set_model_text(self, text: str):
-        self.model_text.setText(text)
-
     def mark_unsaved(self):
         self.unsaved_changes = True
         self.update_status()
@@ -237,49 +207,12 @@ class LabelsWidget(QWidget):
     # ── Core field logic ──────────────────────────────────────────────────────
 
     def populate_fields(self, cal: dict, roof_pred, sky_pred):
-        """Populate all fields from calibration data and ML predictions."""
-        context_lines = []
-
+        """Populate the editable form from calibration data and ML predictions."""
         tc = cal.get('time_context', {})
-        context_lines.append(f"Time: {tc.get('period', '?')} ({tc.get('detailed_period', '?')})")
-        context_lines.append(f"  Daylight: {tc.get('is_daylight', '?')}, Astro Night: {tc.get('is_astronomical_night', '?')}")
-
-        mc = cal.get('moon_context', {})
-        if mc.get('available'):
-            context_lines.append(f"Moon: {mc.get('phase_name', '?')} ({mc.get('illumination_pct', 0):.0f}%)")
-            context_lines.append(f"  Moon up: {mc.get('moon_is_up', '?')}, Bright: {mc.get('is_bright_moon', '?')}")
-
         rs = cal.get('roof_state', {})
-        if rs.get('available'):
-            roof_str = "OPEN" if to_bool(rs.get('roof_open')) else "CLOSED"
-            context_lines.append(f"Roof: {roof_str} (from {rs.get('source', '?')})")
-        else:
-            context_lines.append(f"Roof: Unknown ({rs.get('reason', 'no data')})")
-
         wc = cal.get('weather_context', {})
-        if wc.get('available'):
-            context_lines.append(f"Weather: {wc.get('condition', '?')} - {wc.get('description', '?')}")
-            context_lines.append(f"  Clouds: {wc.get('cloud_coverage_pct', '?')}%, Humidity: {wc.get('humidity_pct', '?')}%")
-            context_lines.append(f"  Clear: {wc.get('is_clear', '?')}")
-
-        se = cal.get('seeing_estimate', {})
-        if se.get('available'):
-            context_lines.append(f"Seeing: {se.get('quality', '?')} (score: {se.get('overall_score', 0):.2f})")
-
-        ml = cal.get('ml_prediction')
-        if ml:
-            ml_roof = "OPEN" if to_bool(ml.get('roof_open')) else "CLOSED"
-            ml_conf = ml.get('confidence', 0) * 100
-            context_lines.append(f"ML Prediction: {ml_roof} ({ml_conf:.1f}% conf) [{ml.get('model_version', '?')}]")
-
-        st = cal.get('stretch', {})
-        context_lines.append(f"Image: median_lum={st.get('median_lum', 0):.4f}, dark_scene={st.get('is_dark_scene', '?')}")
-
+        mc = cal.get('moon_context', {})
         ca = cal.get('corner_analysis', {})
-        context_lines.append(f"Corner ratio: {ca.get('corner_to_center_ratio', 0):.4f}")
-
-        self.context_text.setText("\n".join(context_lines))
-        self.mode_label.setText(self.classify_mode(cal))
 
         labels = cal.get('labels', {})
         has_labels = bool(labels.get('labeled_at'))
@@ -356,7 +289,18 @@ class LabelsWidget(QWidget):
 
             self.notes_edit.setText('')
 
-            if ml_prefilled:
+            ai = cal.get('ai_suggestion')
+            if ai:
+                # AI judges only our two priorities (roof + clouds); stars/moon/
+                # density keep whatever the CNN/heuristic above already set.
+                self.roof_open.setChecked(bool(ai.get('roof_open', False)))
+                idx = self.sky_condition.findText(ai.get('sky_condition', ''))
+                self.sky_condition.setCurrentIndex(idx if idx >= 0 else 0)
+                self.clouds_visible.setChecked(bool(ai.get('clouds_visible', False)))
+                conf = ai.get('roof_confidence', 0) or 0
+                self.label_state.setText(f"🌐 AI-suggested · roof {conf:.0%} (review & save)")
+                self.label_state.setStyleSheet("color: #0EA5E9; font-weight: bold;")
+            elif ml_prefilled:
                 self.label_state.setText("🤖 ML-suggested (review & save)")
                 self.label_state.setStyleSheet("color: #8b5cf6; font-weight: bold;")
             else:
@@ -403,27 +347,3 @@ class LabelsWidget(QWidget):
         self.label_state.setText("✓ Previously labeled")
         self.label_state.setStyleSheet("color: #10b981; font-weight: bold;")
         return True
-
-    def classify_mode(self, cal: dict) -> str:
-        """Classify image mode from calibration data."""
-        tc = cal.get('time_context', {})
-        rs = cal.get('roof_state', {})
-        ca = cal.get('corner_analysis', {})
-
-        if tc.get('is_daylight'):
-            time_period = 'day'
-        elif tc.get('is_astronomical_night'):
-            time_period = 'night'
-        elif tc.get('period') == 'twilight':
-            return 'twilight'
-        else:
-            hour = tc.get('hour', 12)
-            time_period = 'night' if (hour >= 20 or hour < 6) else 'day'
-
-        if rs.get('available') and rs.get('source') == 'nina_api':
-            roof_open = to_bool(rs.get('roof_open', False))
-        else:
-            ratio = ca.get('corner_to_center_ratio', 0.95)
-            roof_open = ratio < 0.95
-
-        return f"{time_period}_{'roof_open' if roof_open else 'roof_closed'}"

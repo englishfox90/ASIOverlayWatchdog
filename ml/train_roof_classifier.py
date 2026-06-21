@@ -6,7 +6,7 @@ Trains a CNN model to detect if the observatory roof is open or closed
 from pier camera images.
 
 Usage:
-    python ml/train_roof_classifier.py "E:\\Pier Camera ML Data"
+    python ml/train_roof_classifier.py "D:\\Pier Camera ML Data"
     python ml/train_roof_classifier.py --epochs 50 --batch-size 16
 """
 import sys
@@ -366,7 +366,7 @@ def evaluate(model, loader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser(description="Train roof state classifier")
-    parser.add_argument("data_dir", nargs="?", default=r"E:\Pier Camera ML Data",
+    parser.add_argument("data_dir", nargs="?", default=r"D:\Pier Camera ML Data",
                         help="Directory containing labeled calibration files")
     parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size")

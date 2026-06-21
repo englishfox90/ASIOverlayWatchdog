@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from collections import defaultdict
 
-data_dir = Path('E:/Pier Camera ML Data')
+data_dir = Path('D:/Pier Camera ML Data')
 stats = defaultdict(lambda: {'open': 0, 'closed': 0, 'unlabeled': 0})
 
 for cal_file in data_dir.rglob('calibration_*.json'):

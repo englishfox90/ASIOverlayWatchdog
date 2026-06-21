@@ -303,7 +303,7 @@ allsky_20260105_220825.jpg        # All-sky camera snapshot
 ### Run Label Report
 
 ```bash
-python ml/label_report.py "E:\Pier Camera ML Data"
+python ml/label_report.py "D:\Pier Camera ML Data"
 ```
 
 Shows current progress vs targets and recommends priority collection.
@@ -314,7 +314,7 @@ Shows current progress vs targets and recommends priority collection.
 
 ```bash
 # Launch labeling GUI
-python ml/labeling_tool.py "E:\Pier Camera ML Data"
+python ml/labeling_tool.py "D:\Pier Camera ML Data"
 ```
 
 **Keyboard shortcuts**:
@@ -324,9 +324,39 @@ python ml/labeling_tool.py "E:\Pier Camera ML Data"
 - `S` - Save
 
 **Features**:
-- Auto-suggests labels from collected context
+- Auto-suggests labels from collected context (and from AI pre-labels if present)
 - "Skip labeled" checkbox to process only new samples
-- Shows all-sky + pier camera images side by side
+- Shows the pier camera luminance frame (all-sky reference removed — models train on lum only)
+
+### AI Pre-labeling (optional, speeds up review)
+
+A cheap OpenRouter vision model can pre-fill the two priority labels — **roof open**
+and **cloud condition** — so you only review and confirm. Suggestions are written to
+each calibration JSON as an `ai_suggestion` block and never overwrite a human label.
+
+```bash
+# Set your key once (PowerShell)
+$env:OPENROUTER_API_KEY = "sk-or-..."
+# Optional: $env:OPENROUTER_MODEL = "google/gemini-2.5-flash"  (default)
+
+python ml/ai_prelabel.py --limit 20        # sanity-check on 20 frames first
+python ml/ai_prelabel.py                    # then label all unlabelled frames
+```
+
+The labeling tool then shows "🌐 AI-suggested" and pre-fills roof + sky condition.
+Stars/moon/density stay on the existing CNN/heuristic suggestion. Cost is roughly
+$1–3 for the full backlog.
+
+You can also trigger the AI from inside the GUI (needs `OPENROUTER_API_KEY` set):
+- **Labeling tab** — the "🌐 AI Suggest (this frame)" button under the AI panel runs
+  the model on the current frame and pre-fills the form.
+- **Review Predictions tab** — "🌐 Run AI on filtered" runs the AI over the currently
+  filtered rows (e.g. filter to "Missing AI suggestion" first). Both run on a
+  background thread so the UI stays responsive.
+
+The Review tab also adds AI columns (AI Pred / AI vs NINA / AI vs Label) and AI
+filters ("AI disagrees with NINA", "AI disagrees with manual label", …) so you can
+surface exactly the frames worth a second look.
 
 ### Data Collection
 

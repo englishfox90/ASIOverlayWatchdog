@@ -714,7 +714,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Train sky/celestial classifier")
-    parser.add_argument("--data-dir", type=str, default=r"E:\Pier Camera ML Data",
+    parser.add_argument("--data-dir", type=str, default=r"D:\Pier Camera ML Data",
                         help="Directory containing calibration files")
     parser.add_argument("--output-dir", type=str, default="ml/models",
                         help="Output directory for model")
