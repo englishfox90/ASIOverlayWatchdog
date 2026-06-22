@@ -5,7 +5,7 @@ import copy
 import json
 import os
 import threading
-from .utils_paths import resource_path, get_exe_dir
+from .utils_paths import resource_path, get_exe_dir, get_app_data_dir
 from .app_config import APP_DATA_FOLDER, DEFAULT_OUTPUT_SUBFOLDER
 
 DEFAULT_CAMERA_PROFILE = {
@@ -38,7 +38,7 @@ DEFAULT_CONFIG = {
     "watch_recursive": True,
     
     # Output settings
-    "output_directory": os.path.join(os.getenv('LOCALAPPDATA'), APP_DATA_FOLDER, DEFAULT_OUTPUT_SUBFOLDER),
+    "output_directory": os.path.join(get_app_data_dir(), DEFAULT_OUTPUT_SUBFOLDER),
     "filename_pattern": "latestImage",
     "output_format": "jpg",
     "jpg_quality": 85,
@@ -148,7 +148,7 @@ DEFAULT_CONFIG = {
         # ASCOM Safety Monitor file output (for NINA integration)
         "ascom_safety_file": {
             "enabled": False,  # Write roof status to file for NINA GenericFile safety monitor
-            "file_path": os.path.join(os.getenv('LOCALAPPDATA'), APP_DATA_FOLDER, 'RoofStatusFile.txt'),  # Default to AppData
+            "file_path": os.path.join(get_app_data_dir(), 'RoofStatusFile.txt'),  # Default to AppData
             "preamble": "Roof Status:",  # Text before the status value
             "open_trigger": "OPEN",  # Value when roof is open (Safe in NINA)
             "closed_trigger": "CLOSED",  # Value when roof is closed (Unsafe in NINA)
@@ -216,6 +216,17 @@ DEFAULT_CONFIG = {
         "post_timelapse": False,      # Post timelapse video when session completes
         "post_calibration": False,    # Post notification when all-sky calibration completes
         "post_roof_changes": False,   # Post notification when ML confirms a roof status change
+    },
+
+    # YouTube timelapse uploads
+    "youtube": {
+        "enabled": False,
+        "client_secrets_path": "",
+        "privacy_status": "private",  # "private" | "unlisted" | "public"
+        "title_template": "PFR Sentinel Timelapse {date}",
+        "description_template": "All-sky timelapse recorded by PFR Sentinel.",
+        "tags": "astronomy, allsky, timelapse",
+        "category_id": "22",
     },
     
     # All-sky camera settings (for ML training visual reference)
@@ -316,12 +327,13 @@ class Config:
         self._lock = threading.RLock()
         # Store config in user data directory for persistence across upgrades
         if config_path is None:
-            user_data_dir = os.path.join(os.getenv('LOCALAPPDATA'), APP_DATA_FOLDER)
+            user_data_dir = get_app_data_dir()
             os.makedirs(user_data_dir, exist_ok=True)
             config_path = os.path.join(user_data_dir, 'config.json')
             
             # One-time migration from old ASIOverlayWatchDog location
-            old_appdata_dir = os.path.join(os.getenv('LOCALAPPDATA'), 'ASIOverlayWatchDog')
+            old_base = os.getenv('LOCALAPPDATA')
+            old_appdata_dir = os.path.join(old_base, 'ASIOverlayWatchDog') if old_base else ''
             if os.path.exists(old_appdata_dir) and not os.path.exists(config_path):
                 self._migrate_from_old_location(old_appdata_dir, user_data_dir, config_path)
             
@@ -491,7 +503,8 @@ class Config:
         import shutil
         from services.logger import app_logger
         
-        old_dir = os.path.join(os.getenv('LOCALAPPDATA'), 'ASIOverlayWatchDog')
+        old_base = os.getenv('LOCALAPPDATA')
+        old_dir = os.path.join(old_base, 'ASIOverlayWatchDog') if old_base else ''
         if os.path.exists(old_dir):
             try:
                 shutil.rmtree(old_dir)
@@ -601,6 +614,15 @@ class Config:
             url = discord.get('webhook_url', '')
             if not url:
                 warnings.append("Discord enabled but webhook URL is empty")
+
+        # Check YouTube upload config if enabled
+        youtube = self.data.get('youtube', {})
+        if youtube.get('enabled'):
+            try:
+                from .youtube_config import validate_youtube_config
+                warnings.extend(validate_youtube_config(youtube, require_client_file=True))
+            except Exception as e:
+                warnings.append(f"YouTube config validation failed: {e}")
 
         return warnings
 

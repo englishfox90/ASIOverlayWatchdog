@@ -279,6 +279,9 @@ class MainWindow(
         self.timelapse_controller.finalizing_finished.connect(
             self._on_timelapse_finalizing_finished
         )
+        self.timelapse_controller.youtube_upload_status_changed.connect(
+            self.timelapse_panel._youtube_card.set_status
+        )
 
         self.image_processor.detection_frame_ready.connect(
             self.meteor_controller.on_frame_ready

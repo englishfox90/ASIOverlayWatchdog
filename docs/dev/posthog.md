@@ -88,7 +88,8 @@ Pages: `monitoring`, `capture`, `output`, `processing`, `overlays`, `timelapse`,
 |-------|-----------|----------|
 | `weather_configured` | `units` | `ui/main_window.py` |
 | `timelapse_recording_started` | `window_mode`, `playback_fps`, `output_resolution`, `video_quality`, `include_overlays`, `frame_width`, `frame_height` | `services/timelapse_writer.py` |
-| `timelapse_session_finished` | `frame_count`, `duration_seconds`, `file_size_mb`, `discord_delivery` | `ui/controllers/timelapse_controller.py` |
+| `timelapse_session_finished` | `frame_count`, `duration_seconds`, `file_size_mb`, `discord_delivery`, `youtube_delivery` | `ui/controllers/timelapse_controller.py` |
+| `youtube_timelapse_upload` | `success`, `status`, `retryable`, `file_size_mb` | `services/timelapse_publishers.py` |
 | `calibration_completed` | `success`, `duration_seconds`, `attempts`, `final_exposure_ms`, `final_brightness`, `target_brightness`, `max_exposure_ms` | `services/zwo_camera.py` |
 
 ### Errors
@@ -97,6 +98,11 @@ Pages: `monitoring`, `capture`, `output`, `processing`, `overlays`, `timelapse`,
 |-------|-----------|----------|
 | `error_captured` | `error_type`, `error_message`, `stack_trace`, `context` | via `capture_error()` helper |
 | `$exception` (auto) | full stack trace | SDK autocapture (unhandled exceptions) |
+
+YouTube upload code must catch Google/OAuth exceptions at the module boundary
+and convert them to sanitized typed results. Do not send tokens, auth codes,
+client secrets, file paths, upload URLs, titles, descriptions, tags, channel
+IDs, video IDs, or watch URLs in analytics.
 
 **Error contexts** (the `context` property in `error_captured`):
 - `camera_capture_loop` — ZWO capture thread exception

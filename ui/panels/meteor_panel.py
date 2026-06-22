@@ -2,6 +2,8 @@
 Meteor Tracker Panel
 Full-page settings, live status, and per-detection thumbnail cards.
 """
+from __future__ import annotations
+
 import os
 
 from PySide6.QtWidgets import (

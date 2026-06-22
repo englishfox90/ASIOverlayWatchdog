@@ -12,6 +12,8 @@ Creating an elevated task itself needs admin, so ``enable``/``disable`` retry
 through a one-time UAC elevation when the direct call is denied. All functions
 no-op gracefully off Windows and on any failure.
 """
+from __future__ import annotations
+
 import os
 import subprocess
 import sys

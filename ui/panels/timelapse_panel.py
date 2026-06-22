@@ -21,6 +21,7 @@ from qfluentwidgets import (
 from ..theme.tokens import Colors, Typography, Spacing
 from ..theme.icons import mdi
 from ..components.cards import SettingsCard, FormRow, SwitchRow, CollapsibleCard, ClickSlider
+from .youtube_upload_card import YouTubeUploadCard
 from services.ffmpeg_utils import is_ffmpeg_available, is_winget_available
 
 
@@ -500,6 +501,11 @@ class TimelapsePanel(QScrollArea):
 
         layout.addWidget(output_card)
 
+        # === YOUTUBE UPLOAD ===
+        self._youtube_card = YouTubeUploadCard(self)
+        self._youtube_card.settings_changed.connect(self.settings_changed)
+        layout.addWidget(self._youtube_card)
+
         # === STATUS ===
         self._status_card = SettingsCard("Status", "Current timelapse session")
         self._status_label = BodyLabel("Not recording")
@@ -663,6 +669,8 @@ class TimelapsePanel(QScrollArea):
             self._output_dir_input.setText(tl.get('output_dir', ''))
             self._keep_spin.setValue(tl.get('max_videos_to_keep', 30))
             self._calc_hours_spin.setValue(tl.get('calc_session_hours', 6))
+            if hasattr(self, '_youtube_card'):
+                self._youtube_card.load_from_config(config.get('youtube', {}))
             zwo_interval = config.get('zwo_interval', 300.0)
             self._calc_interval_sec = max(1, int(round(zwo_interval)))
             self._calc_interval_label.setText(f"{self._calc_interval_sec} s")

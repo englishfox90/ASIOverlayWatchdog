@@ -4,8 +4,10 @@ Owns the TimelapseWriter, wires it to the image processing pipeline,
 and exposes status to the UI panel.
 """
 import threading
+import os
 from PySide6.QtCore import QObject, Signal, QTimer
 from services.timelapse_writer import TimelapseWriter
+from services.timelapse_publishers import TimelapsePublishers, make_timelapse_metadata
 from services.logger import app_logger
 
 
@@ -23,6 +25,7 @@ class TimelapseController(QObject):
     status_updated = Signal(dict)  # Emits get_status() dict periodically
     finalizing_started = Signal()          # Background ffmpeg finalization began
     finalizing_finished = Signal(str)      # Finalization done; arg is session path ('' if none)
+    youtube_upload_status_changed = Signal(dict)
 
     def __init__(self, main_window):
         super().__init__(main_window)
@@ -30,6 +33,10 @@ class TimelapseController(QObject):
         self._writer = TimelapseWriter()
         self._writer.on_session_finished = self._on_session_finished
         self._finalize_thread = None
+        self._publishers = TimelapsePublishers(
+            self._main_window.config,
+            youtube_status_callback=self._emit_youtube_status,
+        )
 
         # Status timer: update panel every 5 seconds while recording
         self._status_timer = QTimer(self)
@@ -116,6 +123,8 @@ class TimelapseController(QObject):
                 app_logger.warning("Timelapse: finalization did not complete within 75s")
         else:
             self._writer.stop()
+        if hasattr(self, '_publishers') and self._publishers:
+            self._publishers.shutdown(timeout=10)
 
     # ------------------------------------------------------------------ #
     #  Status                                                              #
@@ -126,6 +135,55 @@ class TimelapseController(QObject):
 
     def _emit_status(self):
         self.status_updated.emit(self._writer.get_status())
+
+    def _emit_youtube_status(self, status: dict):
+        self.youtube_upload_status_changed.emit(status)
+
+    def authenticate_youtube(self):
+        """Start UI-triggered YouTube OAuth."""
+        self._publishers.authenticate_youtube()
+
+    def upload_latest_youtube(self):
+        """Manually upload the newest completed timelapse video."""
+        path = self._find_latest_completed_video()
+        if not path:
+            self._emit_youtube_status({
+                'provider': 'youtube',
+                'status': 'validation_failed',
+                'message': 'No completed timelapse video was found.',
+                'success': False,
+            })
+            return
+        metadata = make_timelapse_metadata(path, frame_count=0, elapsed_seconds=0)
+        self._publishers.enqueue_youtube_upload(metadata, manual=True)
+
+    def _find_latest_completed_video(self) -> str:
+        """Newest timelapse MP4 excluding the active recording session."""
+        tl_cfg = self._get_timelapse_config()
+        output_dir = tl_cfg.get('output_dir', '')
+        if not output_dir:
+            from services.utils_paths import get_app_data_dir
+            output_dir = os.path.join(get_app_data_dir(), 'timelapse')
+        if not output_dir or not os.path.isdir(output_dir):
+            return ''
+
+        status = self.get_status()
+        active_path = ''
+        if status.get('recording'):
+            active_path = os.path.normcase(os.path.abspath(status.get('session_path') or ''))
+
+        candidates = []
+        for name in os.listdir(output_dir):
+            if not name.lower().endswith('.mp4'):
+                continue
+            path = os.path.join(output_dir, name)
+            if active_path and os.path.normcase(os.path.abspath(path)) == active_path:
+                continue
+            if os.path.isfile(path):
+                candidates.append(path)
+        if not candidates:
+            return ''
+        return max(candidates, key=lambda p: os.path.getmtime(p))
 
     # ------------------------------------------------------------------ #
     #  Helpers                                                             #
@@ -144,56 +202,28 @@ class TimelapseController(QObject):
     def _on_session_finished(self, path: str, frame_count: int, elapsed_seconds: int):
         """
         Called by TimelapseWriter after each session finalizes.
-        Posts to Discord in a daemon thread so it doesn't block the caller.
+        Delegates post-finalization delivery to publisher services.
         """
         mins, secs = divmod(elapsed_seconds, 60)
         app_logger.info(
             f"Timelapse: session finished — {frame_count} frames  {mins}m{secs:02d}s"
         )
 
-        import os
         from services.posthog_service import capture_event
-        file_size_mb = None
-        try:
-            file_size_mb = round(os.path.getsize(path) / (1024 * 1024), 1)
-        except OSError:
-            pass
+        metadata = make_timelapse_metadata(path, frame_count, elapsed_seconds)
+        file_size_mb = round(metadata.file_size_bytes / (1024 * 1024), 1) if metadata.file_size_bytes else None
 
         discord_cfg = self._main_window.config.get('discord', {})
         discord_delivery = discord_cfg.get('enabled', False) and discord_cfg.get('post_timelapse', False)
+        youtube_cfg = self._main_window.config.get('youtube', {})
+        youtube_delivery = youtube_cfg.get('enabled', False)
 
         capture_event('timelapse_session_finished', {
             'frame_count': frame_count,
             'duration_seconds': elapsed_seconds,
             'file_size_mb': file_size_mb,
             'discord_delivery': discord_delivery,
+            'youtube_delivery': youtube_delivery,
         })
 
-        if not discord_delivery:
-            return
-
-        app_logger.info("Timelapse: posting completed video to Discord")
-
-        def _post():
-            try:
-                import time
-                from services.discord_alerts import DiscordAlerts
-                alerts = DiscordAlerts(self._main_window.config)
-                max_retries = 3
-                for attempt in range(1, max_retries + 1):
-                    success = alerts.send_timelapse_completed(path, frame_count, elapsed_seconds)
-                    if success:
-                        app_logger.info("Timelapse: Discord post sent")
-                        return
-                    if attempt < max_retries:
-                        wait = attempt * 10  # 10s, 20s backoff
-                        app_logger.warning(
-                            f"Timelapse: Discord post failed (attempt {attempt}/{max_retries}), "
-                            f"retrying in {wait}s"
-                        )
-                        time.sleep(wait)
-                app_logger.error("Timelapse: Discord post failed after all retries")
-            except Exception as e:
-                app_logger.error(f"Timelapse: Discord post failed: {e}")
-
-        threading.Thread(target=_post, daemon=True).start()
+        self._publishers.publish_finished(metadata)

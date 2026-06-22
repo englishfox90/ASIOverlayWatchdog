@@ -39,6 +39,8 @@ This document describes how to build ASIOverlayWatchDog as a Windows executable 
 - Python 3.7+ with virtual environment activated
 - All dependencies installed (`pip install -r requirements.txt`)
 - PyInstaller installed (`pip install pyinstaller`)
+- YouTube upload dependencies are bundled by `PFRSentinel.spec`; after changes
+  to Google client packages, test the installed `.exe` with a private upload.
 
 **IMPORTANT**: Always build from within the virtual environment!
 

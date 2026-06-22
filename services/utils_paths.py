@@ -4,6 +4,7 @@ Resolves paths correctly whether running from source or as bundled EXE
 """
 import os
 import sys
+import tempfile
 
 # Import app configuration for centralized naming
 try:
@@ -50,8 +51,14 @@ def get_app_data_dir():
         # Fallback for other platforms (though this is Windows-focused)
         app_dir = os.path.join(os.path.expanduser('~'), f'.{APP_DATA_FOLDER}')
 
-    # Create directory if it doesn't exist
-    os.makedirs(app_dir, exist_ok=True)
+    # Create directory if it doesn't exist. In sandboxed/dev environments the
+    # home fallback may be read-only; use the temp directory rather than failing
+    # module import. Windows production still uses %LOCALAPPDATA%.
+    try:
+        os.makedirs(app_dir, exist_ok=True)
+    except PermissionError:
+        app_dir = os.path.join(tempfile.gettempdir(), APP_DATA_FOLDER)
+        os.makedirs(app_dir, exist_ok=True)
 
     return app_dir
 

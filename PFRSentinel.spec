@@ -144,6 +144,31 @@ except Exception as e:
     print(f"[WARN] backoff: {e}")
     backoff_datas, backoff_binaries, backoff_hiddenimports = [], [], []
 
+# --- Google API client (YouTube timelapse uploads) ---
+google_packages = [
+    'googleapiclient',
+    'google_auth_oauthlib',
+    'google.auth',
+    'httplib2',
+    'oauthlib',
+    'requests_oauthlib',
+    'uritemplate',
+]
+google_hidden_modules = [
+]
+google_datas, google_binaries, google_hiddenimports = [], [], []
+for pkg in google_packages:
+    try:
+        datas, binaries, imports = collect_all(pkg)
+        google_datas += datas
+        google_binaries += binaries
+        google_hiddenimports += imports
+        print(f"[OK] {pkg}: {len(datas)} datas, {len(imports)} imports")
+    except Exception as e:
+        print(f"[WARN] {pkg}: {e}")
+
+google_hiddenimports += google_hidden_modules
+
 # --- scipy (all-sky lens calibration: optimize + spatial.distance + stats) ---
 try:
     scipy_datas, scipy_binaries, scipy_hiddenimports = collect_all('scipy')
@@ -222,6 +247,15 @@ hiddenimports = [
     'posthog.feature_flags', 'posthog.poller', 'posthog.utils', 'posthog.types',
     'posthog.contexts', 'posthog.args', 'posthog.flag_definition_cache',
     'backoff', 'six', 'python_dateutil', 'dateutil', 'distro',
+
+    # --- YouTube uploads / Google API client ---
+    'googleapiclient', 'googleapiclient.discovery', 'googleapiclient.http',
+    'googleapiclient.discovery_cache', 'googleapiclient.discovery_cache.documents',
+    'google_auth_oauthlib', 'google_auth_oauthlib.flow',
+    'google.auth', 'google.auth.transport.requests', 'google.auth.exceptions',
+    'google.oauth2', 'google.oauth2.credentials',
+    'httplib2', 'oauthlib', 'requests_oauthlib',
+    'uritemplate',
     
     # --- XML (Python 3.13 fix) ---
     'xml', 'xml.parsers', 'xml.parsers.expat',
@@ -260,13 +294,15 @@ hiddenimports = [
     'services.color_balance', 'services.web_output',
     'services.discord_alerts', 'services.headless_runner', 'services.weather',
     'services.ml_service', 'services.ascom_safety', 'services.posthog_service',
+    'services.youtube_auth', 'services.youtube_config', 'services.youtube_upload',
+    'services.youtube_upload_state', 'services.timelapse_publishers',
     'ui', 'ui.main_window', 'ui.theme', 'ui.components', 'ui.panels',
     'ui.controllers', 'ui.system_tray_qt',
     
     # --- ML modules ---
     'ml', 'ml.roof_classifier', 'ml.sky_classifier',
     'onnxruntime',
-] + fluent_hiddenimports + requests_hiddenimports + jaraco_hiddenimports + pystray_hiddenimports + platformdirs_hiddenimports + onnx_hiddenimports + posthog_hiddenimports + backoff_hiddenimports + scipy_hiddenimports
+] + fluent_hiddenimports + requests_hiddenimports + jaraco_hiddenimports + pystray_hiddenimports + platformdirs_hiddenimports + onnx_hiddenimports + posthog_hiddenimports + backoff_hiddenimports + scipy_hiddenimports + google_hiddenimports
 
 # ============================================================================
 # ANALYSIS
@@ -275,8 +311,8 @@ hiddenimports = [
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=fluent_binaries + requests_binaries + jaraco_binaries + pystray_binaries + platformdirs_binaries + onnx_binaries + xml_binaries + posthog_binaries + backoff_binaries + scipy_binaries,
-    datas=added_files + fluent_datas + requests_datas + jaraco_datas + pystray_datas + platformdirs_datas + onnx_datas + posthog_datas + backoff_datas + scipy_datas,
+    binaries=fluent_binaries + requests_binaries + jaraco_binaries + pystray_binaries + platformdirs_binaries + onnx_binaries + xml_binaries + posthog_binaries + backoff_binaries + scipy_binaries + google_binaries,
+    datas=added_files + fluent_datas + requests_datas + jaraco_datas + pystray_datas + platformdirs_datas + onnx_datas + posthog_datas + backoff_datas + scipy_datas + google_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

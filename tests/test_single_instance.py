@@ -14,10 +14,10 @@ import pytest
 @pytest.fixture
 def qt_app():
     try:
-        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtWidgets import QApplication
     except ImportError:
         pytest.skip("PySide6 not installed")
-    app = QCoreApplication.instance() or QCoreApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     yield app
 
 
@@ -37,20 +37,23 @@ def test_quit_command_emits_quit_requested(qt_app):
     guard.activate_requested.connect(lambda: seen.__setitem__("activate", seen["activate"] + 1))
     guard.quit_requested.connect(qt_app.quit)
 
-    assert guard.already_running() is False  # this process owns the lock
+    try:
+        assert guard.already_running() is False  # this process owns the lock
 
-    result = {}
+        result = {}
 
-    def client():
-        time.sleep(0.2)  # let the server's event loop start
-        result["ok"] = request_shutdown(name, timeout_ms=2000)
+        def client():
+            time.sleep(0.2)  # let the server's event loop start
+            result["ok"] = request_shutdown(name, timeout_ms=2000)
 
-    threading.Thread(target=client, daemon=True).start()
-    _pump_until_quit(qt_app)
+        threading.Thread(target=client, daemon=True).start()
+        _pump_until_quit(qt_app)
 
-    assert result.get("ok") is True
-    assert seen["quit"] == 1
-    assert seen["activate"] == 0
+        assert result.get("ok") is True
+        assert seen["quit"] == 1
+        assert seen["activate"] == 0
+    finally:
+        guard.deleteLater()
 
 
 def test_non_quit_payload_emits_activate(qt_app):
@@ -63,23 +66,26 @@ def test_non_quit_payload_emits_activate(qt_app):
     guard.activate_requested.connect(lambda: seen.__setitem__("activate", seen["activate"] + 1))
     guard.activate_requested.connect(qt_app.quit)
 
-    assert guard.already_running() is False
+    try:
+        assert guard.already_running() is False
 
-    def client():
-        time.sleep(0.2)
-        sock = QLocalSocket()
-        sock.connectToServer(name)
-        if sock.waitForConnected(2000):
-            sock.write(b"activate")  # what a second app launch sends
-            sock.flush()
-            sock.waitForBytesWritten(2000)
-            sock.disconnectFromServer()
+        def client():
+            time.sleep(0.2)
+            sock = QLocalSocket()
+            sock.connectToServer(name)
+            if sock.waitForConnected(2000):
+                sock.write(b"activate")  # what a second app launch sends
+                sock.flush()
+                sock.waitForBytesWritten(2000)
+                sock.disconnectFromServer()
 
-    threading.Thread(target=client, daemon=True).start()
-    _pump_until_quit(qt_app)
+        threading.Thread(target=client, daemon=True).start()
+        _pump_until_quit(qt_app)
 
-    assert seen["activate"] == 1
-    assert seen["quit"] == 0
+        assert seen["activate"] == 1
+        assert seen["quit"] == 0
+    finally:
+        guard.deleteLater()
 
 
 def test_request_shutdown_false_when_nothing_running(qt_app):

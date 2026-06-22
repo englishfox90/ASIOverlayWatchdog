@@ -4,10 +4,6 @@ Contains core processing and hardware integration modules
 """
 from .config import Config
 from .logger import app_logger
-from .processor import process_image, add_overlays
-from .watcher import FileWatcher
-from .camera import ZWOCamera
-from .cleanup import run_cleanup
 
 __all__ = [
     'Config',
@@ -18,3 +14,20 @@ __all__ = [
     'ZWOCamera',
     'run_cleanup'
 ]
+
+
+def __getattr__(name):
+    """Lazy-load heavier service exports only when requested."""
+    if name in ('process_image', 'add_overlays'):
+        from .processor import process_image, add_overlays
+        return {'process_image': process_image, 'add_overlays': add_overlays}[name]
+    if name == 'FileWatcher':
+        from .watcher import FileWatcher
+        return FileWatcher
+    if name == 'ZWOCamera':
+        from .camera import ZWOCamera
+        return ZWOCamera
+    if name == 'run_cleanup':
+        from .cleanup import run_cleanup
+        return run_cleanup
+    raise AttributeError(name)
