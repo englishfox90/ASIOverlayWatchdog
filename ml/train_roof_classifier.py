@@ -321,7 +321,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
         labels = labels.to(device)
         
         optimizer.zero_grad()
-        outputs = model(images, metadata).squeeze()
+        outputs = model(images, metadata).squeeze(-1)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
@@ -347,7 +347,7 @@ def evaluate(model, loader, criterion, device):
             metadata = metadata.to(device)
             labels = labels.to(device)
             
-            outputs = model(images, metadata).squeeze()
+            outputs = model(images, metadata).squeeze(-1)
             loss = criterion(outputs, labels)
             
             total_loss += loss.item()

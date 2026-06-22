@@ -531,9 +531,9 @@ def train_model(
                 
                 # Multi-task loss (weighted)
                 loss_sky = criterion_sky(sky_logits, sky_labels)
-                loss_stars = criterion_binary(stars_logit.squeeze(), stars_labels)
-                loss_density = criterion_density(density.squeeze(), density_labels)
-                loss_moon = criterion_binary(moon_logit.squeeze(), moon_labels)
+                loss_stars = criterion_binary(stars_logit.squeeze(-1), stars_labels)
+                loss_density = criterion_density(density.squeeze(-1), density_labels)
+                loss_moon = criterion_binary(moon_logit.squeeze(-1), moon_labels)
                 
                 # Combined loss with weights
                 loss = 1.0 * loss_sky + 0.5 * loss_stars + 0.3 * loss_density + 0.5 * loss_moon
@@ -569,9 +569,9 @@ def train_model(
                     
                     # Loss
                     loss_sky = criterion_sky(sky_logits, sky_labels)
-                    loss_stars = criterion_binary(stars_logit.squeeze(), stars_labels)
-                    loss_density = criterion_density(density.squeeze(), density_labels)
-                    loss_moon = criterion_binary(moon_logit.squeeze(), moon_labels)
+                    loss_stars = criterion_binary(stars_logit.squeeze(-1), stars_labels)
+                    loss_density = criterion_density(density.squeeze(-1), density_labels)
+                    loss_moon = criterion_binary(moon_logit.squeeze(-1), moon_labels)
                     loss = 1.0 * loss_sky + 0.5 * loss_stars + 0.3 * loss_density + 0.5 * loss_moon
                 
                 val_loss += loss.item()
@@ -580,10 +580,10 @@ def train_model(
                 sky_pred = sky_logits.argmax(dim=1)
                 sky_correct += (sky_pred == sky_labels).sum().item()
                 
-                stars_pred = (torch.sigmoid(stars_logit.squeeze()) > 0.5).float()
+                stars_pred = (torch.sigmoid(stars_logit.squeeze(-1)) > 0.5).float()
                 stars_correct += (stars_pred == stars_labels).sum().item()
                 
-                moon_pred = (torch.sigmoid(moon_logit.squeeze()) > 0.5).float()
+                moon_pred = (torch.sigmoid(moon_logit.squeeze(-1)) > 0.5).float()
                 moon_correct += (moon_pred == moon_labels).sum().item()
                 
                 total += sky_labels.size(0)
@@ -652,10 +652,10 @@ def train_model(
             all_sky_pred.extend(sky_logits.argmax(dim=1).cpu().numpy())
             
             all_stars_true.extend(batch['stars_visible'].numpy())
-            all_stars_pred.extend((torch.sigmoid(stars_logit.squeeze()) > 0.5).cpu().numpy())
+            all_stars_pred.extend((torch.sigmoid(stars_logit.squeeze(-1)) > 0.5).cpu().numpy())
             
             all_moon_true.extend(batch['moon_visible'].numpy())
-            all_moon_pred.extend((torch.sigmoid(moon_logit.squeeze()) > 0.5).cpu().numpy())
+            all_moon_pred.extend((torch.sigmoid(moon_logit.squeeze(-1)) > 0.5).cpu().numpy())
     
     # Sky condition confusion
     print("\nSky Condition Accuracy:")
