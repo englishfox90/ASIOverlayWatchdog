@@ -21,7 +21,7 @@ class AiLabelWorker(QThread):
     """
 
     progress = Signal(int, int, str)   # done_count, total, message
-    completed = Signal(int, int)       # labelled, failed
+    completed = Signal(int, int, str)  # labelled, failed, last_error ("" if none)
 
     def __init__(self, jobs: list, use_hints: bool = False, model: str | None = None, parent=None):
         super().__init__(parent)
@@ -36,6 +36,7 @@ class AiLabelWorker(QThread):
     def run(self):
         total = len(self.jobs)
         labelled = failed = 0
+        last_error = ""
 
         for i, job in enumerate(self.jobs):
             if self._cancel:
@@ -59,7 +60,8 @@ class AiLabelWorker(QThread):
                 self.progress.emit(i + 1, total, f"{ts}: roof {roof}")
             except Exception as e:
                 failed += 1
+                last_error = str(e)
                 app_logger.warning(f"AI label failed for {ts}: {e}")
                 self.progress.emit(i + 1, total, f"{ts}: ERROR {e}")
 
-        self.completed.emit(labelled, failed)
+        self.completed.emit(labelled, failed, last_error)

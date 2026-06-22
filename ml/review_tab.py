@@ -443,11 +443,15 @@ class ReviewTab(QWidget):
         self.ai_progress.setValue(int(done / total * 100) if total else 0)
         self.ai_accuracy_label.setText(f"AI: {done}/{total} — {msg[:40]}")
 
-    def _on_batch_done(self, labelled: int, failed: int):
+    def _on_batch_done(self, labelled: int, failed: int, error: str):
         self.ai_run_btn.setEnabled(True)
         self.refresh_btn.setEnabled(True)
         self.filter_combo.setEnabled(True)
         self.ai_progress.setVisible(False)
-        QMessageBox.information(self, "Run AI complete",
-                                f"AI labelled {labelled} frame(s); {failed} failed.")
+        msg = f"AI labelled {labelled} frame(s); {failed} failed."
+        if failed and error:
+            msg += f"\n\nLast error: {error}"
+            if "OPENROUTER_API_KEY" in error:
+                msg += "\n\nThe key is not set in this app's environment — launch the tool from a shell that has it."
+        QMessageBox.information(self, "Run AI complete", msg)
         self.refresh_data()

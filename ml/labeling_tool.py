@@ -182,7 +182,7 @@ class LabelingTool(QMainWindow):
         self._ai_worker.completed.connect(self._on_ai_suggestion_done)
         self._ai_worker.start()
 
-    def _on_ai_suggestion_done(self, labelled: int, failed: int):
+    def _on_ai_suggestion_done(self, labelled: int, failed: int, error: str):
         self.context_panel.set_ai_busy(False)
         sample = self.samples[self.current_index]
         if labelled and 'calibration' in sample:
@@ -196,8 +196,14 @@ class LabelingTool(QMainWindow):
                 self.labels_widget.populate_fields(self.current_cal, roof_pred, sky_pred)
                 self.labels_widget.mark_saved()
         if failed:
-            QMessageBox.warning(self, "AI Suggest",
-                                "AI request failed. Check OPENROUTER_API_KEY and your connection.")
+            detail = error or "Unknown error"
+            hint = ""
+            if "OPENROUTER_API_KEY" in detail:
+                hint = ("\n\nThe key is not set in this app's environment. Launch the tool "
+                        "from a shell that has it, e.g.\n"
+                        "  $env:OPENROUTER_API_KEY=\"sk-or-...\"; python ml/labeling_tool.py\n"
+                        "or set it persistently with setx and restart.")
+            QMessageBox.warning(self, "AI Suggest", f"AI request failed:\n\n{detail}{hint}")
 
     def setup_shortcuts(self):
         QShortcut(QKeySequence("A"), self, self.prev_sample)
