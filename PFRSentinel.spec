@@ -336,7 +336,13 @@ a = Analysis(
         'IPython', 'jupyter', 'notebook',
         'pytest', 'doctest',
         # 'unittest' is NOT excluded — scipy imports it internally at runtime
-        'setuptools', 'wheel', 'pip', 'distutils',
+        'setuptools', 'wheel', 'pip',
+        # NOTE: do NOT exclude 'distutils'. On Python 3.12+ there is no stdlib
+        # distutils; PyInstaller's hook-distutils aliases setuptools._distutils
+        # -> distutils. Excluding distutils makes that alias target an
+        # ExcludedModule and the build dies with "Target module distutils
+        # already imported as ExcludedModule" (triggered by the google/oauth
+        # libs pulling in setuptools). Nothing here imports distutils at runtime.
         'lib2to3',
         # 'pydoc', 'xmlrpc' — used transitively by scipy stdlib imports
         
