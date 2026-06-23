@@ -377,7 +377,7 @@ def main():
                         help="Directory containing labeled calibration files")
     parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
-    parser.add_argument("--num-workers", type=int, default=4,
+    parser.add_argument("--num-workers", type=int, default=8,
                         help="DataLoader worker processes (parallel FITS loading)")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--image-size", type=int, default=128, help="Image size for model")

@@ -5,8 +5,10 @@ Dataset + label constants for the sky/celestial classifier (Phase 2).
 Extracted from train_sky_classifier.py so the training module stays within the
 file-size budget and the data-loading responsibility lives on its own.
 """
+import os
 import random
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -42,7 +44,8 @@ SKY_CONDITION_COLLAPSE = {
 class SkyDataset(Dataset):
     """Dataset for sky/celestial classification from pier camera images."""
 
-    def __init__(self, samples: list, image_size: int = 256, augment: bool = False, preload: bool = True):
+    def __init__(self, samples: list, image_size: int = 256, augment: bool = False,
+                 preload: bool = True, preload_workers: int = None):
         """
         Args:
             samples: List of dicts with 'lum_path', 'sky_condition', 'stars_visible',
@@ -50,6 +53,7 @@ class SkyDataset(Dataset):
             image_size: Target image size (larger than roof model)
             augment: Whether to apply data augmentation
             preload: Whether to preload all images into memory (faster training)
+            preload_workers: Threads for the preload (defaults to min(cpu_count, 16))
         """
         self.samples = samples
         self.image_size = image_size
@@ -62,41 +66,39 @@ class SkyDataset(Dataset):
         self.labels = []
 
         if preload:
-            print(f"  Preloading {len(samples)} images...")
-            for i, sample in enumerate(samples):
-                # Load and preprocess image (supports FITS and JPG)
-                img = self.load_image(sample['image_path'])
-                img = self.preprocess(img)
-                # Store as tensor ready for GPU
-                self.images.append(torch.from_numpy(img).unsqueeze(0).float())
+            workers = preload_workers or min((os.cpu_count() or 4), 16)
+            print(f"  Preloading {len(samples)} images ({workers} workers)...")
+            # The FITS read + arcsinh stretch is the heavy, parallelisable part.
+            # load_image/preprocess are pure reads (no shared mutable state), so
+            # threads are safe and numpy/astropy release the GIL during the read
+            # and the big-array math. ThreadPoolExecutor.map preserves order, so
+            # images[idx] stays aligned with samples[idx].
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                self.images = list(ex.map(self._load_tensor, samples))
 
-                # Pre-compute metadata tensor
+            # Metadata/labels are cheap scalar work — build them serially.
+            for sample in samples:
                 meta = sample['metadata']
-                meta_tensor = torch.tensor([
+                self.metadata.append(torch.tensor([
                     meta.get('corner_to_center_ratio', 1.0),
                     meta.get('median_lum', 0.0),
                     1.0 if meta.get('is_astronomical_night') else 0.0,
                     meta.get('hour', 12) / 24.0,
                     meta.get('moon_illumination', 0.0) / 100.0,
                     1.0 if meta.get('moon_is_up') else 0.0,
-                ], dtype=torch.float32)
-                self.metadata.append(meta_tensor)
-
-                # Pre-compute labels
-                sky_idx = SKY_TO_IDX.get(sample['sky_condition'], 0)
-                stars_visible = 1.0 if sample['stars_visible'] else 0.0
-                star_density = float(sample.get('star_density', 0.0))
-                moon_visible = 1.0 if sample['moon_visible'] else 0.0
+                ], dtype=torch.float32))
                 self.labels.append({
-                    'sky': torch.tensor(sky_idx, dtype=torch.long),
-                    'stars': torch.tensor(stars_visible, dtype=torch.float32),
-                    'density': torch.tensor(star_density, dtype=torch.float32),
-                    'moon': torch.tensor(moon_visible, dtype=torch.float32),
+                    'sky': torch.tensor(SKY_TO_IDX.get(sample['sky_condition'], 0), dtype=torch.long),
+                    'stars': torch.tensor(1.0 if sample['stars_visible'] else 0.0, dtype=torch.float32),
+                    'density': torch.tensor(float(sample.get('star_density', 0.0)), dtype=torch.float32),
+                    'moon': torch.tensor(1.0 if sample['moon_visible'] else 0.0, dtype=torch.float32),
                 })
-
-                if (i + 1) % 100 == 0:
-                    print(f"    Loaded {i + 1}/{len(samples)}")
             print(f"  ✓ Preloaded {len(samples)} images")
+
+    def _load_tensor(self, sample) -> torch.Tensor:
+        """Load + preprocess one image to a (1, H, W) tensor. Thread-safe."""
+        img = self.preprocess(self.load_image(sample['image_path']))
+        return torch.from_numpy(img).unsqueeze(0).float()
 
     def __len__(self):
         return len(self.samples)
