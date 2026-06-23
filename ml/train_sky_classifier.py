@@ -3,7 +3,7 @@
 Sky/Celestial Classifier Training - Phase 2
 
 Multi-task model trained on PIER CAMERA images to predict:
-- sky_condition: 5-class (Clear, Mostly Clear, Partly Cloudy, Mostly Cloudy, Overcast)
+- sky_condition: 3-class (Clear, Partly Cloudy, Overcast)
 - stars_visible: binary
 - star_density: regression (0-1)
 - moon_visible: binary
@@ -22,6 +22,7 @@ GPU Optimizations:
 import sys
 import warnings
 import json
+import copy
 import random
 from pathlib import Path
 from datetime import datetime
@@ -34,193 +35,24 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 
 # Add parent for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Optional: astropy for FITS
+from ml.sky_dataset import (
+    SkyDataset, SKY_CONDITIONS, SKY_TO_IDX, IDX_TO_SKY, SKY_CONDITION_COLLAPSE,
+)
+
 try:
-    from astropy.io import fits
-    ASTROPY_AVAILABLE = True
+    from sklearn.model_selection import train_test_split
+    SKLEARN_AVAILABLE = True
 except ImportError:
-    ASTROPY_AVAILABLE = False
-    print("Warning: astropy not available, FITS loading disabled")
+    SKLEARN_AVAILABLE = False
 
-
-# Sky condition class mapping
-SKY_CONDITIONS = ['Clear', 'Mostly Clear', 'Partly Cloudy', 'Mostly Cloudy', 'Overcast']
-SKY_TO_IDX = {cond: i for i, cond in enumerate(SKY_CONDITIONS)}
-IDX_TO_SKY = {i: cond for i, cond in enumerate(SKY_CONDITIONS)}
-
-
-class SkyDataset(Dataset):
-    """Dataset for sky/celestial classification from pier camera images."""
-    
-    def __init__(self, samples: list, image_size: int = 256, augment: bool = False, preload: bool = True):
-        """
-        Args:
-            samples: List of dicts with 'lum_path', 'sky_condition', 'stars_visible', 
-                     'star_density', 'moon_visible', 'metadata'
-            image_size: Target image size (larger than roof model)
-            augment: Whether to apply data augmentation
-            preload: Whether to preload all images into memory (faster training)
-        """
-        self.samples = samples
-        self.image_size = image_size
-        self.augment = augment
-        self.preload = preload
-        
-        # Pre-compute all tensors for maximum speed
-        self.images = []
-        self.metadata = []
-        self.labels = []
-        
-        if preload:
-            print(f"  Preloading {len(samples)} images...")
-            for i, sample in enumerate(samples):
-                # Load and preprocess image (supports FITS and JPG)
-                img = self.load_image(sample['image_path'])
-                img = self.preprocess(img)
-                # Store as tensor ready for GPU
-                self.images.append(torch.from_numpy(img).unsqueeze(0).float())
-                
-                # Pre-compute metadata tensor
-                meta = sample['metadata']
-                meta_tensor = torch.tensor([
-                    meta.get('corner_to_center_ratio', 1.0),
-                    meta.get('median_lum', 0.0),
-                    1.0 if meta.get('is_astronomical_night') else 0.0,
-                    meta.get('hour', 12) / 24.0,
-                    meta.get('moon_illumination', 0.0) / 100.0,
-                    1.0 if meta.get('moon_is_up') else 0.0,
-                ], dtype=torch.float32)
-                self.metadata.append(meta_tensor)
-                
-                # Pre-compute labels
-                sky_idx = SKY_TO_IDX.get(sample['sky_condition'], 0)
-                stars_visible = 1.0 if sample['stars_visible'] else 0.0
-                star_density = float(sample.get('star_density', 0.0))
-                moon_visible = 1.0 if sample['moon_visible'] else 0.0
-                self.labels.append({
-                    'sky': torch.tensor(sky_idx, dtype=torch.long),
-                    'stars': torch.tensor(stars_visible, dtype=torch.float32),
-                    'density': torch.tensor(star_density, dtype=torch.float32),
-                    'moon': torch.tensor(moon_visible, dtype=torch.float32),
-                })
-                
-                if (i + 1) % 100 == 0:
-                    print(f"    Loaded {i + 1}/{len(samples)}")
-            print(f"  ✓ Preloaded {len(samples)} images")
-    
-    def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, idx):
-        if self.preload:
-            image = self.images[idx].clone()
-            
-            # GPU-friendly augmentation (simple transforms)
-            if self.augment:
-                # Random flip (horizontal)
-                if random.random() > 0.5:
-                    image = torch.flip(image, [2])
-                # Random flip (vertical)
-                if random.random() > 0.5:
-                    image = torch.flip(image, [1])
-                # Random brightness
-                image = image * random.uniform(0.9, 1.1)
-                image = torch.clamp(image, 0, 1)
-            
-            return {
-                'image': image,
-                'metadata': self.metadata[idx],
-                'sky_condition': self.labels[idx]['sky'],
-                'stars_visible': self.labels[idx]['stars'],
-                'star_density': self.labels[idx]['density'],
-                'moon_visible': self.labels[idx]['moon'],
-            }
-        else:
-            # Fallback to disk loading (slow)
-            sample = self.samples[idx]
-            image = self.load_image(sample['image_path'])
-            image = self.preprocess(image)
-            image_tensor = torch.from_numpy(image).unsqueeze(0).float()
-            
-            meta = sample['metadata']
-            meta_tensor = torch.tensor([
-                meta.get('corner_to_center_ratio', 1.0),
-                meta.get('median_lum', 0.0),
-                1.0 if meta.get('is_astronomical_night') else 0.0,
-                meta.get('hour', 12) / 24.0,
-                meta.get('moon_illumination', 0.0) / 100.0,
-                1.0 if meta.get('moon_is_up') else 0.0,
-            ], dtype=torch.float32)
-            
-            sky_idx = SKY_TO_IDX.get(sample['sky_condition'], 0)
-            
-            return {
-                'image': image_tensor,
-                'metadata': meta_tensor,
-                'sky_condition': torch.tensor(sky_idx, dtype=torch.long),
-                'stars_visible': torch.tensor(1.0 if sample['stars_visible'] else 0.0, dtype=torch.float32),
-                'star_density': torch.tensor(float(sample.get('star_density', 0.0)), dtype=torch.float32),
-                'moon_visible': torch.tensor(1.0 if sample['moon_visible'] else 0.0, dtype=torch.float32),
-            }
-    
-    def load_fits(self, path: Path) -> np.ndarray:
-        """Load FITS file as numpy array."""
-        with fits.open(path) as hdul:
-            data = hdul[0].data
-        return data.astype(np.float32)
-    
-    def load_jpg(self, path: Path) -> np.ndarray:
-        """Load JPG file as grayscale numpy array."""
-        from PIL import Image
-        img = Image.open(path).convert('L')  # Convert to grayscale
-        return np.array(img, dtype=np.float32)
-    
-    def load_image(self, path: Path) -> np.ndarray:
-        """Load image file (FITS or JPG)."""
-        if str(path).lower().endswith('.fits'):
-            return self.load_fits(path)
-        else:
-            return self.load_jpg(path)
-    
-    def preprocess(self, image: np.ndarray) -> np.ndarray:
-        """Preprocess image: normalize, resize, stretch."""
-        # Normalize to 0-1
-        p1, p99 = np.percentile(image, [1, 99])
-        if p99 > p1:
-            image = (image - p1) / (p99 - p1)
-        image = np.clip(image, 0, 1)
-        
-        # Arcsinh stretch for better star visibility
-        stretch = 10.0
-        image = np.arcsinh(image * stretch) / np.arcsinh(stretch)
-        
-        # Resize using block averaging
-        image = self.resize_image(image, self.image_size)
-        
-        return image.astype(np.float32)
-    
-    def resize_image(self, img: np.ndarray, size: int) -> np.ndarray:
-        """Resize image using block averaging."""
-        h, w = img.shape
-        block_h = h // size
-        block_w = w // size
-        
-        if block_h == 0 or block_w == 0:
-            result = np.zeros((size, size), dtype=np.float32)
-            copy_h = min(h, size)
-            copy_w = min(w, size)
-            result[:copy_h, :copy_w] = img[:copy_h, :copy_w]
-            return result
-        
-        trimmed = img[:block_h * size, :block_w * size]
-        result = trimmed.reshape(size, block_h, size, block_w).mean(axis=(1, 3))
-        return result
+# Reproducible split so a separate eval can reconstruct the exact test set.
+SEED = 42
 
 
 class SkyClassifierCNN(nn.Module):
@@ -327,8 +159,10 @@ def load_dataset(data_dir: Path) -> tuple:
                 skipped['no_labels'] += 1
                 continue
             
-            # Must have sky_condition label
+            # Must have sky_condition label. Fold any legacy 5-class label into
+            # the 3-class scheme so an un-migrated file is bucketed, not dropped.
             sky_cond = labels.get('sky_condition')
+            sky_cond = SKY_CONDITION_COLLAPSE.get(sky_cond, sky_cond)
             if not sky_cond or sky_cond not in SKY_CONDITIONS:
                 skipped['no_sky_label'] += 1
                 continue
@@ -392,8 +226,37 @@ def load_dataset(data_dir: Path) -> tuple:
     
     print(f"Loaded: {len(pier_samples)} pier (roof open), {len(allsky_samples)} all-sky")
     print(f"Skipped: {skipped}")
-    
+
     return pier_samples, allsky_samples
+
+
+def _split_samples(samples: list, val_split: float):
+    """Reproducible train/val/test split, stratified on sky_condition.
+
+    Test is held out at 15%; val is `val_split` of the remainder. Falls back to a
+    seeded random split if sklearn is missing or a class is too rare to stratify.
+    """
+    strata = [s['sky_condition'] for s in samples]
+    try:
+        if not SKLEARN_AVAILABLE:
+            raise RuntimeError("sklearn unavailable")
+        trainval, test = train_test_split(
+            samples, test_size=0.15, random_state=SEED, stratify=strata)
+        train, val = train_test_split(
+            trainval, test_size=val_split, random_state=SEED,
+            stratify=[s['sky_condition'] for s in trainval])
+        return train, val, test
+    except (ValueError, RuntimeError) as e:
+        # ValueError: a class has too few members to stratify.
+        print(f"  Stratified split unavailable ({e}); using seeded random split.")
+        shuffled = list(samples)
+        random.Random(SEED).shuffle(shuffled)
+        n_test = max(int(len(shuffled) * 0.15), 1)
+        n_val = max(int(len(shuffled) * val_split), 1)
+        test = shuffled[:n_test]
+        val = shuffled[n_test:n_test + n_val]
+        train = shuffled[n_test + n_val:]
+        return train, val, test
 
 
 def train_model(
@@ -425,25 +288,22 @@ def train_model(
         print(f"Error: Need at least 20 pier samples for validation, got {len(pier_samples)}")
         return None
     
-    # Split PIER samples into train/val (validation is pier-only)
-    # NOTE: Training ONLY on pier camera data (no allsky assistance)
-    random.shuffle(pier_samples)
-    val_size = max(int(len(pier_samples) * val_split), 10)  # At least 10 for validation
-    val_samples = pier_samples[:val_size]
-    pier_train_samples = pier_samples[val_size:]
-    
-    # Training = pier camera ONLY (roof open samples)
-    train_samples = pier_train_samples
-    random.shuffle(train_samples)
-    
-    # Calculate totals
+    # Seed everything so the split is reproducible — a separate eval reconstructs
+    # the exact same test set, and runs are comparable across retrains.
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+
+    # Stratified train/val/TEST split on sky_condition (pier camera only). The
+    # held-out test set is never used for selection or the LR scheduler, so the
+    # final numbers are honest rather than measured on the tuning set.
+    train_samples, val_samples, test_samples = _split_samples(pier_samples, val_split)
     all_train = train_samples
-    
+
     print(f"\n=== Dataset Split (PIER CAMERA ONLY) ===")
-    print(f"Training:   {len(train_samples)} total")
-    print(f"  - Pier camera (roof open): {len(pier_train_samples)}")
-    print(f"  - All-sky camera:          0 (DISABLED - pier only mode)")
-    print(f"Validation: {len(val_samples)} (pier camera only)")
+    print(f"Training:   {len(train_samples)} (roof open)")
+    print(f"Validation: {len(val_samples)} (selection + scheduler)")
+    print(f"Test:       {len(test_samples)} (held out, final metrics only)")
     print(f"\nNote: All-sky samples ({len(allsky_samples)}) are SKIPPED in this training run")
     
     # Print class distribution (training set)
@@ -465,12 +325,16 @@ def train_model(
     train_dataset = SkyDataset(train_samples, image_size=image_size, augment=True, preload=True)
     print("\nPreloading validation data (pier camera only)...")
     val_dataset = SkyDataset(val_samples, image_size=image_size, augment=False, preload=True)
-    
+    print("\nPreloading test data (pier camera only)...")
+    test_dataset = SkyDataset(test_samples, image_size=image_size, augment=False, preload=True)
+
     # With preloaded data, we don't need multiprocessing - data is already in RAM
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, 
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
                             num_workers=0, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
+                             num_workers=0, pin_memory=True)
     
     # Create model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -486,9 +350,24 @@ def train_model(
     # Skipping compilation - still get good speedup from mixed precision and large batches
     print("Note: Using eager mode (torch.compile requires Triton/Linux)")
     
-    # Loss functions
-    criterion_sky = nn.CrossEntropyLoss()
-    criterion_binary = nn.BCEWithLogitsLoss()
+    # Class-weight ONLY the sky head — it's the imbalanced multiclass task (Clear
+    # dominates the open-roof set because you only image on clear nights). The
+    # binary heads use plain BCE on purpose: stars-visible is actually the
+    # MAJORITY label, so balancing it would trade away accuracy, and the moon head
+    # already learns its rare positive well without weighting.
+    # sqrt-softened inverse-frequency weights, normalized to mean 1. Full inverse
+    # frequency over-corrected (Clear fell to 82%); sqrt keeps the rare classes
+    # learnable without tanking Clear, and mean-1 normalization keeps the sky loss
+    # scale comparable to the other (unweighted) task heads.
+    sky_counts = Counter(SKY_TO_IDX[s['sky_condition']] for s in train_samples)
+    n_classes = len(SKY_CONDITIONS)
+    raw_w = [(len(train_samples) / (n_classes * max(sky_counts.get(i, 0), 1))) ** 0.5
+             for i in range(n_classes)]
+    mean_w = sum(raw_w) / n_classes
+    sky_w = torch.tensor([w / mean_w for w in raw_w], dtype=torch.float32, device=device)
+    criterion_sky = nn.CrossEntropyLoss(weight=sky_w)
+    criterion_stars = nn.BCEWithLogitsLoss()
+    criterion_moon = nn.BCEWithLogitsLoss()
     criterion_density = nn.MSELoss()
     
     # Optimizer with weight decay
@@ -531,9 +410,9 @@ def train_model(
                 
                 # Multi-task loss (weighted)
                 loss_sky = criterion_sky(sky_logits, sky_labels)
-                loss_stars = criterion_binary(stars_logit.squeeze(-1), stars_labels)
+                loss_stars = criterion_stars(stars_logit.squeeze(-1), stars_labels)
                 loss_density = criterion_density(density.squeeze(-1), density_labels)
-                loss_moon = criterion_binary(moon_logit.squeeze(-1), moon_labels)
+                loss_moon = criterion_moon(moon_logit.squeeze(-1), moon_labels)
                 
                 # Combined loss with weights
                 loss = 1.0 * loss_sky + 0.5 * loss_stars + 0.3 * loss_density + 0.5 * loss_moon
@@ -569,9 +448,9 @@ def train_model(
                     
                     # Loss
                     loss_sky = criterion_sky(sky_logits, sky_labels)
-                    loss_stars = criterion_binary(stars_logit.squeeze(-1), stars_labels)
+                    loss_stars = criterion_stars(stars_logit.squeeze(-1), stars_labels)
                     loss_density = criterion_density(density.squeeze(-1), density_labels)
-                    loss_moon = criterion_binary(moon_logit.squeeze(-1), moon_labels)
+                    loss_moon = criterion_moon(moon_logit.squeeze(-1), moon_labels)
                     loss = 1.0 * loss_sky + 0.5 * loss_stars + 0.3 * loss_density + 0.5 * loss_moon
                 
                 val_loss += loss.item()
@@ -601,10 +480,12 @@ def train_model(
                   f"Train Loss={train_loss:.4f}, Val Loss={val_loss:.4f}, "
                   f"Sky={sky_acc:.1f}%, Stars={stars_acc:.1f}%, Moon={moon_acc:.1f}%")
         
-        # Save best model
+        # Save best model. deepcopy is required: state_dict() returns live tensor
+        # references, so a shallow .copy() would be overwritten in place by later
+        # epochs — silently saving the last epoch instead of the best.
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_model_state = model.state_dict().copy()
+            best_model_state = copy.deepcopy(model.state_dict())
     
     # Load best model
     model.load_state_dict(best_model_state)
@@ -620,19 +501,19 @@ def train_model(
         'sky_conditions': SKY_CONDITIONS,
         'trained_at': datetime.now().isoformat(),
         'train_samples_total': len(train_samples),
-        'train_samples_pier': len(pier_train_samples),
         'train_samples_allsky': len(allsky_samples),
         'val_samples': len(val_samples),
+        'test_samples': len(test_samples),
         'epochs': epochs,
     }, model_path)
     
     print(f"\n✓ Model saved to: {model_path}")
     
-    # Final evaluation
+    # Final evaluation on the HELD-OUT test set (never seen during selection).
     print("\n" + "=" * 60)
-    print("Final Evaluation on Validation Set")
+    print("Final Evaluation on Held-Out Test Set")
     print("=" * 60)
-    
+
     model.eval()
     all_sky_true = []
     all_sky_pred = []
@@ -640,9 +521,9 @@ def train_model(
     all_stars_pred = []
     all_moon_true = []
     all_moon_pred = []
-    
+
     with torch.no_grad():
-        for batch in val_loader:
+        for batch in test_loader:
             images = batch['image'].to(device)
             metadata = batch['metadata'].to(device)
             

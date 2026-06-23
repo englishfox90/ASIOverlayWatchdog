@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from ml.labeling_io import find_sample_sets
 from ml.review_tab import to_bool
 
-CLEAR = {"Clear", "Mostly Clear"}
+CLEAR = {"Clear"}
 
 
 def _is_clear(sky_condition: str) -> bool:

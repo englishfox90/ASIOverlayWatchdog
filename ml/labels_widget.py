@@ -91,7 +91,7 @@ class LabelsWidget(QWidget):
         sky_row = QHBoxLayout()
         sky_row.addWidget(QLabel("Overall sky:"))
         self.sky_condition = QComboBox()
-        self.sky_condition.addItems(["", "Clear", "Mostly Clear", "Partly Cloudy", "Mostly Cloudy", "Overcast", "Fog/Haze"])
+        self.sky_condition.addItems(["", "Clear", "Partly Cloudy", "Overcast"])
         sky_row.addWidget(self.sky_condition)
         sky_row.addStretch()
         sky_layout.addLayout(sky_row)
@@ -253,7 +253,7 @@ class LabelsWidget(QWidget):
             if sky_pred is not None:
                 idx = self.sky_condition.findText(sky_pred.sky_condition)
                 self.sky_condition.setCurrentIndex(idx if idx >= 0 else 0)
-                cloudy_conditions = ['Partly Cloudy', 'Mostly Cloudy', 'Overcast']
+                cloudy_conditions = ['Partly Cloudy', 'Overcast']
                 self.clouds_visible.setChecked(sky_pred.sky_condition in cloudy_conditions)
                 self.stars_visible.setChecked(bool(sky_pred.stars_visible))
                 self.star_density.setValue(sky_pred.star_density if sky_pred.stars_visible else 0)
@@ -262,15 +262,11 @@ class LabelsWidget(QWidget):
             else:
                 if wc.get('available'):
                     cloud_pct = wc.get('cloud_coverage_pct', 0)
-                    self.clouds_visible.setChecked(cloud_pct > 10)
-                    if cloud_pct <= 10:
+                    self.clouds_visible.setChecked(cloud_pct > 25)
+                    if cloud_pct <= 25:
                         sky_cond = "Clear"
-                    elif cloud_pct <= 25:
-                        sky_cond = "Mostly Clear"
-                    elif cloud_pct <= 50:
-                        sky_cond = "Partly Cloudy"
                     elif cloud_pct <= 75:
-                        sky_cond = "Mostly Cloudy"
+                        sky_cond = "Partly Cloudy"
                     else:
                         sky_cond = "Overcast"
                     idx = self.sky_condition.findText(sky_cond)
@@ -279,7 +275,7 @@ class LabelsWidget(QWidget):
                     self.clouds_visible.setChecked(False)
                     self.sky_condition.setCurrentIndex(0)
 
-                self.moon_visible.setChecked(mc.get('moon_is_up', False) if mc.get('available') else False)
+                self.moon_visible.setChecked(bool(mc.get('moon_is_up')) if mc.get('available') else False)
 
                 is_night = tc.get('is_astronomical_night', False)
                 is_clear = wc.get('is_clear', False) if wc.get('available') else True

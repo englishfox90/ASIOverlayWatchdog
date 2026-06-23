@@ -69,15 +69,22 @@ class RoofDataset(Dataset):
         self.samples = samples
         self.image_size = image_size
         self.augment = augment
-    
+        # Resizing a 50 MB FITS down to image_size is deterministic, so cache the
+        # result and re-load it across epochs. With persistent DataLoader workers
+        # each worker keeps its own slice cached, so only epoch 1 touches disk.
+        self._resize_cache = {}
+
     def __len__(self):
         return len(self.samples)
-    
+
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        
-        # Load FITS image
-        image = self.load_fits(sample['fits_path'])
+
+        # Load FITS image (cached after first epoch)
+        image = self._resize_cache.get(idx)
+        if image is None:
+            image = self.load_fits(sample['fits_path'])
+            self._resize_cache[idx] = image
         
         # Apply augmentation if training
         if self.augment:
@@ -316,10 +323,10 @@ def train_epoch(model, loader, criterion, optimizer, device):
     total = 0
     
     for images, metadata, labels in loader:
-        images = images.to(device)
-        metadata = metadata.to(device)
-        labels = labels.to(device)
-        
+        images = images.to(device, non_blocking=True)
+        metadata = metadata.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+
         optimizer.zero_grad()
         outputs = model(images, metadata).squeeze(-1)
         loss = criterion(outputs, labels)
@@ -343,10 +350,10 @@ def evaluate(model, loader, criterion, device):
     
     with torch.no_grad():
         for images, metadata, labels in loader:
-            images = images.to(device)
-            metadata = metadata.to(device)
-            labels = labels.to(device)
-            
+            images = images.to(device, non_blocking=True)
+            metadata = metadata.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
             outputs = model(images, metadata).squeeze(-1)
             loss = criterion(outputs, labels)
             
@@ -369,7 +376,9 @@ def main():
     parser.add_argument("data_dir", nargs="?", default=r"D:\Pier Camera ML Data",
                         help="Directory containing labeled calibration files")
     parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
+    parser.add_argument("--num-workers", type=int, default=8,
+                        help="DataLoader worker processes (parallel FITS loading)")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--image-size", type=int, default=128, help="Image size for model")
     parser.add_argument("--output", type=str, default="ml/models/roof_classifier_v1.pth",
@@ -422,10 +431,17 @@ def main():
     sample_weights = [class_weights[1 if label else 0] for label in train_labels]
     sampler = WeightedRandomSampler(sample_weights, len(sample_weights))
     
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    # Create data loaders. Workers parallelise the heavy FITS load/resize so the
+    # GPU isn't starved; persistent_workers keeps each worker's resize cache warm
+    # across epochs. pin_memory speeds host->device copies.
+    loader_kwargs = dict(
+        num_workers=args.num_workers,
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=(args.num_workers > 0),
+    )
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler, **loader_kwargs)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, **loader_kwargs)
     
     # Create model
     model = RoofClassifierCNN(image_size=args.image_size).to(device)
@@ -443,18 +459,21 @@ def main():
     print("Starting training...")
     print(f"{'='*60}")
     
-    best_val_acc = 0
+    # Select on val LOSS, not val accuracy: accuracy saturates at 1.0 within a
+    # couple of epochs on this easy task, after which only loss still discriminates
+    # between a barely-trained and a fully-converged model.
+    best_val_loss = float('inf')
     best_epoch = 0
-    
+
     for epoch in range(args.epochs):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_acc, _, _ = evaluate(model, val_loader, criterion, device)
-        
+
         scheduler.step(val_loss)
-        
+
         # Save best model
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             best_epoch = epoch + 1
             
             # Save checkpoint

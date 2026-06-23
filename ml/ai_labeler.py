@@ -24,8 +24,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "google/gemini-2.5-flash"
 
 # Must match the LabelsWidget sky_condition combo box (minus the empty entry).
-SKY_CONDITIONS = ["Clear", "Mostly Clear", "Partly Cloudy",
-                  "Mostly Cloudy", "Overcast", "Fog/Haze"]
+SKY_CONDITIONS = ["Clear", "Partly Cloudy", "Overcast"]
 
 SYSTEM_PROMPT = f"""You are labelling monochrome luminance frames from an astrophotography \
 pier camera that points at a fixed patch of sky through a roll-off metal roof. \
@@ -39,12 +38,11 @@ frame and the sky is blocked (typically near-uniform, few or no stars, hard edge
 
 2. sky_condition: only meaningful when roof_open is true. Read cloud cover from \
 the star field and sky texture:
-   - Clear: sky full of sharp pinpoint stars, dark clean background.
-   - Mostly Clear: mostly stars, a little haze or a few soft patches.
+   - Clear: mostly sharp pinpoint stars, dark clean background (a little haze or
+     a few soft patches is still Clear).
    - Partly Cloudy: noticeable cloud patches blotting out parts of the field.
-   - Mostly Cloudy: most stars gone, large washed-out regions.
-   - Overcast: no stars, uniform bright/grey murk.
-   - Fog/Haze: soft glow, diffuse, stars smeared rather than blocked.
+   - Overcast: most/all stars gone — large washed-out regions, uniform bright/grey
+     murk, or diffuse fog/haze smearing the stars.
 A bright moon can wash out faint stars WITHOUT clouds — a uniform soft glow with \
 no distinct cloud edges may be moonlight, not cloud (if a moon hint is given, use \
 it). If roof_open is false, set sky_condition to "" and clouds_visible to false.
