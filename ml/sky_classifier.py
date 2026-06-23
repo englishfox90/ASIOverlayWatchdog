@@ -50,8 +50,8 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 
-# Sky condition classes (must match training)
-SKY_CONDITIONS = ['Clear', 'Mostly Clear', 'Partly Cloudy', 'Mostly Cloudy', 'Overcast']
+# Sky condition classes (must match training — collapsed to 3, see sky_dataset.py)
+SKY_CONDITIONS = ['Clear', 'Partly Cloudy', 'Overcast']
 IDX_TO_SKY = {i: cond for i, cond in enumerate(SKY_CONDITIONS)}
 
 

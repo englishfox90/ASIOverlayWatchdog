@@ -418,7 +418,7 @@ class MetadataWidget(QFrame):
                     # Color code based on condition
                     if sky_cond == 'Clear':
                         self.sky_value.setStyleSheet("color: #4ade80;")  # Green
-                    elif sky_cond in ('Mostly Clear', 'Partly Cloudy'):
+                    elif sky_cond == 'Partly Cloudy':
                         self.sky_value.setStyleSheet("color: #facc15;")  # Yellow
                     else:
                         self.sky_value.setStyleSheet("color: #f87171;")  # Red/Orange
