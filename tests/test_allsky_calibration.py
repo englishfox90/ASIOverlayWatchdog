@@ -140,6 +140,173 @@ class TestFisheyePersistence:
 # CalibrationError (graceful degradation)
 # ===================================================================
 
+class TestMultiCalibrateRegularization:
+    """Multi-image refinement must keep the radial polynomial physical on
+    obstructed installs, where clustered coverage + a stale seed used to drive
+    a3 to its bound (the recurring 'a3=25.0 outside plausible range' failure).
+    """
+
+    def _obstructed(self, x, y):
+        # Telescope/mount blob + dome-rim ring, mirroring a pier-camera frame.
+        if 1150 < x < 1900 and 1150 < y < 2100:
+            return True
+        return math.hypot(x - 1137, y - 1306) > 980
+
+    def _frame(self, true_model, dt):
+        from services.allsky.catalogs import get_bright_stars
+        from services.allsky.coords import radec_to_altaz
+        rng = np.random.default_rng(7)
+        above, detected = [], []
+        for s in get_bright_stars(max_mag=4.0):
+            alt, az = radec_to_altaz(s['ra_deg'], s['dec_deg'], 31.33, -100.46, dt)
+            alt, az = float(alt), float(az)
+            if alt <= 3.0:
+                continue
+            above.append((s, alt, az))
+            if alt < 12:
+                continue
+            xy = true_model.altaz_to_pixel(alt, az)
+            if xy is None or self._obstructed(*xy):
+                continue
+            detected.append((xy[0] + rng.normal(), xy[1] + rng.normal(), 1000.0))
+        above.sort(key=lambda t: t[0]['vmag'])
+        return {'dt': dt, 'detected': detected, 'above_horizon': above,
+                'sky_cx': 1137.0, 'sky_cy': 1306.0, 'sky_r': 968.0,
+                'image_width': 2628, 'image_height': 2628}
+
+    def test_cold_start_bootstrap_no_seed(self, monkeypatch):
+        """With no prior model (fresh install, any site), the cross-frame
+        orientation search + joint fit must recover a valid model from cold.
+        The grid is narrowed here for speed; the full-grid discrimination is
+        exercised offline."""
+        pytest.importorskip('scipy')
+        from datetime import datetime, timezone, timedelta
+        from services.allsky import multi_calibrate as MC
+        from services.allsky.calibration_validate import validate_lens_polynomial
+
+        # Narrow the coarse grid to a focused window around the true pose so the
+        # test runs fast while still exercising search -> top-k -> fit -> gate.
+        monkeypatch.setattr(MC, 'ORIENT_AXIS_ALT', range(75, 91, 5))
+        monkeypatch.setattr(MC, 'ORIENT_AXIS_AZ', range(0, 60, 15))
+        monkeypatch.setattr(MC, 'ORIENT_ROLL_DEG', range(-45, 15, 15))
+
+        true_model = FisheyeModel(
+            cx=1137.44, cy=1306.0, a1=643.39, a3=1.30, a5=-7.73,
+            roll=-0.321, axis_alt=82.55, axis_az=16.90, east_left=True)
+        base = datetime(2026, 6, 22, 5, 30, tzinfo=timezone.utc)
+        frames = [self._frame(true_model, base + timedelta(minutes=20 * i))
+                  for i in range(5)]
+
+        model = MC.refine_from_detections(frames, None, max_residual_px=20.0)
+        ok, msg = validate_lens_polynomial(model)
+        assert ok, msg
+        # Recovered orientation should be close to truth.
+        assert abs(model.axis_alt - 82.55) < 6.0, f"axis_alt={model.axis_alt:.1f}"
+        assert model.east_left is True
+
+    def test_stale_seed_keeps_a3_physical(self):
+        """A ~5° stale seed over a clustered/obstructed sky must not let a3 run
+        to its bound — the ridge prior pulls it back into the physical range."""
+        pytest.importorskip('scipy')
+        import copy
+        from datetime import datetime, timezone, timedelta
+        from services.allsky import multi_calibrate as MC
+        from services.allsky.calibration_validate import (
+            tol_scale, validate_lens_polynomial, A3_MIN, A3_MAX)
+
+        true_model = FisheyeModel(
+            cx=1137.44, cy=1306.0, a1=643.39, a3=1.30, a5=-7.73,
+            roll=-0.321, axis_alt=82.55, axis_az=16.90, east_left=True)
+        base = datetime(2026, 6, 22, 5, 30, tzinfo=timezone.utc)
+        frames = [self._frame(true_model, base + timedelta(minutes=20 * i))
+                  for i in range(4)]
+
+        stale = copy.deepcopy(true_model)
+        stale.roll += math.radians(3.0)
+        stale.axis_az += 4.0
+        stale.axis_alt -= 2.0
+        stale.a1 += 15.0
+
+        # Drive the joint fit directly so the polynomial invariant is checked
+        # regardless of whether the orientation happens to clear the anchor gate.
+        ts = tol_scale(968.0)
+        matches = MC._build_all_matches(frames, stale, tol_px=50.0 * ts, min_per_image=4)
+        model, _rms = MC._joint_iterative_fit(
+            matches, frames, stale, 4, 20, 20.0, tol_scale_factor=ts)
+
+        ok, msg = validate_lens_polynomial(model)
+        assert A3_MIN <= model.a3 <= A3_MAX, (
+            f"a3={model.a3:.2f} escaped physical range [{A3_MIN}, {A3_MAX}]")
+        assert ok, msg
+
+
+class TestGuidedCalibration:
+    """Anchor-assisted (user-clicked) calibration: exact star<->pixel pairs must
+    recover a correct model on any orientation, the dependable cold-start path."""
+
+    def _true_model(self):
+        return FisheyeModel(
+            cx=1137.0, cy=1306.0, a1=643.0, a3=1.3, a5=-7.7,
+            roll=-0.321, axis_alt=82.5, axis_az=16.9, east_left=True)
+
+    def _anchors(self, true_model, lat, lon, dt, n=6):
+        """Project the n brightest well-spread above-horizon stars to pixels."""
+        from services.allsky.catalogs import get_bright_stars
+        from services.allsky.coords import radec_to_altaz
+        out = []
+        for s in get_bright_stars(max_mag=2.5):
+            alt, az = radec_to_altaz(s['ra_deg'], s['dec_deg'], lat, lon, dt)
+            if float(alt) < 25:
+                continue
+            xy = true_model.altaz_to_pixel(float(alt), float(az))
+            if xy is None:
+                continue
+            out.append((xy[0], xy[1], s['ra_deg'], s['dec_deg'], float(az)))
+        # spread across azimuth: sort by az and sample evenly
+        out.sort(key=lambda t: t[4])
+        if len(out) > n:
+            idx = np.linspace(0, len(out) - 1, n).round().astype(int)
+            out = [out[i] for i in dict.fromkeys(idx.tolist())]
+        return [(x, y, ra, dec) for x, y, ra, dec, _az in out]
+
+    def test_recovers_known_model_from_anchors(self):
+        pytest.importorskip('scipy')
+        from datetime import datetime, timezone
+        from services.allsky.guided_calibration import calibrate_from_anchors
+
+        true_model = self._true_model()
+        lat, lon = 31.33, -100.46
+        dt = datetime(2026, 6, 22, 6, 0, tzinfo=timezone.utc)
+        anchors = self._anchors(true_model, lat, lon, dt, n=6)
+        assert len(anchors) >= 4
+
+        m = calibrate_from_anchors(
+            anchors, lat, lon, dt,
+            sky_cx=1137.0, sky_cy=1306.0, sky_radius=968.0,
+            image_width=2628, image_height=2628)
+
+        assert m.rms_residual < 3.0, f"RMS {m.rms_residual:.1f}px"
+        assert m.east_left is True
+        assert abs(m.a1 - 643.0) < 25
+        assert abs(m.axis_alt - 82.5) < 3.0
+        # azimuth difference modulo 360
+        daz = abs(((m.axis_az - 16.9 + 180) % 360) - 180)
+        assert daz < 5.0, f"axis_az off by {daz:.1f}"
+
+    def test_too_few_anchors_raises(self):
+        pytest.importorskip('scipy')
+        from datetime import datetime, timezone
+        from services.allsky.guided_calibration import calibrate_from_anchors, MIN_ANCHORS
+        from services.allsky.calibration import CalibrationError
+
+        true_model = self._true_model()
+        lat, lon = 31.33, -100.46
+        dt = datetime(2026, 6, 22, 6, 0, tzinfo=timezone.utc)
+        anchors = self._anchors(true_model, lat, lon, dt, n=MIN_ANCHORS - 1)[:MIN_ANCHORS - 1]
+        with pytest.raises(CalibrationError, match="at least"):
+            calibrate_from_anchors(anchors, lat, lon, dt, 1137.0, 1306.0, 968.0)
+
+
 class TestCalibrationError:
     def test_insufficient_stars_raises(self):
         """Calibration should raise CalibrationError if too few stars detected."""

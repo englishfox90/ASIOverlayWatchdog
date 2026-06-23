@@ -41,11 +41,27 @@ class _MainWindowSettingsMixin:
         if cfg.get('_action') == 'calibrate':
             self.allsky_controller.start_calibration()
             return
+        if cfg.get('_action') == 'guided_calibrate':
+            self._open_guided_calibration()
+            return
         # Preserve calibration_file from existing config
         existing = self.config.get('allsky_overlay', {})
         cfg['calibration_file'] = existing.get('calibration_file', '')
         self.config.set('allsky_overlay', cfg)
         self.save_config()
+
+    def _open_guided_calibration(self) -> None:
+        """Prepare data and open the guided-calibration dialog."""
+        prep = self.allsky_controller.prepare_guided_calibration()
+        if not prep:
+            return  # controller already emitted a status explaining why
+        try:
+            from ui.panels.allsky_guided_dialog import GuidedCalibrationDialog
+            dlg = GuidedCalibrationDialog(prep, parent=self)
+            if dlg.exec() and dlg.anchors:
+                self.allsky_controller.start_guided_calibration(dlg.anchors, prep)
+        except Exception as e:
+            app_logger.error(f"Guided calibration dialog failed: {e}")
 
     def _on_allsky_settings_changed(self) -> None:
         try:

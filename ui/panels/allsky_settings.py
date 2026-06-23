@@ -273,6 +273,12 @@ class AllSkySettingsPanel(QScrollArea):
         self._calibrate_btn.clicked.connect(self._on_calibrate_clicked)
         vl.addWidget(self._calibrate_btn)
 
+        # Guided fallback for hard installs (obstructed / near-vertical / hazy)
+        # where automatic calibration can't determine orientation.
+        self._guided_btn = PushButton("Guided Calibration…", icon=mdi('target'))
+        self._guided_btn.clicked.connect(self._on_guided_clicked)
+        vl.addWidget(self._guided_btn)
+
         self._layout.addWidget(card)
 
     def _build_master_toggle(self):
@@ -463,6 +469,10 @@ class AllSkySettingsPanel(QScrollArea):
         """Signal controller to start calibration (controller is wired in main_window)."""
         # Controller is connected externally; emit settings_changed as a trigger
         self.settings_changed.emit({'_action': 'calibrate'})
+
+    def _on_guided_clicked(self):
+        """Signal main_window to open the guided-calibration dialog."""
+        self.settings_changed.emit({'_action': 'guided_calibrate'})
 
     def _on_setting_changed(self, *_):
         self.settings_changed.emit(self.get_config())
