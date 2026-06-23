@@ -14,10 +14,13 @@ from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
-from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QVBoxLayout, QLabel, QListWidget, QPushButton,
-    QComboBox, QWidget,
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QLabel
+from qfluentwidgets import (
+    BodyLabel, CaptionLabel, EditableComboBox, ListWidget,
+    PushButton, PrimaryPushButton,
 )
+
+from ..theme.tokens import Spacing
 
 # Snap radius (image pixels) within which a click locks onto a detected star.
 _SNAP_PX = 30.0
@@ -92,6 +95,9 @@ class GuidedCalibrationDialog(QDialog):
     # ------------------------------------------------------------------
     def _build_ui(self, pil_image):
         root = QHBoxLayout(self)
+        root.setContentsMargins(Spacing.base, Spacing.base,
+                                Spacing.base, Spacing.base)
+        root.setSpacing(Spacing.base)
 
         # Left: clickable image.
         self._img = _ClickableImage(self._on_image_click)
@@ -101,41 +107,51 @@ class GuidedCalibrationDialog(QDialog):
 
         # Right: controls.
         side = QVBoxLayout()
+        side.setSpacing(Spacing.sm)
         root.addLayout(side)
 
-        self._hint = QLabel(
-            "Click a bright star (snaps to the nearest detected star),\n"
-            "choose which star it is, then Add. Identify at least 4,\n"
+        self._hint = BodyLabel(
+            "Click a bright star (snaps to the nearest detected star), "
+            "choose which star it is, then Add. Identify at least 4, "
             "spread across the sky, then Solve.")
         self._hint.setWordWrap(True)
         side.addWidget(self._hint)
 
-        self._pending_lbl = QLabel("No star selected.")
+        self._pending_lbl = CaptionLabel("No star selected.")
         side.addWidget(self._pending_lbl)
 
-        self._combo = QComboBox()
+        # Editable so the user can type a name to filter the long star list.
+        self._combo = EditableComboBox()
+        self._combo.setPlaceholderText("Search for a star by name…")
         for c in self._candidates:
             self._combo.addItem(f"{c['name']}  (mag {c['vmag']:.1f}, "
-                                f"alt {c['alt']:.0f}°)", c)
+                                f"alt {c['alt']:.0f}°)", userData=c)
+        self._combo.setCurrentIndex(-1)
         side.addWidget(self._combo)
 
-        self._add_btn = QPushButton("Add this star")
+        self._add_btn = PushButton("Add this star")
+        self._add_btn.setCursor(Qt.PointingHandCursor)
         self._add_btn.clicked.connect(self._on_add)
         side.addWidget(self._add_btn)
 
-        side.addWidget(QLabel("Identified stars:"))
-        self._list = QListWidget()
+        side.addWidget(CaptionLabel("Identified stars:"))
+        self._list = ListWidget()
         side.addWidget(self._list, 1)
 
-        self._remove_btn = QPushButton("Remove selected")
+        self._remove_btn = PushButton("Remove selected")
+        self._remove_btn.setCursor(Qt.PointingHandCursor)
         self._remove_btn.clicked.connect(self._on_remove)
         side.addWidget(self._remove_btn)
 
         row = QHBoxLayout()
-        self._solve_btn = QPushButton("Solve")
-        self._solve_btn.clicked.connect(self._on_solve)
-        cancel = QPushButton("Cancel")
+        row.setSpacing(Spacing.sm)
+        cancel = PushButton("Cancel")
+        cancel.setCursor(Qt.PointingHandCursor)
         cancel.clicked.connect(self.reject)
+        self._solve_btn = PrimaryPushButton("Solve")
+        self._solve_btn.setCursor(Qt.PointingHandCursor)
+        self._solve_btn.clicked.connect(self._on_solve)
+        row.addStretch(1)
         row.addWidget(cancel)
         row.addWidget(self._solve_btn)
         side.addLayout(row)

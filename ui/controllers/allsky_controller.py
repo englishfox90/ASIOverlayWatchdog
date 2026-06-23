@@ -210,6 +210,7 @@ class AllSkyController(QObject):
         from services.allsky.star_centroid import detect_stars, estimate_sky_circle
         from services.allsky.catalogs import get_bright_stars
         from services.allsky.coords import radec_to_altaz
+        from services.allsky.render_stars import star_display_name
 
         sky_cx, sky_cy, sky_r = estimate_sky_circle(image)
         detections = detect_stars(image, max_stars=300,
@@ -218,8 +219,13 @@ class AllSkyController(QObject):
         for s in get_bright_stars(max_mag=3.5):
             alt, az = radec_to_altaz(s['ra_deg'], s['dec_deg'], lat, lon, dt)
             if float(alt) > 15.0:
+                # Many bright stars have no proper name; fall back to the Bayer
+                # designation, then the HR catalogue number, so the picker never
+                # shows a blank entry.
+                name = (star_display_name(s, True)
+                        or (f"HR {s['hr']}" if s.get('hr') else 'Unknown star'))
                 candidates.append({
-                    'name': s.get('name', ''), 'ra_deg': s['ra_deg'],
+                    'name': name, 'ra_deg': s['ra_deg'],
                     'dec_deg': s['dec_deg'], 'alt': float(alt), 'az': float(az),
                     'vmag': float(s.get('vmag', 0.0)),
                 })
@@ -366,11 +372,9 @@ class AllSkyController(QObject):
         """Return (image, source_description) for the most recent clean frame.
 
         Tries, in order:
-          1. MainWindow._cached_raw_image — Camera mode caches the RAW
-             pre-overlay frame in on_image_captured; Watch mode caches the
-             clean (no all-sky) output frame in _on_image_processed. Primary
-             source for both modes.
-          2. CameraController._last_frame — legacy in-memory fallback.
+          MainWindow._cached_raw_image — Camera mode caches the RAW
+          pre-overlay frame in on_image_captured; Watch mode caches the
+          clean (no all-sky) output frame in _on_image_processed.
 
         The old "load the last saved output image from disk" fallback was
         removed: that file is overlay-contaminated and already resized, so
@@ -382,16 +386,6 @@ class AllSkyController(QObject):
         cached = getattr(self._mw, '_cached_raw_image', None)
         if cached is not None:
             return cached, "cached raw frame"
-
-        try:
-            from ui.controllers.camera_controller import CameraController
-            for child in self._mw.children():
-                if isinstance(child, CameraController):
-                    frame = getattr(child, '_last_frame', None)
-                    if frame is not None:
-                        return frame, "camera controller"
-        except Exception as e:
-            log.debug(f"Camera controller probe failed: {e}")
 
         return None, ""
 
