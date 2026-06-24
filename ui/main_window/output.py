@@ -203,7 +203,7 @@ class _MainWindowOutputMixin:
             # Archive a downscaled copy to the rolling image library. This is an
             # independent sink (not gated on web/Discord) and never blocks —
             # enqueue() hands off to the library's background worker.
-            if getattr(self, 'image_library', None):
+            if self.image_library:
                 self.image_library.enqueue(output_image, metadata)
 
             output_config = self.config.get('output', {})

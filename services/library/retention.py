@@ -46,15 +46,15 @@ def prune(index, store, retention_days, max_size_gb, now_epoch):
             batch = index.oldest_rows(_BATCH)
             if not batch:
                 break
+            deleted_ids = []
             for _id, path, size in batch:
                 store.delete(path)
                 freed += size or 0
                 total -= size or 0
+                deleted_ids.append(_id)
                 if total <= max_bytes:
-                    # Trim the batch to only what we actually removed.
-                    batch = batch[: batch.index((_id, path, size)) + 1]
                     break
-            removed += index.delete_ids([r[0] for r in batch])
+            removed += index.delete_ids(deleted_ids)
 
     return {"removed": removed, "freed_bytes": freed}
 

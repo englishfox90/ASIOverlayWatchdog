@@ -131,7 +131,7 @@ class _MainWindowLifecycleMixin:
             except Exception:
                 pass
 
-        if getattr(self, 'image_library', None):
+        if self.image_library:
             try:
                 self.image_library.stop()
             except Exception:

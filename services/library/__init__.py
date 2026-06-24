@@ -92,11 +92,8 @@ class ImageLibrary:
             # Make room for the sentinel so the worker wakes promptly.
             try:
                 self._queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
                 self._queue.put_nowait(_STOP)
-            except queue.Full:
+            except (queue.Empty, queue.Full):
                 pass
         if self._worker:
             self._worker.join(timeout=5.0)
@@ -195,7 +192,7 @@ class ImageLibrary:
         except Exception:
             full = {}
         cfg = dict(DEFAULTS)
-        cfg.update(full.get("library", {}) or {})
+        cfg.update(full.get("library") or {})
         return cfg
 
     @staticmethod

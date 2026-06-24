@@ -9,7 +9,7 @@ exist for human inspection and collision-free writes only.
 import os
 import uuid
 
-from ..app_config import get_app_data_dir
+from ..utils_paths import get_app_data_dir
 
 LIBRARY_SUBFOLDER = "Library"
 DB_FILENAME = "library.db"
@@ -30,8 +30,11 @@ class LibraryStore:
     """
 
     def __init__(self, root=None):
-        self.root = root or get_library_root()
-        os.makedirs(self.root, exist_ok=True)
+        if root is None:
+            self.root = get_library_root()  # already creates the directory
+        else:
+            self.root = root
+            os.makedirs(self.root, exist_ok=True)
 
     @property
     def db_path(self):
