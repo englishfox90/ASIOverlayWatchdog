@@ -54,6 +54,17 @@ def tol_scale(sky_r: Optional[float]) -> float:
     return float(sky_r) / REF_SKY_R_PX
 
 
+def a1_from_sky_radius(sky_radius: float) -> float:
+    """Seed the linear fisheye coefficient a1 from the trimmed sky radius.
+
+    estimate_sky_circle returns the *trimmed* radius (inward by
+    SKY_TRIM_FRACTION); a1 is defined against the true optical radius for an
+    equidistant lens (r = a1·θ, so a1 = r_horizon / (π/2)). Divide the trim back
+    out first. Shared by the triangle, multi-image and guided calibrators.
+    """
+    return (float(sky_radius) / (1.0 - SKY_TRIM_FRACTION)) / (np.pi / 2.0)
+
+
 # ---------------------------------------------------------------------------
 # Grid-search scoring
 # ---------------------------------------------------------------------------
@@ -88,7 +99,7 @@ def validate_bright_anchors(
     model,
     above_horizon: List[Tuple],
     detected: List[Tuple],
-    top_n: int = 6,
+    top_n: int = 12,
     min_hits: int = 5,
     max_miss_px: float = 40.0,
     min_alt_deg: float = 15.0,
@@ -102,6 +113,17 @@ def validate_bright_anchors(
     (Sirius, Vega, Capella, etc.) by huge margins. This check catches
     that failure mode cheaply.
 
+    Obstruction tolerance: on obstructed installs (pier cameras with a
+    telescope/mount in frame, dome-rim cuts, building horizons) a large
+    fraction of the brightest stars can sit behind hardware and are never
+    detected. Testing only the top 6 then becomes structurally unwinnable
+    once ~half are blocked — a perfect fit still fails because its anchors
+    land on the OTA. Widening the pool to the top 12 while keeping the 5-hit
+    floor restores headroom: a correct fit hits the ~5-7 anchors that are in
+    clear sky, while a genuinely wrong orientation still misses essentially
+    all 12 (random-hit expectation is ~2). The lens-polynomial and RMS gates
+    remain as independent backstops.
+
     Args:
         model: FisheyeModel to evaluate (uses altaz_to_pixel).
         above_horizon: [(star_dict, alt_deg, az_deg), ...] sorted
@@ -109,6 +131,8 @@ def validate_bright_anchors(
         detected:      [(dx, dy, flux), ...] list of detected star
                        centroids.
         top_n: number of brightest above-horizon catalog stars to test.
+               Default 12 so obstructed installs (telescope/mount/dome in
+               frame) still have enough clear-sky anchors to reach min_hits.
         min_hits: minimum required anchors with a nearby detection.
         max_miss_px: maximum pixel distance from projected catalog
                      position to nearest detected star to count as a hit
@@ -176,6 +200,26 @@ def validate_bright_anchors(
 # it's always the optimiser compensating for a wrong orientation.
 A3_MIN = -80.0
 A3_MAX =  20.0
+
+# Conservative physical prior for a3 when the data can't constrain the radial
+# polynomial (no anchors / sparse clustered coverage). Real fisheyes sit in
+# roughly [-60, 0]; -30 is a neutral mid-range seed. Shared by the single-image,
+# multi-image and triangle fits.
+A3_SEED_DEFAULT = -30.0
+
+# Ridge-prior weights pulling (a3, a5) toward the seed when coverage is sparse,
+# so the optimiser corrects orientation instead of bending the polynomial to a
+# false minimum. Shared by the multi-image and guided fits (a5 spans a ~100x
+# larger range than a3, hence the smaller weight).
+REG_A3 = 0.5
+REG_A5 = 0.02
+
+# Coarse orientation hypothesis grid (degrees), shared by the cross-frame
+# (multi-image) and anchor (guided) orientation searches. Same parameter space;
+# only the per-candidate scoring differs between the two callers.
+ORIENT_AXIS_ALT = range(60, 91, 5)     # camera tilt from vertical
+ORIENT_AXIS_AZ = range(0, 360, 30)     # tilt azimuth
+ORIENT_ROLL_DEG = range(-180, 180, 15)  # rotation about the optical axis
 
 
 def validate_lens_polynomial(model) -> Tuple[bool, str]:

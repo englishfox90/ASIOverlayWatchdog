@@ -71,6 +71,33 @@ class CalibrationWorker(QThread):
             self.failed.emit(str(e))
 
 
+class GuidedCalibrationWorker(QThread):
+    """Background thread: solve a fisheye model from user-identified anchors."""
+
+    finished = Signal(object)    # FisheyeModel on success
+    failed   = Signal(str)       # Error message on failure
+
+    def __init__(self, anchors, lat, lon, dt, sky_cx, sky_cy, sky_r,
+                 img_w, img_h, parent=None):
+        super().__init__(parent)
+        self._anchors = anchors
+        self._lat, self._lon, self._dt = lat, lon, dt
+        self._sky_cx, self._sky_cy, self._sky_r = sky_cx, sky_cy, sky_r
+        self._img_w, self._img_h = img_w, img_h
+
+    def run(self):
+        try:
+            from services.allsky.guided_calibration import calibrate_from_anchors
+            model = calibrate_from_anchors(
+                self._anchors, self._lat, self._lon, self._dt,
+                self._sky_cx, self._sky_cy, self._sky_r,
+                image_width=self._img_w, image_height=self._img_h,
+            )
+            self.finished.emit(model)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class AllSkyController(QObject):
     """
     Business logic for the All-Sky Settings panel.
@@ -155,6 +182,80 @@ class AllSkyController(QObject):
         self.status_changed.emit("Calibrating… detecting stars")
         self._worker = CalibrationWorker(image, lat, lon, dt, parent=self)
         self._worker.progress.connect(self.status_changed)
+        self._worker.finished.connect(self._on_calibration_done)
+        self._worker.failed.connect(self._on_calibration_failed)
+        self._worker.start()
+
+    def prepare_guided_calibration(self) -> Optional[dict]:
+        """Gather everything the guided-calibration dialog needs.
+
+        Returns a dict with the latest clean frame, its detected star centroids
+        (so clicks snap to real stars), the sky circle, the capture time, and the
+        list of bright catalog stars currently above the horizon (name + RA/Dec
+        for the user to pick from). Returns None if no frame is available.
+        """
+        image, source = self._get_latest_frame()
+        if image is None:
+            self.status_changed.emit("No image available — start capture first.")
+            return None
+
+        lat = float(self._mw.config.get('weather', {}).get('latitude', 0) or 0)
+        lon = float(self._mw.config.get('weather', {}).get('longitude', 0) or 0)
+        if lat == 0.0 and lon == 0.0:
+            self.status_changed.emit(
+                "Set latitude/longitude in Output > Weather Settings first.")
+            return None
+
+        dt = datetime.now(timezone.utc)
+        from services.allsky.star_centroid import detect_stars, estimate_sky_circle
+        from services.allsky.catalogs import get_bright_stars
+        from services.allsky.coords import radec_to_altaz
+        from services.allsky.render_stars import star_display_name
+
+        sky_cx, sky_cy, sky_r = estimate_sky_circle(image)
+        detections = detect_stars(image, max_stars=300,
+                                  sky_cx=sky_cx, sky_cy=sky_cy, sky_radius=sky_r)
+        candidates = []
+        for s in get_bright_stars(max_mag=3.5):
+            alt, az = radec_to_altaz(s['ra_deg'], s['dec_deg'], lat, lon, dt)
+            if float(alt) > 15.0:
+                # Many bright stars have no proper name; fall back to the Bayer
+                # designation, then the HR catalogue number, so the picker never
+                # shows a blank entry.
+                name = (star_display_name(s, True)
+                        or (f"HR {s['hr']}" if s.get('hr') else 'Unknown star'))
+                candidates.append({
+                    'name': name, 'ra_deg': s['ra_deg'],
+                    'dec_deg': s['dec_deg'], 'alt': float(alt), 'az': float(az),
+                    'vmag': float(s.get('vmag', 0.0)),
+                })
+        candidates.sort(key=lambda c: c['vmag'])
+        log.info(f"Guided calibration prep: {len(detections)} detections, "
+                 f"{len(candidates)} bright stars above horizon ({source})")
+        return {
+            'image': image, 'detections': detections,
+            'sky_cx': sky_cx, 'sky_cy': sky_cy, 'sky_r': sky_r,
+            'lat': lat, 'lon': lon, 'dt': dt, 'candidates': candidates,
+            'image_width': getattr(image, 'width', 0),
+            'image_height': getattr(image, 'height', 0),
+        }
+
+    def start_guided_calibration(self, anchors, prep: dict) -> None:
+        """Solve from user anchors in the background, then save like Calibrate Now.
+
+        anchors: list of (pixel_x, pixel_y, ra_deg, dec_deg).
+        prep:    the dict returned by prepare_guided_calibration().
+        """
+        if self._worker and self._worker.isRunning():
+            self.status_changed.emit("Calibration already in progress…")
+            return
+        log.info(f"Guided calibration starting with {len(anchors)} anchors")
+        self.status_changed.emit("Solving from identified stars…")
+        self._worker = GuidedCalibrationWorker(
+            anchors, prep['lat'], prep['lon'], prep['dt'],
+            prep['sky_cx'], prep['sky_cy'], prep['sky_r'],
+            prep.get('image_width', 0), prep.get('image_height', 0),
+            parent=self)
         self._worker.finished.connect(self._on_calibration_done)
         self._worker.failed.connect(self._on_calibration_failed)
         self._worker.start()
@@ -271,11 +372,9 @@ class AllSkyController(QObject):
         """Return (image, source_description) for the most recent clean frame.
 
         Tries, in order:
-          1. MainWindow._cached_raw_image — Camera mode caches the RAW
-             pre-overlay frame in on_image_captured; Watch mode caches the
-             clean (no all-sky) output frame in _on_image_processed. Primary
-             source for both modes.
-          2. CameraController._last_frame — legacy in-memory fallback.
+          MainWindow._cached_raw_image — Camera mode caches the RAW
+          pre-overlay frame in on_image_captured; Watch mode caches the
+          clean (no all-sky) output frame in _on_image_processed.
 
         The old "load the last saved output image from disk" fallback was
         removed: that file is overlay-contaminated and already resized, so
@@ -287,16 +386,6 @@ class AllSkyController(QObject):
         cached = getattr(self._mw, '_cached_raw_image', None)
         if cached is not None:
             return cached, "cached raw frame"
-
-        try:
-            from ui.controllers.camera_controller import CameraController
-            for child in self._mw.children():
-                if isinstance(child, CameraController):
-                    frame = getattr(child, '_last_frame', None)
-                    if frame is not None:
-                        return frame, "camera controller"
-        except Exception as e:
-            log.debug(f"Camera controller probe failed: {e}")
 
         return None, ""
 

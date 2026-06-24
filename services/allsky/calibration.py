@@ -34,6 +34,9 @@ from .fisheye import FisheyeModel
 from .catalogs import get_bright_stars
 from .coords import radec_to_altaz
 from .calibration_validate import (
+    A3_MAX,
+    A3_MIN,
+    A3_SEED_DEFAULT,
     score_matches_with_spread,
     validate_bright_anchors,
     validate_lens_polynomial,
@@ -480,10 +483,10 @@ def _iterative_fit(
     # Physical prior: real fisheye lenses have modest-negative a3 (barrel
     # distortion correction). Seeding a3=0 gives the optimiser no hint and
     # lets it drift into unphysical positive territory when prunings shrink
-    # the match set. -30 is a conservative prior that still allows the fit
-    # to recover a3 in roughly [-80, 0] for real lenses.
+    # the match set. A3_SEED_DEFAULT is a conservative prior that still allows
+    # the fit to recover a3 in roughly [-80, 0] for real lenses.
     if abs(model.a3) < 1e-6:
-        model.a3 = -30.0
+        model.a3 = A3_SEED_DEFAULT
 
     for iteration in range(8):
         params = np.array([
@@ -510,8 +513,8 @@ def _iterative_fit(
             result = _least_squares(
                 residuals, params,
                 bounds=(
-                    [50,   50,   50,   -100.0, -1500.0, -np.pi, 60.0,   0.0],
-                    [4000, 4000, 2000,   25.0,   500.0,  np.pi, 90.0, 360.0],
+                    [50,   50,   50,   A3_MIN, -1500.0, -np.pi, 60.0,   0.0],
+                    [4000, 4000, 2000, A3_MAX,   500.0,  np.pi, 90.0, 360.0],
                 ),
                 method='trf',
                 max_nfev=8000,

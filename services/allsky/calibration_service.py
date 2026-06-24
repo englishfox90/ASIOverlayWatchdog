@@ -41,7 +41,19 @@ from .multi_calibrate import refine_from_detections
 
 MAX_BUFFER = 60             # rolling buffer capacity (frame dicts)
 MIN_FRAMES = 3              # minimum frames before attempting refinement
-MIN_SPAN_MINUTES = 5.0      # minimum time span across buffered frames
+MIN_SPAN_MINUTES = 5.0      # minimum time span to refine an existing model
+
+# Cold-start (no prior model) needs a much longer baseline. A near-zenith
+# fisheye is rotationally degenerate over short spans: many (roll, azimuth)
+# orientations produce near-identical star patterns, so only enough sky
+# *rotation over time* can disambiguate the true pose. Attempting orientation
+# from a few minutes converges to a wrong basin (observed: Polaris placed on
+# the wrong side from a ~7-min span). The reference long-baseline fit that
+# historically worked spanned ~78 min; require a substantial window before the
+# first cold-start attempt.
+MIN_SPAN_BOOTSTRAP_MINUTES = 35.0
+MIN_FRAMES_BOOTSTRAP = 15
+
 REFINE_COOLDOWN_S = 120     # seconds between refinement attempts
 INITIAL_COOLDOWN_S = 180    # seconds between initial single-image cal attempts
 MAX_RESIDUAL_PX = 20.0      # max accepted median residual (pixels)
@@ -260,23 +272,11 @@ class CalibrationService(QObject):
         if lat == 0.0 and lon == 0.0:
             return
 
-        # ------ No model yet: queue for initial single-image cal ------
-        if self._model is None:
-            # Cooldown guard: initial cal is expensive (~30s on slow hardware)
-            # and failures on a dense star field with no good fit will spin
-            # the CPU if retried every frame. Back off on repeated failures.
-            now = time.monotonic()
-            if now - self._last_initial_attempt_time < INITIAL_COOLDOWN_S:
-                return
-            if self._pending_initial is None and (
-                self._initial_worker is None
-                or not self._initial_worker.isRunning()
-            ):
-                self._pending_initial = (image.copy(), dt, lat, lon)
-                self._check_refine.emit()
-            return
-
-        # ------ Normal path: detect stars, store frame data -----------
+        # ------ Always detect + accumulate detections -----------------
+        # Both paths need the buffer: refinement (when a model exists) and the
+        # cold-start multi-image bootstrap (when one doesn't). A single frame on
+        # an obstructed sky can't calibrate alone, but accumulating detections
+        # across the rotating sky gives the joint fit enough cross-sky coverage.
         frame = self._detect_frame(image, dt, lat, lon)
         if frame is None:
             self._skipped_frames += 1
@@ -298,6 +298,19 @@ class CalibrationService(QObject):
             self._frames.append(frame)
             if len(self._frames) > MAX_BUFFER:
                 self._frames.pop(0)
+
+        # ------ Fast path: instant single-image fix on easy skies ------
+        # While no model exists, also try a single-image calibration so clear,
+        # unobstructed installs get an overlay on the first frame. Failures are
+        # expected on obstructed scenes and are harmless — the accumulated buffer
+        # drives the bootstrap. Cooldown-guarded (the attempt is ~30s).
+        if self._model is None:
+            now = time.monotonic()
+            if (now - self._last_initial_attempt_time >= INITIAL_COOLDOWN_S
+                    and self._pending_initial is None
+                    and (self._initial_worker is None
+                         or not self._initial_worker.isRunning())):
+                self._pending_initial = (image.copy(), dt, lat, lon)
 
         self._check_refine.emit()
 
@@ -371,42 +384,48 @@ class CalibrationService(QObject):
 
     def _maybe_refine(self) -> None:
         """Check thresholds and start the appropriate worker."""
-        # --- Handle pending initial calibration ---
-        if self._model is None and self._pending_initial is not None:
-            self._start_initial_cal()
-            return
-
-        if self._model is None:
-            return
-
         # --- Guard: worker already running ---
         if self._refine_worker and self._refine_worker.isRunning():
             return
         if self._initial_worker and self._initial_worker.isRunning():
             return
 
-        # --- Cooldown ---
+        # --- Fast path: single-image initial cal when queued ---
+        if self._model is None and self._pending_initial is not None:
+            self._start_initial_cal()
+            return
+
+        # --- Cooldown (shared by refinement and cold-start bootstrap) ---
         now = time.monotonic()
         if now - self._last_refine_time < REFINE_COOLDOWN_S:
             return
 
         # --- Threshold checks ---
+        # Cold start (no model) demands a long baseline to break the near-zenith
+        # rotational degeneracy; refining an existing model only needs a few min.
+        cold_start = self._model is None
+        min_frames = MIN_FRAMES_BOOTSTRAP if cold_start else MIN_FRAMES
+        min_span = MIN_SPAN_BOOTSTRAP_MINUTES if cold_start else MIN_SPAN_MINUTES
         with self._lock:
             n = len(self._frames)
-            if n < MIN_FRAMES:
+            if n < min_frames:
                 return
 
             dts = [f['dt'] for f in self._frames]
             span_s = (max(dts) - min(dts)).total_seconds()
             span_min = span_s / 60.0
-            if span_min < MIN_SPAN_MINUTES:
+            if span_min < min_span:
                 return
 
             frames_copy = copy.deepcopy(self._frames)
 
-        log.info(f"CalibrationService: triggering refinement "
+        # self._model=None -> _RefineWorker bootstraps a coarse orientation seed
+        # (cold start). Otherwise it refines the existing model.
+        mode = "cold-start bootstrap" if cold_start else "refinement"
+        log.info(f"CalibrationService: triggering {mode} "
                  f"({n} frames, {span_min:.1f} min span)")
-        self.status_changed.emit(f"Refining calibration ({n} frames)\u2026")
+        self.status_changed.emit(
+            f"{'Calibrating' if cold_start else 'Refining'} ({n} frames)\u2026")
         self._last_refine_time = now
         self._refine_gen = self._model_generation  # snapshot for stale-result detection
 
@@ -483,19 +502,21 @@ class CalibrationService(QObject):
         model.span_minutes = round(span_min, 1)
 
         new_q = model_quality(model, n_images, span_min)
-        # Reject if the new model is more than 15% worse by RMS — a quality-rank
-        # upgrade is not sufficient justification for overwriting a precise model.
-        rms_ok = (
-            self._model is None
-            or model.rms_residual <= self._model.rms_residual * 1.15
-        )
-        improved = rms_ok and (
-            CalibrationQuality.rank(new_q) > CalibrationQuality.rank(self._quality)
-            or (
-                model.rms_residual < self._model.rms_residual
-                and model.n_matches >= self._model.n_matches
+        # Cold-start bootstrap: any valid model is an upgrade from "no model".
+        if self._model is None:
+            improved = True
+        else:
+            # Reject if the new model is more than 15% worse by RMS — a
+            # quality-rank upgrade is not sufficient justification for
+            # overwriting a precise model.
+            rms_ok = model.rms_residual <= self._model.rms_residual * 1.15
+            improved = rms_ok and (
+                CalibrationQuality.rank(new_q) > CalibrationQuality.rank(self._quality)
+                or (
+                    model.rms_residual < self._model.rms_residual
+                    and model.n_matches >= self._model.n_matches
+                )
             )
-        )
 
         if improved:
             self._model = model
@@ -520,13 +541,17 @@ class CalibrationService(QObject):
             )
 
     def _on_refine_failed(self, error: str) -> None:
-        log.warning(f"Calibration refinement failed: {error}")
-        # Restore previous status text
         if self._model:
+            log.warning(f"Calibration refinement failed: {error}")
+            # Restore previous status text
             self.status_changed.emit(
                 f"Calibrated: {self._model.n_matches} stars, "
                 f"RMS={self._model.rms_residual:.1f}px ({self._quality})"
             )
+        else:
+            # Cold-start bootstrap not yet successful — keep accumulating.
+            log.info(f"Cold-start calibration not yet successful: {error}")
+            self.status_changed.emit("Calibrating… (accumulating frames)")
 
     # ------------------------------------------------------------------
     # Persistence

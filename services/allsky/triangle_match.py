@@ -37,7 +37,7 @@ from .calibration_validate import (
     validate_bright_anchors,
     validate_lens_polynomial,
     tol_scale,
-    SKY_TRIM_FRACTION,
+    a1_from_sky_radius,
 )
 
 # ---------------------------------------------------------------------------
@@ -451,11 +451,19 @@ def triangle_calibrate(
     sky_radius: Optional[float] = None,
     min_matches: int = 5,
     max_residual_px: float = 20.0,
+    seed_only: bool = False,
 ) -> FisheyeModel:
     """Calibrate using geometric triangle hashing (fallback).
 
     Accepts optional pre-computed data from calibrate() to avoid
     redundant star detection.  Tries both east_left orientations.
+
+    seed_only: when True, return the coarse oriented hypothesis after a light
+        refinement WITHOUT enforcing the strict single-frame RMS/anchor gates.
+        Used to bootstrap multi-image calibration on obstructed scenes where no
+        single frame can pass on its own — the joint fit and its gates decide
+        the final model. When detected/above_horizon/sky params are supplied,
+        `image` may be None (no pixels are read in this mode).
 
     Raises CalibrationError if matching fails.
     """
@@ -514,11 +522,9 @@ def triangle_calibrate(
     log.info(f"Triangle index: built in {_time.monotonic() - t_idx:.1f}s — "
              f"{n_triplets} triplets, {len(index._table)} bins")
 
-    # estimate_sky_circle returns the *trimmed* radius (inward by
-    # SKY_TRIM_FRACTION). a1 is defined against the true optical radius, so
-    # divide the trim back out before seeding — otherwise a1 is ~15% small and
-    # every projected star lands short of its detection (F10).
-    a1_est = (sky_radius / (1.0 - SKY_TRIM_FRACTION)) / (np.pi / 2.0)
+    # Seed a1 from the trimmed sky radius (helper divides the trim back out;
+    # otherwise a1 is ~15% small and every projected star lands short, F10).
+    a1_est = a1_from_sky_radius(sky_radius)
 
     # Resolution-independent match tolerances, keyed off the trimmed radius to
     # match the reference (F10).
@@ -557,6 +563,17 @@ def triangle_calibrate(
         above_horizon, detected, min_matches, max_residual_px,
         tol_scale=_ts,
     )
+
+    if seed_only:
+        # Coarse oriented seed for multi-image bootstrap. Skip the strict
+        # single-frame accuracy/anchor gates — the joint fit decides.
+        if image is not None:
+            img_h, img_w = _get_image_size(image)
+            model.image_width = img_w
+            model.image_height = img_h
+        log.info(f"Triangle seed (seed_only): {score} matches, "
+                 f"east_left={model.east_left}, a1={model.a1:.1f}, rms={rms:.1f}px")
+        return model
 
     if rms > max_residual_px:
         raise CalibrationError(

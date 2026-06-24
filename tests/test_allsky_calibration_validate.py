@@ -161,6 +161,28 @@ class TestValidateBrightAnchors:
         ok, msg = validate_bright_anchors(model, ah, det)
         assert ok, f"Expected 5/6 to be accepted; got ({msg})"
 
+    def test_obstructed_install_passes_with_5_of_12(self):
+        """Pier-camera obstruction: the 7 brightest stars sit behind the OTA
+        (never detected), but 5 fainter-but-still-bright anchors are in clear
+        sky and match. With the top-12 pool + 5-hit floor this passes, whereas
+        the old top-6 pool would have judged only the 6 obstructed stars and
+        rejected a perfectly good fit.
+        """
+        model = self._zenith_model()
+        # 12 bright anchors spread across the sky, brightest first.
+        positions = [
+            (75.0, 0.0), (70.0, 30.0), (65.0, 70.0), (60.0, 110.0),
+            (55.0, 150.0), (50.0, 190.0),            # 6 brightest: obstructed
+            (48.0, 230.0), (44.0, 270.0), (40.0, 300.0),
+            (36.0, 330.0), (32.0, 20.0),             # 5 of these in clear sky
+            (28.0, 200.0),
+        ]
+        ah = self._above_horizon(model, positions)
+        # Only the last 5 anchors are detected (first 7 behind the obstruction).
+        det = self._detect_from_projection(model, positions, jitter=2.0, skip_first=7)
+        ok, msg = validate_bright_anchors(model, ah, det)
+        assert ok, f"Expected 5/12 clear-sky anchors to pass; got reject ({msg})"
+
     def test_skips_when_too_few_anchors_visible(self):
         """Only 2 anchors above min_alt=15° → check is skipped (ok=True)."""
         model = self._zenith_model()
