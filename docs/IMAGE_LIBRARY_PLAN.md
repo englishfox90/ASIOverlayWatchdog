@@ -174,7 +174,7 @@ Touched (not new):
 ```sql
 CREATE TABLE images (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    captured_at  INTEGER NOT NULL,   -- unix epoch (UTC), the frame's capture time
+    captured_at  INTEGER NOT NULL,   -- unix epoch in the PC's LOCAL time, the frame's capture time
     path         TEXT    NOT NULL,   -- relative to Library root
     width        INTEGER,
     height       INTEGER,
@@ -197,6 +197,13 @@ retention never has to stat the whole tree.
 
 ### Data flow
 
+The capture pipeline **never blocks on the library**. `_push_to_output_servers()` does
+one cheap thing — enqueue the frame — and returns immediately. A dedicated background
+worker thread drains the queue and does the resize / write / insert / prune off the hot
+path. This matters because cadence varies wildly: 5–15 s long exposures at night, but as
+fast as ~1 frame/second during the day under auto-exposure. The queue absorbs those
+bursts; if it ever backs up, we drop oldest-queued frames rather than stall capture.
+
 ```
 processor produces output_img + metadata
         │
@@ -205,17 +212,27 @@ _push_to_output_servers()  (ui/main_window/output.py)
         ├── (existing) web_server.update_image(...)
         ├── (existing) Discord periodic post
         └── (NEW, if library.enabled)
-              ImageLibrary.add(output_img, metadata)
+              library.enqueue(output_img, metadata)   # non-blocking, returns at once
+                                                       # bounded queue; drop-oldest if full
+
+        ── background library worker thread (drains the queue) ──
+              ImageLibrary._save(output_img, metadata)
                    ├── image_resize.to_max_edge(img, 750, q=85) → jpeg bytes
                    ├── store.write(date_folder, filename, bytes)
                    ├── index.insert(row)
                    └── retention.maybe_prune()   # cheap check, throttled
 ```
 
-`maybe_prune()` runs opportunistically (e.g. at most once every N minutes, tracked by a
-timestamp) so we are not scanning on every single frame. Pruning deletes oldest rows +
-their files until **both** constraints hold: `captured_at >= now − retention_days` and
-`SUM(bytes) <= max_size_gb`.
+This mirrors the existing `app_logger` queue pattern, so the threading model is already
+familiar in this codebase. The worker is started/stopped with the rest of the output
+services.
+
+`maybe_prune()` runs opportunistically on the worker thread (at most once every
+`prune_interval_minutes`, tracked by a timestamp) so we are not scanning on every frame.
+Pruning deletes oldest rows + their files until **both** constraints hold:
+`captured_at >= now − retention_days` and `SUM(bytes) <= max_size_gb`. The size cap is
+the real backstop for dense daytime auto-exposure runs — at ~1 fps a day of capture is a
+lot of frames, so disk is bounded by size first and age second.
 
 ### Config block (draft)
 
@@ -293,10 +310,12 @@ Example `/library` response:
   dedicated connection per thread (open in the handler) or a single
   `check_same_thread=False` connection guarded by a `threading.Lock`. Enable WAL mode
   (`PRAGMA journal_mode=WAL`) for concurrent read/write without blocking the capture path.
-- **Never block the capture pipeline:** `add()` does a small resize + file write + one
-  insert. Pruning is throttled and can run on the same call but must be bounded (delete
-  in batches). If profiling shows it stalls capture on busy nights, move `add()` onto a
-  small background queue (mirrors the logger's queue pattern).
+- **Never block the capture pipeline:** the public call (`enqueue()`) only pushes onto a
+  **bounded background queue** and returns — all resize / file write / insert / prune work
+  happens on the library worker thread (mirrors the `app_logger` queue pattern). The queue
+  absorbs daytime auto-exposure bursts (~1 fps); if it ever fills, drop the oldest queued
+  frame rather than apply backpressure to capture. Pruning on the worker is throttled and
+  batched.
 - **Crash/partial-write resilience:** write the JPEG first, then insert the row, so a
   crash leaves at most an orphan file (cleaned on next prune sweep), never a row pointing
   at a missing file. A lightweight startup reconciliation can drop rows whose files are
@@ -345,12 +364,17 @@ either can land first after Phase 1.
 
 ## Open questions / risks
 
-- **Frame rate vs. retention:** at fast cadence, 7 days could be tens of thousands of
-  frames. The size cap protects disk, but the gallery and `/library` must paginate (they
-  do). Consider an optional "store at most 1 frame per N seconds into the library"
-  throttle if nights get dense — flag for a later phase, not v1.
-- **Time zone:** store `captured_at` in UTC; the date-folder and UI date filter should
-  use the observatory's local day. Pick one convention and document it.
+- **Frame rate vs. retention (resolved → queue + size cap):** at fast daytime cadence
+  (~1 fps under auto-exposure) 7 days could be tens of thousands of frames. This is
+  handled by (a) the non-blocking save queue so capture is never stalled, and (b) the
+  **size cap as the primary backstop** so disk stays bounded regardless of frame count;
+  age is the secondary limit. The gallery and `/library` paginate. A per-N-seconds
+  "store at most 1 frame per interval" throttle is **deferred** — revisit only if the
+  size cap proves too blunt in practice.
+- **Time zone (resolved → local PC time):** this is a local, single-machine app, so
+  everything uses the **PC's local time** — `captured_at`, the date subfolders, and the
+  UI/API date filters. No UTC conversion anywhere. Simplest and matches how the operator
+  thinks about "last night."
 - **Interaction with full-res cleanup:** the library is fully independent of
   `output_directory` and `services/cleanup.py`; deleting full-res output never touches the
   library and vice-versa. Worth stating in user docs to avoid confusion.
