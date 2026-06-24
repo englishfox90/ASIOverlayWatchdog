@@ -33,10 +33,12 @@ def prune(index, store, retention_days, max_size_gb, now_epoch):
         cutoff = int(now_epoch - retention_days * 86400)
         old = index.rows_older_than(cutoff)
         if old:
+            deleted_ids = []
             for _id, path, size in old:
                 store.delete(path)
                 freed += size or 0
-            removed += index.delete_ids([r[0] for r in old])
+                deleted_ids.append(_id)
+            removed += index.delete_ids(deleted_ids)
 
     # --- Size bound ---
     if max_size_gb and max_size_gb > 0:

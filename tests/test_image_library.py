@@ -39,6 +39,13 @@ class TestDownscale:
         _, w, h = downscale_to_jpeg(img, max_edge=750)
         assert (w, h) == (300, 200)
 
+    def test_non_positive_cap_does_not_collapse(self):
+        # A stray 0/negative max_dimension must not shrink the image to 1x1.
+        img = Image.new("RGB", (800, 600), (1, 2, 3))
+        for bad in (0, -100):
+            _, w, h = downscale_to_jpeg(img, max_edge=bad)
+            assert (w, h) == (800, 600)
+
     def test_flattens_non_rgb(self):
         img = Image.new("RGBA", (800, 600), (0, 0, 0, 128))
         data, w, h = downscale_to_jpeg(img, max_edge=400)
@@ -201,13 +208,16 @@ class TestImageLibraryEndToEnd:
             time.sleep(0.02)
         return False
 
-    def test_enqueue_writes_file_and_row(self, temp_dir, monkeypatch):
-        # Point the library root at the temp dir.
+    @staticmethod
+    def _point_root_at(temp_dir, monkeypatch):
+        """Redirect get_library_root (imported into two modules) to temp_dir."""
         import services.library.store as store_mod
-        monkeypatch.setattr(store_mod, "get_library_root", lambda: temp_dir)
         import services.library as lib_mod
+        monkeypatch.setattr(store_mod, "get_library_root", lambda: temp_dir)
         monkeypatch.setattr(lib_mod, "get_library_root", lambda: temp_dir)
 
+    def test_enqueue_writes_file_and_row(self, temp_dir, monkeypatch):
+        self._point_root_at(temp_dir, monkeypatch)
         lib = ImageLibrary(self._provider(temp_dir))
         lib.start()
         try:
@@ -223,11 +233,7 @@ class TestImageLibraryEndToEnd:
             lib.stop()
 
     def test_disabled_does_not_archive(self, temp_dir, monkeypatch):
-        import services.library.store as store_mod
-        monkeypatch.setattr(store_mod, "get_library_root", lambda: temp_dir)
-        import services.library as lib_mod
-        monkeypatch.setattr(lib_mod, "get_library_root", lambda: temp_dir)
-
+        self._point_root_at(temp_dir, monkeypatch)
         lib = ImageLibrary(self._provider(temp_dir, enabled=False))
         lib.start()
         try:

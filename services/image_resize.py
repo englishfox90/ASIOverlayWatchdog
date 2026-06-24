@@ -29,12 +29,14 @@ def downscale_to_jpeg(img, max_edge=750, quality=85):
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
 
+    # A non-positive cap means "no limit" — never let a stray 0/negative config
+    # collapse the image to 1x1.
     longest = max(img.width, img.height)
-    if longest > max_edge:
-        ratio = max_edge / float(longest)
+    if max_edge and max_edge > 0 and longest > max_edge:
+        ratio = max_edge / longest
         new_size = (max(1, round(img.width * ratio)), max(1, round(img.height * ratio)))
         img = img.resize(new_size, Image.LANCZOS)
 
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality)
+    img.save(buf, format="JPEG", quality=max(1, min(95, quality)))
     return buf.getvalue(), img.width, img.height

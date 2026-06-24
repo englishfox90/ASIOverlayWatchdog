@@ -35,7 +35,11 @@ DEFAULTS = {
     "prune_interval_minutes": 15,
 }
 
-_QUEUE_MAXSIZE = 200  # bounded; drop-oldest on overflow so capture never blocks
+# Bounded queue, drop-oldest on overflow so capture never blocks. Items hold a
+# full-resolution PIL copy (downscaling happens in the worker), so the cap also
+# bounds worst-case memory — keep it small. At <=1 fps with a fast worker the
+# queue normally holds 0-1 items; this is burst headroom, not a backlog buffer.
+_QUEUE_MAXSIZE = 16
 _STOP = object()      # worker shutdown sentinel
 
 
@@ -65,9 +69,6 @@ class ImageLibrary:
         try:
             self.store = LibraryStore(get_library_root())
             self.index = LibraryIndex(self.store.db_path)
-            dropped = retention.reconcile_orphans(self.index, self.store)
-            if dropped:
-                app_logger.info(f"Image library: dropped {dropped} orphaned row(s) at startup")
         except Exception as e:
             app_logger.error(f"Image library failed to start: {e}")
             self.store = None
@@ -86,15 +87,7 @@ class ImageLibrary:
         if not self._running:
             return
         self._running = False
-        try:
-            self._queue.put_nowait(_STOP)
-        except queue.Full:
-            # Make room for the sentinel so the worker wakes promptly.
-            try:
-                self._queue.get_nowait()
-                self._queue.put_nowait(_STOP)
-            except (queue.Empty, queue.Full):
-                pass
+        self._offer(_STOP)  # wake the worker promptly, dropping a frame if needed
         if self._worker:
             self._worker.join(timeout=5.0)
         if self.index:
@@ -119,19 +112,37 @@ class ImageLibrary:
         except Exception as e:
             app_logger.debug(f"Image library enqueue skipped (copy failed): {e}")
             return
+        if not self._offer(item):
+            app_logger.debug("Image library queue full — dropped oldest frame")
+
+    def _offer(self, item):
+        """Put ``item`` on the queue, dropping the oldest entry if it is full.
+
+        Returns True if the item was queued without a drop, False otherwise.
+        """
         try:
             self._queue.put_nowait(item)
+            return True
         except queue.Full:
             try:
                 self._queue.get_nowait()  # drop oldest
                 self._queue.put_nowait(item)
-                app_logger.debug("Image library queue full — dropped oldest frame")
             except (queue.Empty, queue.Full):
                 pass
+            return False
 
     # -- worker ------------------------------------------------------------
 
     def _run(self):
+        # Reconcile orphaned rows here (not in start()) so a large library does
+        # not stat every file on the main thread during app startup.
+        try:
+            dropped = retention.reconcile_orphans(self.index, self.store)
+            if dropped:
+                app_logger.info(f"Image library: dropped {dropped} orphaned row(s) at startup")
+        except Exception as e:
+            app_logger.error(f"Image library orphan reconcile failed: {e}")
+
         while True:
             item = self._queue.get()
             if item is _STOP:
