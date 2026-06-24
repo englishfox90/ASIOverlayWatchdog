@@ -131,6 +131,12 @@ class _MainWindowLifecycleMixin:
             except Exception:
                 pass
 
+        if getattr(self, 'image_library', None):
+            try:
+                self.image_library.stop()
+            except Exception:
+                pass
+
         if self.timelapse_controller:
             try:
                 self._wait_for_timelapse_finalization()

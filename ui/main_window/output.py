@@ -200,6 +200,12 @@ class _MainWindowOutputMixin:
             # output_image is always clean — sent to file sinks and servers.
             self.live_panel.update_preview(preview_image, metadata)
 
+            # Archive a downscaled copy to the rolling image library. This is an
+            # independent sink (not gated on web/Discord) and never blocks —
+            # enqueue() hands off to the library's background worker.
+            if getattr(self, 'image_library', None):
+                self.image_library.enqueue(output_image, metadata)
+
             output_config = self.config.get('output', {})
             discord_config = self.config.get('discord', {})
             has_outputs = (

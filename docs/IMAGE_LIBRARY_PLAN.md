@@ -1,9 +1,16 @@
 # Image Library — Feature Design / Project Plan
 
-> **Status (2026-06-24): Proposed — not yet implemented.** This document scopes a
-> new "Image Library" feature: a rolling, on-disk store of downscaled (Discord-size)
-> capture frames, retained for ~7 days, browsable in-app via a new Library panel and
-> retrievable over the existing web/HTTP API. Read this before starting implementation.
+> **Status (2026-06-24): Phase 1 implemented.** This document scopes a new "Image
+> Library" feature: a rolling, on-disk store of downscaled (Discord-size) capture
+> frames, retained for ~7 days, browsable in-app via a new Library panel and retrievable
+> over the existing web/HTTP API.
+>
+> **Phase 1 (core store) is done and unit-tested:** `services/image_resize.py` (shared
+> downscaler), `services/library/` package (`store` + `index` + `retention` + the
+> `ImageLibrary` facade with a non-blocking background save queue), the `library.*`
+> config block, the save hook in `_on_image_processed()`, lifecycle start/stop wiring,
+> and `tests/test_image_library.py` (15 tests). **Phases 2 (web API) and 3 (in-app
+> panel) remain.** Read the rest of this doc before continuing them.
 
 ---
 

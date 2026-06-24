@@ -17,6 +17,7 @@ from services.config import Config
 from services.logger import app_logger
 from services.web_output import WebOutputServer
 from services.ml_data_collector import init_ml_collector
+from services.library import ImageLibrary
 from version import __version__
 
 from ..theme import apply_theme, apply_accent_theme, get_stylesheet
@@ -90,6 +91,10 @@ class MainWindow(
         self.image_processor = ImageProcessor(self)
         self.image_processor.set_main_window(self)
         self.image_processor.start()
+
+        # Rolling image library — archives downscaled frames off the hot path.
+        self.image_library = ImageLibrary(lambda: self.config.data)
+        self.image_library.start()
 
         self._setup_window()
         self._setup_ui()

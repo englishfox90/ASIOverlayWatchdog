@@ -188,7 +188,19 @@ DEFAULT_CONFIG = {
     "cleanup_enabled": False,
     "cleanup_max_size_gb": 10.0,
     "cleanup_strategy": "oldest",
-    
+
+    # Image library — rolling store of downscaled (Discord-size) frames,
+    # retained by age AND size, browsable in-app and over the web API.
+    "library": {
+        "enabled": True,
+        "retention_days": 7,
+        "max_size_gb": 2.0,
+        "max_dimension": 750,   # longest-edge px; matches the Discord image size
+        "jpeg_quality": 85,
+        "api_enabled": True,    # expose the /library web endpoints
+        "prune_interval_minutes": 15,
+    },
+
     # Weather settings (OpenWeatherMap)
     "weather": {
         "enabled": False,  # Set to True when API key and location configured
