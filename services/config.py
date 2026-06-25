@@ -55,7 +55,8 @@ DEFAULT_CONFIG = {
         "webserver_port": 8080,
         "webserver_path": "/latest",
         "webserver_status_path": "/status",
-        "webserver_docs_path": "/docs"
+        "webserver_docs_path": "/docs",
+        "webserver_library_path": "/library"
     },
     
     # ZWO Camera settings

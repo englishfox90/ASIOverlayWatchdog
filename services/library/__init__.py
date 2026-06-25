@@ -99,6 +99,11 @@ class ImageLibrary:
     def is_enabled(self):
         return bool(self._cfg().get("enabled", True))
 
+    def api_enabled(self):
+        """True when the library AND its HTTP API are both enabled."""
+        cfg = self._cfg()
+        return bool(cfg.get("enabled", True)) and bool(cfg.get("api_enabled", True))
+
     def enqueue(self, pil_image, metadata=None):
         """Queue a frame for archiving. Non-blocking; returns immediately.
 
@@ -130,6 +135,45 @@ class ImageLibrary:
             except (queue.Empty, queue.Full):
                 pass
             return False
+
+    # -- read API (used by the web endpoints and, later, the UI panel) -----
+
+    # Hard ceiling on a single page so a remote caller can't ask for everything.
+    MAX_PAGE = 500
+
+    def list_images(self, since=None, until=None, limit=100, offset=0):
+        """Return ``(total, rows)`` for archived frames, newest first.
+
+        ``rows`` are plain dicts straight from the index (id + metadata). The
+        caller is responsible for any HTTP-shaping (URLs, envelope). Returns
+        ``(0, [])`` if the library isn't started.
+        """
+        if not self.index:
+            return 0, []
+        limit = max(1, min(int(limit), self.MAX_PAGE))
+        offset = max(0, int(offset))
+        total = self.index.count(since=since, until=until)
+        rows = self.index.query(since=since, until=until, limit=limit, offset=offset)
+        return total, rows
+
+    def read_image(self, image_id):
+        """Return ``(jpeg_bytes, etag)`` for one archived frame, or None.
+
+        None means the id is unknown or its backing file has gone missing.
+        """
+        if not self.index or not self.store:
+            return None
+        row = self.index.get(image_id)
+        if not row:
+            return None
+        try:
+            with open(self.store.abs_path(row["path"]), "rb") as f:
+                data = f.read()
+        except OSError:
+            return None
+        # Cheap, stable ETag — id + size identifies an immutable archived frame.
+        etag = f'"{row["id"]}-{row["bytes"]}"'
+        return data, etag
 
     # -- worker ------------------------------------------------------------
 

@@ -242,3 +242,91 @@ class TestImageLibraryEndToEnd:
             assert lib.index.count() == 0
         finally:
             lib.stop()
+
+
+# --------------------------------------------------------------------------
+# Read API (list_images / read_image / api_enabled)
+# --------------------------------------------------------------------------
+
+class TestLibraryReadAPI(TestImageLibraryEndToEnd):
+    def _seeded(self, temp_dir, monkeypatch, n=3, **over):
+        """Start a library and archive ``n`` frames; return the library."""
+        self._point_root_at(temp_dir, monkeypatch)
+        lib = ImageLibrary(self._provider(temp_dir, **over))
+        lib.start()
+        for i in range(n):
+            lib.enqueue(Image.new("RGB", (200, 150), (i, i, i)), {"camera": f"c{i}"})
+        assert self._wait_for_rows(lib, n), "frames were not archived in time"
+        return lib
+
+    def test_list_images_pagination_and_total(self, temp_dir, monkeypatch):
+        lib = self._seeded(temp_dir, monkeypatch, n=3)
+        try:
+            total, rows = lib.list_images(limit=2, offset=0)
+            assert total == 3
+            assert len(rows) == 2
+            # Newest first: captured_at descending.
+            assert rows[0]["captured_at"] >= rows[1]["captured_at"]
+        finally:
+            lib.stop()
+
+    def test_list_images_clamps_limit(self, temp_dir, monkeypatch):
+        lib = self._seeded(temp_dir, monkeypatch, n=1)
+        try:
+            total, rows = lib.list_images(limit=10000)
+            assert total == 1 and len(rows) == 1
+        finally:
+            lib.stop()
+
+    def test_read_image_roundtrip(self, temp_dir, monkeypatch):
+        lib = self._seeded(temp_dir, monkeypatch, n=1)
+        try:
+            _, rows = lib.list_images(limit=1)
+            image_id = rows[0]["id"]
+            result = lib.read_image(image_id)
+            assert result is not None
+            data, etag = result
+            assert data[:2] == b"\xff\xd8"  # JPEG
+            assert etag and etag.startswith('"')
+            # Unknown id -> None
+            assert lib.read_image(999999) is None
+        finally:
+            lib.stop()
+
+    def test_read_image_missing_file_returns_none(self, temp_dir, monkeypatch):
+        lib = self._seeded(temp_dir, monkeypatch, n=1)
+        try:
+            _, rows = lib.list_images(limit=1)
+            row = rows[0]
+            os.remove(lib.store.abs_path(row["path"]))  # file gone, row remains
+            assert lib.read_image(row["id"]) is None
+        finally:
+            lib.stop()
+
+    def test_api_enabled_reflects_config(self, temp_dir, monkeypatch):
+        self._point_root_at(temp_dir, monkeypatch)
+        on = ImageLibrary(self._provider(temp_dir))
+        off = ImageLibrary(self._provider(temp_dir, api_enabled=False))
+        disabled = ImageLibrary(self._provider(temp_dir, enabled=False))
+        assert on.api_enabled() is True
+        assert off.api_enabled() is False
+        assert disabled.api_enabled() is False  # library off => API off
+
+
+# --------------------------------------------------------------------------
+# OpenAPI spec includes library routes only when enabled
+# --------------------------------------------------------------------------
+
+class TestOpenAPILibraryRoutes:
+    def test_library_routes_present_when_path_given(self):
+        from services.api_docs import build_openapi_spec
+        spec = build_openapi_spec(library_path="/library")
+        assert "/library" in spec["paths"]
+        assert "/library/image" in spec["paths"]
+        assert "LibraryManifest" in spec["components"]["schemas"]
+
+    def test_library_routes_absent_when_path_none(self):
+        from services.api_docs import build_openapi_spec
+        spec = build_openapi_spec(library_path=None)
+        assert "/library" not in spec["paths"]
+        assert "LibraryManifest" not in spec["components"]["schemas"]

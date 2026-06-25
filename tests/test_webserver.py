@@ -304,3 +304,76 @@ class TestWebServerDocs:
             assert 'PFR Sentinel' in resp.text
         finally:
             server.stop()
+
+
+@pytest.mark.requires_network
+class TestWebServerLibraryEndpoints:
+    """Test the /library manifest and /library/image endpoints end-to-end."""
+
+    def _seed_library(self, temp_dir, monkeypatch, **over):
+        import services.library.store as store_mod
+        import services.library as lib_mod
+        from services.library import ImageLibrary
+        monkeypatch.setattr(store_mod, "get_library_root", lambda: temp_dir)
+        monkeypatch.setattr(lib_mod, "get_library_root", lambda: temp_dir)
+
+        cfg = {"enabled": True, "api_enabled": True, "max_dimension": 200,
+               "jpeg_quality": 80, "retention_days": 7, "max_size_gb": 2.0,
+               "prune_interval_minutes": 15}
+        cfg.update(over)
+        lib = ImageLibrary(lambda: {"library": cfg})
+        lib.start()
+        for i in range(2):
+            lib.enqueue(Image.new("RGB", (400, 300), (i, i, i)), {"camera": f"c{i}"})
+        deadline = time.time() + 5
+        while time.time() < deadline and lib.index.count() < 2:
+            time.sleep(0.02)
+        assert lib.index.count() == 2
+        return lib
+
+    def test_library_list_and_image(self, temp_dir, monkeypatch):
+        lib = self._seed_library(temp_dir, monkeypatch)
+        server = WebOutputServer(host='127.0.0.1', port=18093, image_library=lib)
+        server.start()
+        try:
+            time.sleep(0.2)
+            resp = requests.get("http://127.0.0.1:18093/library?limit=10", timeout=5)
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body['total'] == 2
+            assert len(body['images']) == 2
+            first = body['images'][0]
+            assert first['url'].startswith('/library/image?id=')
+
+            # Fetch the actual image bytes.
+            img_resp = requests.get(f"http://127.0.0.1:18093{first['url']}", timeout=5)
+            assert img_resp.status_code == 200
+            assert img_resp.headers.get('Content-Type') == 'image/jpeg'
+            etag = img_resp.headers.get('ETag')
+            assert etag
+
+            # Conditional request returns 304.
+            cond = requests.get(f"http://127.0.0.1:18093{first['url']}",
+                                headers={'If-None-Match': etag}, timeout=5)
+            assert cond.status_code == 304
+
+            # Unknown id -> 404; missing id -> 400.
+            assert requests.get("http://127.0.0.1:18093/library/image?id=999999", timeout=5).status_code == 404
+            assert requests.get("http://127.0.0.1:18093/library/image", timeout=5).status_code == 400
+        finally:
+            server.stop()
+            lib.stop()
+
+    def test_library_endpoints_404_when_api_disabled(self, temp_dir, monkeypatch):
+        lib = self._seed_library(temp_dir, monkeypatch, api_enabled=False)
+        server = WebOutputServer(host='127.0.0.1', port=18094, image_library=lib)
+        server.start()
+        try:
+            time.sleep(0.2)
+            assert requests.get("http://127.0.0.1:18094/library", timeout=5).status_code == 404
+            # And the OpenAPI spec omits the routes.
+            spec = requests.get("http://127.0.0.1:18094/openapi.json", timeout=5).json()
+            assert '/library' not in spec['paths']
+        finally:
+            server.stop()
+            lib.stop()

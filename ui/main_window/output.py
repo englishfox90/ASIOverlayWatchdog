@@ -281,8 +281,12 @@ class _MainWindowOutputMixin:
         image_path = output_config.get('webserver_path', '/latest')
         status_path = output_config.get('webserver_status_path', '/status')
         docs_path = output_config.get('webserver_docs_path', '/docs')
+        library_path = output_config.get('webserver_library_path', '/library')
 
-        self.web_server = WebOutputServer(host, port, image_path, status_path, docs_path)
+        self.web_server = WebOutputServer(
+            host, port, image_path, status_path, docs_path,
+            library_path=library_path, image_library=self.image_library,
+        )
         if self.web_server.start():
             url = self.web_server.get_url()
             status_url = self.web_server.get_status_url()

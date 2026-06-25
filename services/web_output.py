@@ -90,6 +90,7 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         status_path = self.server.status_path
         docs_path = getattr(self.server, 'docs_path', '/docs')
         openapi_path = getattr(self.server, 'openapi_path', '/openapi.json')
+        library_path = getattr(self.server, 'library_path', '/library')
 
         # Parse URL to strip query parameters (e.g., ?t=1764384123178)
         parsed_url = urlparse(self.path)
@@ -109,8 +110,16 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
             self._serve_openapi()
         elif clean_path == docs_path:
             self._serve_docs()
+        elif self._library_api_enabled() and clean_path == library_path + '/image':
+            from . import web_library
+            web_library.serve_image(self, self._library(), query_params)
+        elif self._library_api_enabled() and clean_path == library_path:
+            from . import web_library
+            web_library.serve_list(self, self._library(), library_path, query_params)
         else:
             available = ", ".join([config_path, status_path, openapi_path, docs_path])
+            if self._library_api_enabled():
+                available += f", {library_path}, {library_path}/image"
             self.send_error(404, f"Path not found. Available: {available}")
     
     def do_OPTIONS(self):
@@ -228,11 +237,16 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
     def _build_openapi_spec(self):
         """Build the OpenAPI spec for this server's actual routes."""
         from . import api_docs
+        # Only advertise the library routes when the API is actually enabled,
+        # so the docs never describe an endpoint that 404s.
+        library_path = getattr(self.server, 'library_path', '/library') \
+            if self._library_api_enabled() else None
         return api_docs.build_openapi_spec(
             image_path=self.server.config_path,
             status_path=self.server.status_path,
             docs_path=getattr(self.server, 'docs_path', '/docs'),
             openapi_path=getattr(self.server, 'openapi_path', '/openapi.json'),
+            library_path=library_path,
         )
 
     def _serve_openapi(self):
@@ -272,12 +286,23 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         except Exception as e:
             app_logger.error(f"Error serving API docs: {e}")
 
+    # --- image library endpoints ------------------------------------------
+
+    def _library(self):
+        """The ImageLibrary instance attached to the server, or None."""
+        return getattr(self.server, 'image_library', None)
+
+    def _library_api_enabled(self):
+        lib = self._library()
+        return bool(lib and lib.api_enabled())
+
 
 class WebOutputServer:
     """Manages HTTP server for serving latest processed images."""
     
     def __init__(self, host='0.0.0.0', port=8080, image_path='/latest', status_path='/status',
-                 docs_path='/docs', openapi_path='/openapi.json'):
+                 docs_path='/docs', openapi_path='/openapi.json', library_path='/library',
+                 image_library=None):
         """
         Initialize web server.
 
@@ -288,6 +313,9 @@ class WebOutputServer:
             status_path: URL path for status endpoint
             docs_path: URL path for the human-readable HTML API docs
             openapi_path: URL path for the machine-readable OpenAPI spec
+            library_path: Base URL path for the image library endpoints
+                (``<library_path>`` lists, ``<library_path>/image`` fetches)
+            image_library: Optional ImageLibrary the library endpoints read from
         """
         self.host = host
         self.port = port
@@ -295,6 +323,8 @@ class WebOutputServer:
         self.status_path = status_path
         self.docs_path = docs_path
         self.openapi_path = openapi_path
+        self.library_path = library_path
+        self.image_library = image_library
         self.server = None
         self.server_thread = None
         self.running = False
@@ -312,6 +342,8 @@ class WebOutputServer:
             self.server.status_path = self.status_path
             self.server.docs_path = self.docs_path
             self.server.openapi_path = self.openapi_path
+            self.server.library_path = self.library_path
+            self.server.image_library = self.image_library
             
             # Set class variables
             ImageHTTPHandler.server_start_time = time.time()

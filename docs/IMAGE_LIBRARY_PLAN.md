@@ -8,9 +8,18 @@
 > **Phase 1 (core store) is done and unit-tested:** `services/image_resize.py` (shared
 > downscaler), `services/library/` package (`store` + `index` + `retention` + the
 > `ImageLibrary` facade with a non-blocking background save queue), the `library.*`
-> config block, the save hook in `_on_image_processed()`, lifecycle start/stop wiring,
-> and `tests/test_image_library.py` (15 tests). **Phases 2 (web API) and 3 (in-app
-> panel) remain.** Read the rest of this doc before continuing them.
+> config block, the save hook in `_on_image_processed()`, and lifecycle start/stop wiring.
+>
+> **Phase 2 (web API) is done and tested:** `ImageLibrary.list_images()` / `read_image()`
+> / `api_enabled()` read methods; `GET /library` (paginated JSON manifest, `since`/`until`/
+> `limit`/`offset`) and `GET /library/image?id=` (JPEG with ETag) served by
+> `services/web_library.py` and routed from `web_output.py`; OpenAPI/`/docs` updated in
+> `api_docs.py` (library routes shown only when the API is enabled); `webserver_library_path`
+> config key; wired through `_start_web_server()`. Endpoints are gated on
+> `library.enabled && library.api_enabled`. Tests in `tests/test_image_library.py` and
+> `tests/test_webserver.py`.
+>
+> **Phase 3 (in-app panel) remains.** Read the rest of this doc before continuing it.
 
 ---
 
