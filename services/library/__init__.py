@@ -156,6 +156,17 @@ class ImageLibrary:
         rows = self.index.query(since=since, until=until, limit=limit, offset=offset)
         return total, rows
 
+    def image_etag(self, image_id):
+        """Return an archived frame's ETag from the index, or None if unknown.
+
+        Does no file I/O — lets a conditional request answer 304 without
+        reading the JPEG off disk.
+        """
+        if not self.index:
+            return None
+        row = self.index.get(image_id)
+        return self._etag(row) if row else None
+
     def read_image(self, image_id):
         """Return ``(jpeg_bytes, etag)`` for one archived frame, or None.
 
@@ -171,9 +182,12 @@ class ImageLibrary:
                 data = f.read()
         except OSError:
             return None
-        # Cheap, stable ETag — id + size identifies an immutable archived frame.
-        etag = f'"{row["id"]}-{row["bytes"]}"'
-        return data, etag
+        return data, self._etag(row)
+
+    @staticmethod
+    def _etag(row):
+        # id + size identifies an immutable archived frame — cheap and stable.
+        return f'"{row["id"]}-{row["bytes"]}"'
 
     # -- worker ------------------------------------------------------------
 

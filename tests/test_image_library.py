@@ -293,6 +293,21 @@ class TestLibraryReadAPI(TestImageLibraryEndToEnd):
         finally:
             lib.stop()
 
+    def test_image_etag_comes_from_index_without_file(self, temp_dir, monkeypatch):
+        lib = self._seeded(temp_dir, monkeypatch, n=1)
+        try:
+            _, rows = lib.list_images(limit=1)
+            row = rows[0]
+            etag = lib.image_etag(row["id"])
+            assert etag and etag == f'"{row["id"]}-{row["bytes"]}"'
+            # ETag is still answerable after the file is gone (index-only) — this
+            # is what lets a 304 skip the disk read.
+            os.remove(lib.store.abs_path(row["path"]))
+            assert lib.image_etag(row["id"]) == etag
+            assert lib.image_etag(999999) is None
+        finally:
+            lib.stop()
+
     def test_read_image_missing_file_returns_none(self, temp_dir, monkeypatch):
         lib = self._seeded(temp_dir, monkeypatch, n=1)
         try:

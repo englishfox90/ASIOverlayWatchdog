@@ -34,6 +34,16 @@ def _int_param(values, default):
         return default
 
 
+def _write_cors(handler, with_etag=False):
+    """Emit the standard CORS headers shared by the library responses."""
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+    handler.send_header(
+        "Access-Control-Allow-Headers",
+        "Content-Type, If-None-Match" if with_etag else "Content-Type",
+    )
+
+
 def serve_list(handler, library, library_path, query_params):
     """Serve the paginated library manifest as JSON."""
     try:
@@ -43,11 +53,10 @@ def serve_list(handler, library, library_path, query_params):
         offset = _int_param(query_params.get('offset'), 0)
 
         total, rows = library.list_images(since=since, until=until, limit=limit, offset=offset)
-        images = []
-        for r in rows:
-            r = dict(r)
-            r['url'] = f"{library_path}/image?id={r['id']}"
-            images.append(r)
+        images = [
+            {**r, 'url': f"{library_path}/image?id={r['id']}"}
+            for r in rows
+        ]
         payload = json.dumps({
             "total": total,
             "limit": max(1, min(limit, library.MAX_PAGE)),
@@ -59,9 +68,7 @@ def serve_list(handler, library, library_path, query_params):
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", len(payload))
         handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("Access-Control-Allow-Origin", "*")
-        handler.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+        _write_cors(handler)
         handler.end_headers()
         handler.wfile.write(payload)
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
@@ -77,17 +84,17 @@ def serve_image(handler, library, query_params):
         if not id_values:
             handler.send_error(400, "Missing required 'id' query parameter")
             return
-        try:
-            image_id = int(id_values[0])
-        except (TypeError, ValueError):
+        image_id = _int_param(id_values, None)
+        if image_id is None:
             handler.send_error(400, "'id' must be an integer")
             return
 
-        result = library.read_image(image_id)
-        if result is None:
+        # Answer conditional requests from the index alone — a 304 never touches
+        # the JPEG on disk.
+        etag = library.image_etag(image_id)
+        if etag is None:
             handler.send_error(404, f"No library image with id {image_id}")
             return
-        data, etag = result
 
         client_etag = handler.headers.get('If-None-Match')
         if client_etag and client_etag == etag:
@@ -97,15 +104,20 @@ def serve_image(handler, library, query_params):
             handler.end_headers()
             return
 
+        result = library.read_image(image_id)
+        if result is None:
+            # File vanished between the index lookup and the read.
+            handler.send_error(404, f"No library image with id {image_id}")
+            return
+        data, etag = result
+
         handler.send_response(200)
         handler.send_header("Content-Type", "image/jpeg")
         handler.send_header("Content-Length", len(data))
         handler.send_header("ETag", etag)
         # Archived frames are immutable, so the bytes for an id never change.
         handler.send_header("Cache-Control", "public, max-age=31536000, immutable")
-        handler.send_header("Access-Control-Allow-Origin", "*")
-        handler.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        handler.send_header("Access-Control-Allow-Headers", "Content-Type, If-None-Match")
+        _write_cors(handler, with_etag=True)
         handler.end_headers()
         handler.wfile.write(data)
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):

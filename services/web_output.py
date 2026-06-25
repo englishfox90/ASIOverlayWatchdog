@@ -14,6 +14,7 @@ from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from PIL import Image
 from .logger import app_logger
+from . import web_library
 
 # Maximum image size served by the web endpoint (5 MB)
 WEB_IMAGE_MAX_BYTES = 5 * 1024 * 1024
@@ -102,6 +103,11 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         if query_params:
             app_logger.debug(f"Query params: {query_params}")
 
+        # Library endpoints are delegated to services/web_library.py (keeps this
+        # module under the size cap); they're gated on the live library config so
+        # toggling the API off in Settings takes effect without a restart.
+        library_enabled = self._library_api_enabled()
+
         if clean_path == config_path:
             self._serve_image()
         elif clean_path == status_path:
@@ -110,15 +116,13 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
             self._serve_openapi()
         elif clean_path == docs_path:
             self._serve_docs()
-        elif self._library_api_enabled() and clean_path == library_path + '/image':
-            from . import web_library
+        elif library_enabled and clean_path == library_path + '/image':
             web_library.serve_image(self, self._library(), query_params)
-        elif self._library_api_enabled() and clean_path == library_path:
-            from . import web_library
+        elif library_enabled and clean_path == library_path:
             web_library.serve_list(self, self._library(), library_path, query_params)
         else:
             available = ", ".join([config_path, status_path, openapi_path, docs_path])
-            if self._library_api_enabled():
+            if library_enabled:
                 available += f", {library_path}, {library_path}/image"
             self.send_error(404, f"Path not found. Available: {available}")
     
