@@ -213,7 +213,9 @@ class MainWindow(
         self.settings_panel = SettingsPanel(self)
 
         self.library_controller = LibraryController(self)
-        self.library_controller.page_ready.connect(self.library_panel.on_page_ready)
+        self.library_controller.sessions_ready.connect(self.library_panel.set_sessions)
+        self.library_controller.frames_ready.connect(self.library_panel.set_frames)
+        self.library_controller.frame_ready.connect(self.library_panel.on_frame_ready)
         self.library_controller.load_failed.connect(self.library_panel.on_load_failed)
 
         self.timelapse_controller = TimelapseController(self)

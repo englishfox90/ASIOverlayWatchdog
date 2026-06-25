@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS images (
     temp         TEXT,
     camera       TEXT,
     weather      TEXT,
+    roof         TEXT,
+    condition    TEXT,
+    clouds       INTEGER,
     created_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_images_captured_at ON images(captured_at);
@@ -32,7 +35,17 @@ CREATE INDEX IF NOT EXISTS idx_images_captured_at ON images(captured_at);
 # Columns surfaced in query results / accepted on insert (besides auto id).
 _FIELDS = (
     "captured_at", "path", "width", "height", "bytes",
-    "session", "exposure", "gain", "temp", "camera", "weather", "created_at",
+    "session", "exposure", "gain", "temp", "camera", "weather",
+    "roof", "condition", "clouds", "created_at",
+)
+
+# Columns added after the original release. Older databases predate them, so we
+# ALTER them in on open (SQLite has no "ADD COLUMN IF NOT EXISTS"). Existing rows
+# get NULLs — historical frames simply render as 'unknown' on the condition band.
+_MIGRATIONS = (
+    ("roof", "TEXT"),
+    ("condition", "TEXT"),
+    ("clouds", "INTEGER"),
 )
 
 
@@ -47,7 +60,18 @@ class LibraryIndex:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self):
+        """Add columns introduced after the first release to an existing DB."""
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(images)").fetchall()
+        }
+        for name, col_type in _MIGRATIONS:
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE images ADD COLUMN {name} {col_type}")
 
     def insert(self, record):
         """Insert one image row. ``record`` is a dict keyed by ``_FIELDS``.
@@ -70,6 +94,35 @@ class LibraryIndex:
         sql = f"SELECT id, {', '.join(_FIELDS)} FROM images{where} " \
               "ORDER BY captured_at DESC, id DESC LIMIT ? OFFSET ?"
         params = params + [int(limit), int(offset)]
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def brief_rows(self, since=None, until=None):
+        """Lightweight rows for session grouping, oldest first.
+
+        Carries only what the night summary and condition band need —
+        ``id, captured_at, temp, roof, condition, clouds`` — not the full
+        per-frame metadata.
+        """
+        where, params = self._range_clause(since, until)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id, captured_at, temp, roof, condition, clouds FROM images{where} "
+                "ORDER BY captured_at ASC, id ASC", params
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def range_rows(self, since=None, until=None):
+        """Full-field rows within a capture-time range, oldest first.
+
+        The night-view scrubber walks these chronologically and reads each
+        frame's metadata straight from the row, so no per-frame index lookup is
+        needed while scrubbing.
+        """
+        where, params = self._range_clause(since, until)
+        sql = f"SELECT id, {', '.join(_FIELDS)} FROM images{where} " \
+              "ORDER BY captured_at ASC, id ASC"
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]

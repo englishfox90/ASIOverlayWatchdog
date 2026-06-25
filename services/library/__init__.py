@@ -23,6 +23,7 @@ from ..image_resize import downscale_to_jpeg
 from .store import LibraryStore, get_library_root
 from .index import LibraryIndex
 from . import retention
+from . import sessions
 
 # Defaults mirror the ``library`` config block (and the Discord image size).
 DEFAULTS = {
@@ -41,6 +42,32 @@ DEFAULTS = {
 # queue normally holds 0-1 items; this is burst headroom, not a backlog buffer.
 _QUEUE_MAXSIZE = 16
 _STOP = object()      # worker shutdown sentinel
+
+
+def _first_word(text):
+    """Leading word of a status string ('Open (95%)' -> 'Open'), or None."""
+    if text is None:
+        return None
+    parts = str(text).strip().split()
+    return parts[0] if parts and parts[0].upper() != "N/A" else None
+
+
+def _strip_pct(text):
+    """Drop a trailing '(NN%)' confidence suffix ('Clear (87%)' -> 'Clear')."""
+    if text is None:
+        return None
+    base = str(text).split("(")[0].strip()
+    if not base or base.upper() == "N/A":
+        return None
+    return base
+
+
+def _parse_pct(text):
+    """Integer percent from a value like '45%' or 45, or None."""
+    if text is None:
+        return None
+    digits = "".join(c for c in str(text) if c.isdigit())
+    return int(digits) if digits else None
 
 
 class ImageLibrary:
@@ -156,6 +183,22 @@ class ImageLibrary:
         rows = self.index.query(since=since, until=until, limit=limit, offset=offset)
         return total, rows
 
+    def list_sessions(self, since=None):
+        """Archived frames grouped into night sessions, newest night first.
+
+        ``since`` is an epoch lower bound (None = all time). Returns ``[]`` when
+        the library isn't started. See ``sessions.summarize_sessions``.
+        """
+        if not self.index:
+            return []
+        return sessions.summarize_sessions(self.index, since=since)
+
+    def list_session_frames(self, start_epoch, end_epoch):
+        """Full-field rows for one night, oldest first (the scrubber timeline)."""
+        if not self.index:
+            return []
+        return self.index.range_rows(since=start_epoch, until=end_epoch)
+
     def image_etag(self, image_id):
         """Return an archived frame's ETag from the index, or None if unknown.
 
@@ -268,6 +311,7 @@ class ImageLibrary:
     def _extract_meta(metadata):
         """Pull a known set of display fields, tolerant of casing/absence."""
         m = metadata or {}
+        ml = m.get("_ML_RESULTS") or {}
 
         def pick(*keys):
             for k in keys:
@@ -283,4 +327,10 @@ class ImageLibrary:
             "temp": pick("temp", "TEMP", "temperature"),
             "camera": pick("camera", "CAMERA"),
             "weather": pick("weather", "WEATHER"),
+            # Condition signal for the timeline band. _ML_RESULTS holds the clean
+            # 'Open'/'Closed' and 'Clear'/'Partly Cloudy' values; the ROOF_STATUS /
+            # SKY_CONDITION tokens ("Open (95%)") are the overlay-formatted fallback.
+            "roof": _first_word(ml.get("roof_status")) or _first_word(m.get("ROOF_STATUS")),
+            "condition": ml.get("sky_condition") or _strip_pct(m.get("SKY_CONDITION")),
+            "clouds": _parse_pct(m.get("WEATHER_CLOUDS") or m.get("clouds")),
         }

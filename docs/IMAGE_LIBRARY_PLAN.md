@@ -26,6 +26,28 @@
 > nav map, full-width branch), shut down in `lifecycle.py`. Controller logic tested in
 > `tests/test_library_controller.py` (GUI not runnable in CI; widget names verified against
 > existing panels). **Phase 4 (headless support + resize de-duplication) remains — optional.**
+>
+> **Phase 5 (session-scrubber redesign) is done:** the flat thumbnail grid is replaced by a
+> three-screen flow imported from the "Pier camera gallery navigation" Claude Design project —
+> **session list → night scrubber → single image**. Frames are grouped into observing *nights*
+> (local-noon cutoff, so an evening-to-morning run isn't split at midnight) via
+> `services/library/sessions.py`. Each night shows a **condition band**: green = roof open + clear,
+> amber = roof open + not clear, red = roof closed, dark = capture gap, grey = unknown. The band is
+> driven by **real per-frame data now persisted in the index** — `roof` + `condition` (from
+> `services/ml_service.py`'s `_ML_RESULTS`, available in production when `ml_models.enabled`) and
+> `clouds` (weather `WEATHER_CLOUDS`, the fallback for "clear"). New columns are migrated into
+> existing DBs (`LibraryIndex._migrate`); historical frames predate the data and render grey (no
+> backfill). The night view has a draggable filmstrip/playhead with transport + speed and a live
+> metadata panel; capture gaps surface as clickable "events". New panel files:
+> `library_panel.py` (stacked container), `library_session_list.py`, `library_night_view.py`,
+> `library_scrubber.py`, `library_image_viewer.py`, `library_band.py`, `library_format.py`.
+> Controller gains `load_sessions` / `load_session_frames` / coalescing `request_frame`. Tests in
+> `tests/test_library_sessions.py`.
+>
+> **Note on ML gating:** `ml_service.py` is the *production* inference path (gated only by model
+> files + `ml_models.enabled`); the `is_dev_mode_available()` gate in
+> `ui/controllers/ml_prediction.py` only guards the dev *calibration-JSON data-collection* path, not
+> live roof/sky inference.
 
 ---
 

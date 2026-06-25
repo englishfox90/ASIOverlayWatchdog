@@ -1,300 +1,120 @@
 """
-Library Panel
-In-app gallery of the rolling image library (services/library).
+Library Panel — the three-screen flow over the rolling image library.
 
-Layout/UI only — all disk work happens in ``LibraryController`` on a worker
-thread; this panel just renders the pages it emits and opens a viewer dialog
-when a thumbnail is clicked.
+A container that swaps between:
+  • the session list (nights grouped into cards),
+  • the night view (hero preview + draggable scrubber across the night), and
+  • a single-image dialog (opened from the night view).
+
+Layout/UI only — every disk read happens in ``LibraryController`` on worker
+threads; this panel renders what the controller emits and forwards the user's
+navigation back to it. The controller's signals are wired to the handler methods
+here in ``MainWindow._setup_ui``.
 """
-from datetime import datetime
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget
 
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame, QLabel,
-    QDialog, QGridLayout
-)
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
-from qfluentwidgets import (
-    CardWidget, SubtitleLabel, BodyLabel, CaptionLabel, PushButton,
-    PrimaryPushButton, ComboBox
-)
+from ..theme.tokens import Colors
+from .library_session_list import SessionListView
+from .library_night_view import NightView
+from .library_image_viewer import ImageViewerDialog
 
-from ..theme.tokens import Colors, Typography, Spacing, Layout
-from ..theme.icons import mdi
-
-THUMB_WIDTH = 200   # px — gallery thumbnail width
-VIEWER_MAX = 820    # px — longest edge shown in the viewer dialog
-
-# Dropdown options for the range filter: (label, lookback seconds | None for all).
-# This is presentation (which windows the UI offers); the controller just takes
-# the resolved 'since_seconds'.
+# Range filter options offered by the session list; the controller just takes
+# the resolved lookback seconds (None = all time).
 RANGE_OPTIONS = [
-    ("Last 24 hours", 24 * 3600),
-    ("Last 3 days", 3 * 24 * 3600),
+    ("All nights", None),
     ("Last 7 days", 7 * 24 * 3600),
-    ("All", None),
+    ("Last 30 days", 30 * 24 * 3600),
 ]
 
 
-def _fmt_time(epoch):
-    """Local 'YYYY-MM-DD HH:MM:SS' for a stored capture epoch."""
-    try:
-        return datetime.fromtimestamp(int(epoch)).strftime("%Y-%m-%d %H:%M:%S")
-    except (TypeError, ValueError, OSError, OverflowError):
-        return "—"
-
-
-def _clear_layout(layout):
-    while layout.count():
-        item = layout.takeAt(0)
-        w = item.widget()
-        if w is not None:
-            w.deleteLater()
-
-
-class _Thumbnail(QFrame):
-    """A clickable gallery cell: scaled image + capture time."""
-
-    clicked = Signal(dict)
-
-    OBJECT_NAME = "LibraryThumbnail"
-
-    # Styled once on the parent via the #objectName selector (set in
-    # LibraryPanel._setup_ui) rather than per-instance — a Python class name is
-    # not a reliable Qt stylesheet selector, and re-parsing a stylesheet on each
-    # of ~120 cells is wasteful.
-    @staticmethod
-    def stylesheet():
-        return (
-            f"#{_Thumbnail.OBJECT_NAME} {{"
-            f" background-color: {Colors.bg_card};"
-            f" border: 1px solid {Colors.border_subtle};"
-            f" border-radius: {Layout.radius_md}px; }}"
-            f" #{_Thumbnail.OBJECT_NAME}:hover {{ border-color: {Colors.accent_default}; }}"
-        )
-
-    def __init__(self, item, pixmap, parent=None):
-        super().__init__(parent)
-        self._item = item
-        self.setObjectName(self.OBJECT_NAME)
-        self.setCursor(Qt.PointingHandCursor)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(Spacing.xs, Spacing.xs, Spacing.xs, Spacing.xs)
-        layout.setSpacing(Spacing.xs)
-
-        image = QLabel()
-        image.setPixmap(pixmap)
-        image.setAlignment(Qt.AlignCenter)
-        layout.addWidget(image)
-
-        caption = CaptionLabel(_fmt_time(item.get("captured_at")))
-        caption.setStyleSheet(f"color: {Colors.text_muted};")
-        caption.setAlignment(Qt.AlignCenter)
-        layout.addWidget(caption)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit(self._item)
-        super().mousePressEvent(event)
-
-
-class LibraryPanel(QScrollArea):
-    """Full-page gallery of archived library frames."""
+class LibraryPanel(QWidget):
+    """Full-page Library with internal session-list ⇄ night-view navigation."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.main_window = parent
-        self._loading = False
         self._loaded_once = False
         self._setup_ui()
 
-    # -- UI ---------------------------------------------------------------
-
     def _setup_ui(self):
-        self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setStyleSheet(f"QScrollArea {{ background-color: {Colors.bg_app}; border: none; }}")
+        # Scope the background to this widget only — a selector-less
+        # 'background-color' leaks down to every child label/button (Qt
+        # propagates the stylesheet), painting black boxes behind their text.
+        self.setObjectName("LibraryPanel")
+        self.setStyleSheet(f"#LibraryPanel {{ background-color: {Colors.bg_app}; }}")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        content = QWidget()
-        self.setWidget(content)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(Spacing.base, Spacing.base, Spacing.base, Spacing.base)
-        layout.setSpacing(Spacing.card_gap)
+        self.stack = QStackedWidget()
+        layout.addWidget(self.stack)
 
-        # --- controls ---
-        controls = CardWidget()
-        row = QHBoxLayout(controls)
-        row.setContentsMargins(Spacing.card_padding, Spacing.md, Spacing.card_padding, Spacing.md)
-        row.setSpacing(Spacing.md)
+        self.session_list = SessionListView(RANGE_OPTIONS, self)
+        self.night_view = NightView(self)
+        self.stack.addWidget(self.session_list)   # 0
+        self.stack.addWidget(self.night_view)     # 1
 
-        title = SubtitleLabel("Image Library")
-        title.setStyleSheet(f"color: {Colors.text_primary};")
-        row.addWidget(title)
-        row.addSpacing(Spacing.base)
+        self.session_list.session_clicked.connect(self.open_session)
+        self.session_list.refresh_requested.connect(self._reload_sessions)
+        self.night_view.back_requested.connect(self.show_sessions)
+        self.night_view.frame_request.connect(self._request_frame)
+        self.night_view.image_activated.connect(self._open_viewer)
 
-        range_label = BodyLabel("Show:")
-        range_label.setStyleSheet(f"color: {Colors.text_secondary};")
-        row.addWidget(range_label)
-
-        self.range_combo = ComboBox()
-        self.range_combo.addItems([label for label, _ in RANGE_OPTIONS])
-        self.range_combo.setCurrentIndex(2)  # default "Last 7 days"
-        self.range_combo.setFixedWidth(140)
-        self.range_combo.currentIndexChanged.connect(lambda _i: self.refresh())
-        row.addWidget(self.range_combo)
-
-        row.addStretch()
-
-        self.count_label = CaptionLabel("")
-        self.count_label.setStyleSheet(f"color: {Colors.text_muted};")
-        row.addWidget(self.count_label)
-
-        self.refresh_btn = PushButton("Refresh")
-        self.refresh_btn.setIcon(mdi('refresh'))
-        self.refresh_btn.clicked.connect(self.refresh)
-        row.addWidget(self.refresh_btn)
-
-        layout.addWidget(controls)
-
-        # --- status line (loading / empty) ---
-        self.status_label = BodyLabel("")
-        self.status_label.setStyleSheet(f"color: {Colors.text_muted}; padding: {Spacing.base}px;")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.status_label)
-
-        # --- thumbnail grid ---
-        self.grid_host = QWidget()
-        self.grid_host.setStyleSheet(_Thumbnail.stylesheet())  # styles all cells
-        self.grid = QGridLayout(self.grid_host)
-        self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setSpacing(Spacing.md)
-        self.grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        layout.addWidget(self.grid_host)
-
-        layout.addStretch()
-
-    # -- lifecycle / triggers ---------------------------------------------
+    # -- lifecycle ---------------------------------------------------------
 
     def showEvent(self, event):
-        # Lazy first load when the user opens the panel; cheap manual refresh
-        # via the button afterwards.
         super().showEvent(event)
         if not self._loaded_once:
-            self.refresh()
+            self._loaded_once = True
+            self._reload_sessions()
 
     def _controller(self):
         return getattr(self.main_window, 'library_controller', None)
 
-    def _set_status(self, text):
-        """Show a centered status message, or hide the line when text is empty."""
-        self.status_label.setText(text)
-        self.status_label.setVisible(bool(text))
+    # -- navigation --------------------------------------------------------
 
-    def refresh(self):
+    def _reload_sessions(self):
         controller = self._controller()
-        if controller is None or self._loading:
+        if controller is None:
             return
-        self._loading = True
-        self._loaded_once = True
-        self._set_status("Loading…")
-        since = RANGE_OPTIONS[self.range_combo.currentIndex()][1]
-        controller.refresh(since_seconds=since)
+        self.session_list.set_loading()
+        controller.load_sessions(since_seconds=self.session_list.current_range())
 
-    # -- slots (UI thread) -------------------------------------------------
-
-    def on_page_ready(self, items, total):
-        self._loading = False
-        _clear_layout(self.grid)
-
-        if not items:
-            self.count_label.setText("")
-            self._set_status("No images archived for this range yet.")
+    def open_session(self, session):
+        controller = self._controller()
+        if controller is None:
             return
+        self.night_view.begin_load(session)
+        self.stack.setCurrentWidget(self.night_view)
+        controller.load_session_frames(session)
 
-        self._set_status("")
-        shown = len(items)
-        suffix = f" (showing newest {shown})" if total > shown else ""
-        self.count_label.setText(f"{total} image{'s' if total != 1 else ''}{suffix}")
+    def show_sessions(self):
+        self.night_view.stop()
+        self.stack.setCurrentWidget(self.session_list)
 
-        avail = self.viewport().width() or self.width() or (THUMB_WIDTH + Spacing.md)
-        columns = max(1, avail // (THUMB_WIDTH + Spacing.md))
-        placed = 0  # advances only for cells actually added, so skips leave no hole
-        for item in items:
-            pixmap = QPixmap()
-            pixmap.loadFromData(item.get("data", b""))
-            if pixmap.isNull():
-                continue
-            thumb_pix = pixmap.scaledToWidth(THUMB_WIDTH, Qt.SmoothTransformation)
-            # Drop the full bytes once the thumbnail is built — the viewer
-            # re-fetches by id so the gallery only holds small scaled pixmaps.
-            meta = {k: v for k, v in item.items() if k != "data"}
-            thumb = _Thumbnail(meta, thumb_pix, self.grid_host)
-            thumb.clicked.connect(self._open_viewer)
-            self.grid.addWidget(thumb, placed // columns, placed % columns)
-            placed += 1
+    def _request_frame(self, image_id):
+        controller = self._controller()
+        if controller is not None:
+            controller.request_frame(image_id)
+
+    def _open_viewer(self):
+        controller = self._controller()
+        frames = self.night_view.frames()
+        if controller is None or not frames:
+            return
+        ImageViewerDialog(frames, self.night_view.current_index(),
+                          controller.read_full, self).exec()
+
+    # -- controller signal handlers ---------------------------------------
+
+    def set_sessions(self, sessions):
+        self.session_list.set_sessions(sessions)
+
+    def set_frames(self, payload):
+        self.night_view.set_frames(payload)
+
+    def on_frame_ready(self, image_id, data):
+        self.night_view.on_frame_ready(image_id, data)
 
     def on_load_failed(self, message):
-        self._loading = False
-        self._set_status(f"Could not load library: {message}")
-
-    # -- viewer ------------------------------------------------------------
-
-    def _open_viewer(self, item):
-        controller = self._controller()
-        data = controller.read_full(item["id"]) if controller else None
-        if not data:
-            self._set_status("That image is no longer available.")
-            return
-        pixmap = QPixmap()
-        pixmap.loadFromData(data)
-        if pixmap.isNull():
-            return
-        _ImageViewerDialog(pixmap, item, self).exec()
-
-
-class _ImageViewerDialog(QDialog):
-    """Click-to-enlarge viewer: the stored frame plus its metadata."""
-
-    def __init__(self, pixmap, item, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Library Image")
-        self.setStyleSheet(f"QDialog {{ background-color: {Colors.bg_app}; }}")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(Spacing.base, Spacing.base, Spacing.base, Spacing.base)
-        layout.setSpacing(Spacing.md)
-
-        image = QLabel()
-        if max(pixmap.width(), pixmap.height()) > VIEWER_MAX:
-            pixmap = pixmap.scaled(VIEWER_MAX, VIEWER_MAX, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        image.setPixmap(pixmap)
-        image.setAlignment(Qt.AlignCenter)
-        layout.addWidget(image)
-
-        meta = self._meta_text(item)
-        if meta:
-            meta_label = BodyLabel(meta)
-            meta_label.setStyleSheet(f"color: {Colors.text_secondary};")
-            meta_label.setWordWrap(True)
-            layout.addWidget(meta_label)
-
-        close_btn = PrimaryPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
-
-    @staticmethod
-    def _meta_text(item):
-        lines = [f"Captured: {_fmt_time(item.get('captured_at'))}"]
-        for label, key in (
-            ("Camera", "camera"), ("Exposure", "exposure"), ("Gain", "gain"),
-            ("Temp", "temp"), ("Weather", "weather"), ("Session", "session"),
-        ):
-            if value := item.get(key):
-                lines.append(f"{label}: {value}")
-        w, h = item.get("width"), item.get("height")
-        if w and h:
-            lines.append(f"Resolution: {w}×{h}")
-        return "   ·   ".join(lines)
+        self.session_list.set_error(message)
