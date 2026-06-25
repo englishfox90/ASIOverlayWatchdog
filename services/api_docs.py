@@ -274,6 +274,12 @@ def _esc(text: str) -> str:
     return _html.escape(str(text))
 
 
+def _html_table(headers: list, rows: list) -> str:
+    """Wrap pre-built <tr> ``rows`` in a table with the given column ``headers``."""
+    head = "".join(f"<th>{_esc(h)}</th>" for h in headers)
+    return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+
+
 def _render_params(op: dict) -> str:
     """Render an operation's query/path parameters as a small table, if any."""
     params = op.get("parameters") or []
@@ -282,23 +288,18 @@ def _render_params(op: dict) -> str:
     rows = []
     for p in params:
         schema = p.get("schema", {})
-        typ = schema.get("type", "")
         default = schema.get("default")
-        extra = f" (default {default})" if default is not None else ""
+        extra = f" (default {_esc(default)})" if default is not None else ""
         req = "yes" if p.get("required") else "no"
         rows.append(
             f"<tr><td class='path'>{_esc(p.get('name', ''))}</td>"
-            f"<td class='type'>{_esc(typ)}{_esc(extra)}</td>"
+            f"<td class='type'>{_esc(schema.get('type', ''))}{extra}</td>"
             f"<td>{_esc(p.get('in', ''))}</td>"
             f"<td>{_esc(req)}</td>"
             f"<td>{_esc(p.get('description', ''))}</td></tr>"
         )
-    return (
-        "<div class='tag'>Query parameters</div>"
-        "<table><thead><tr><th>Name</th><th>Type</th><th>In</th>"
-        "<th>Required</th><th>Description</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
-    )
+    return "<div class='tag'>Query parameters</div>" + _html_table(
+        ["Name", "Type", "In", "Required", "Description"], rows)
 
 
 def _render_responses(op: dict) -> str:
@@ -306,17 +307,12 @@ def _render_responses(op: dict) -> str:
     responses = op.get("responses") or {}
     if not responses:
         return ""
-    rows = []
-    for code, meta in responses.items():
-        rows.append(
-            f"<tr><td class='path'>{_esc(code)}</td>"
-            f"<td>{_esc(meta.get('description', ''))}</td></tr>"
-        )
-    return (
-        "<div class='tag'>Responses</div>"
-        "<table><thead><tr><th>Status</th><th>Description</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
-    )
+    rows = [
+        f"<tr><td class='path'>{_esc(code)}</td>"
+        f"<td>{_esc(meta.get('description', ''))}</td></tr>"
+        for code, meta in responses.items()
+    ]
+    return "<div class='tag'>Responses</div>" + _html_table(["Status", "Description"], rows)
 
 
 def render_docs_html(spec: dict) -> str:
@@ -340,23 +336,21 @@ def render_docs_html(spec: dict) -> str:
                 f'{_render_params(op)}{_render_responses(op)}</div>'
             )
 
-    # Capture fields table from the shared catalog (via the spec's schema).
+    # Bespoke table for the nested /status `capture` schema fields — this
+    # introspects a response schema's sub-object, not endpoint params/responses,
+    # so it stays separate from the generic _render_* helpers.
     capture_props = (
         spec.get("components", {}).get("schemas", {})
         .get("Status", {}).get("properties", {})
         .get("capture", {}).get("properties", {})
     )
-    rows = []
-    for name, meta in capture_props.items():
-        rows.append(
-            f"<tr><td class='path'>{_esc(name)}</td>"
-            f"<td class='type'>{_esc(meta.get('type', ''))}</td>"
-            f"<td>{_esc(meta.get('description', ''))}</td></tr>"
-        )
-    capture_table = (
-        "<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
-    )
+    rows = [
+        f"<tr><td class='path'>{_esc(name)}</td>"
+        f"<td class='type'>{_esc(meta.get('type', ''))}</td>"
+        f"<td>{_esc(meta.get('description', ''))}</td></tr>"
+        for name, meta in capture_props.items()
+    ]
+    capture_table = _html_table(["Field", "Type", "Description"], rows)
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
