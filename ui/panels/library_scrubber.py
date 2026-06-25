@@ -6,6 +6,12 @@ event pins for capture gaps, a playhead, and time ticks. Dragging (or clicking)
 moves the playhead and emits ``index_changed`` with the frame index under it —
 the night view loads that frame into the hero preview.
 
+The whole track is laid out in **frame-index space** (every frame gets an equal
+slice), not clock-time space. That keeps the filmstrip thumbnails, the playhead,
+the condition band, and the ticks all on one axis — otherwise an uneven capture
+cadence (a burst of frames in one minute, then a gap) slides the band off the
+thumbnails. Capture gaps therefore show as event pins rather than as width.
+
 Painted directly rather than built from nested layouts so dragging stays smooth
 and the playhead can overlay the strip + band precisely.
 """
@@ -13,6 +19,7 @@ from PySide6.QtWidgets import QWidget, QToolTip
 from PySide6.QtGui import QPainter, QPixmap, QColor, QPen, QFont, QBrush
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 
+from services.library.sessions import row_status
 from ..theme.tokens import Colors
 from .library_band import status_color
 from .library_format import fmt_clock, fmt_gap
@@ -40,8 +47,8 @@ class Scrubber(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._frames = []
-        self._pixmaps = []
-        self._band = []
+        self._film = []        # [(frame_index, QPixmap)] — sampled thumbnails
+        self._band = []        # [(frac0, frac1, status)] in frame-index space
         self._pins = []        # [(frac, gap_dict)] — capture-gap event pins
         self._id_index = {}    # image id -> frame index (pin click-to-seek)
         self._index = 0
@@ -53,27 +60,49 @@ class Scrubber(QWidget):
 
     # -- data --------------------------------------------------------------
 
-    def set_data(self, frames, filmstrip_items, band, gaps):
+    def set_data(self, frames, filmstrip_items, gaps):
         """Load one night. ``filmstrip_items`` is ``[(frame_index, jpeg bytes)]``."""
         self._frames = frames or []
-        self._band = band or []
-        self._pixmaps = []
-        for _idx, data in (filmstrip_items or []):
+        self._id_index = {row["id"]: i for i, row in enumerate(self._frames)}
+
+        self._film = []
+        for idx, data in (filmstrip_items or []):
             pix = QPixmap()
             if pix.loadFromData(data):
-                self._pixmaps.append(pix)
+                self._film.append((idx, pix))
 
+        self._band = self._build_band()
+
+        # Pins sit at the index boundary where the gap occurred, so they line up
+        # with the thumbnail before the gap rather than a clock position.
         self._pins = []
-        self._id_index = {row["id"]: i for i, row in enumerate(self._frames)}
-        if self._frames:
-            start = self._frames[0]["captured_at"]
-            span = max(1, self._frames[-1]["captured_at"] - start)
-            for g in (gaps or []):
-                frac = max(0.0, min(1.0, (g["at"] - start) / span))
-                self._pins.append((frac, g))
+        for g in (gaps or []):
+            before = self._id_index.get(g["before_id"])
+            if before is not None:
+                self._pins.append((self._index_frac(before), g))
 
         self._index = len(self._frames) // 2 if self._frames else 0
         self.update()
+
+    def _build_band(self):
+        """Condition segments in frame-index space (merging equal neighbours)."""
+        n = len(self._frames)
+        if n == 0:
+            return []
+        if n == 1:
+            return [(0.0, 1.0, row_status(self._frames[0]))]
+        segments = []
+        run_status = None
+        run_start = 0.0
+        for i, row in enumerate(self._frames):
+            status = row_status(row)
+            left = 0.0 if i == 0 else (i - 0.5) / (n - 1)
+            if status != run_status:
+                if run_status is not None:
+                    segments.append((run_start, left, run_status))
+                run_status, run_start = status, left
+        segments.append((run_start, 1.0, run_status))
+        return segments
 
     def set_index(self, index):
         """Move the playhead without emitting (used by playback / events)."""
@@ -153,9 +182,12 @@ class Scrubber(QWidget):
     def _x_to_frac(self, x):
         return max(0.0, min(1.0, (x - _PAD_X) / self._track_w()))
 
-    def _current_frac(self):
+    def _index_frac(self, index):
         n = len(self._frames)
-        return (self._index / (n - 1)) if n > 1 else 0.0
+        return (index / (n - 1)) if n > 1 else 0.0
+
+    def _current_frac(self):
+        return self._index_frac(self._index)
 
     # -- paint -------------------------------------------------------------
 
@@ -173,18 +205,20 @@ class Scrubber(QWidget):
 
     def _paint_filmstrip(self, painter, w):
         painter.fillRect(QRectF(_PAD_X, _STRIP_TOP, w, _STRIP_H), QColor(Colors.gray_2))
-        if not self._pixmaps:
+        if not self._film:
             return
-        gap = 2
-        n = len(self._pixmaps)
-        cell_w = (w - gap * (n - 1)) / n
-        for i, pix in enumerate(self._pixmaps):
-            x = _PAD_X + i * (cell_w + gap)
+        # Each thumbnail is centred on its own frame's index position, so it sits
+        # directly above the band colour and playhead for that frame.
+        cell_w = (w / len(self._film)) * 0.92
+        half = cell_w / 2
+        for idx, pix in self._film:
+            cx = self._frac_to_x(self._index_frac(idx))
+            cx = max(_PAD_X + half, min(_PAD_X + w - half, cx))  # keep edges in view
             # Letterbox (KeepAspectRatio, centered) so square and rectangular
             # frames both show un-cropped and un-stretched — pier cameras vary.
             scaled = pix.scaled(int(cell_w), _STRIP_H, Qt.KeepAspectRatio,
                                 Qt.SmoothTransformation)
-            ox = x + (cell_w - scaled.width()) / 2
+            ox = cx - scaled.width() / 2
             oy = _STRIP_TOP + (_STRIP_H - scaled.height()) / 2
             painter.drawPixmap(QPointF(ox, oy), scaled)
 
@@ -218,8 +252,7 @@ class Scrubber(QWidget):
     def _paint_ticks(self, painter, w):
         if not self._frames:
             return
-        start = self._frames[0]["captured_at"]
-        end = self._frames[-1]["captured_at"]
+        last = len(self._frames) - 1
         font = QFont()
         font.setPointSize(7)
         painter.setFont(font)
@@ -227,7 +260,9 @@ class Scrubber(QWidget):
         y = _TRACK_BOTTOM + 14
         for i in range(5):
             frac = i / 4
-            label = fmt_clock(start + frac * (end - start))
+            # Index-space axis: label each tick with the time of the frame that
+            # sits there, so ticks line up with the thumbnails above them.
+            label = fmt_clock(self._frames[round(frac * last)]["captured_at"])
             x = _PAD_X + frac * w
             if i == 0:
                 rect = QRectF(x, y - 10, 60, 12)

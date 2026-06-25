@@ -55,7 +55,7 @@ def fmt_gap(seconds):
 
 
 def fmt_exposure(value):
-    """Tidy exposure: '456 ms' / '2.50 s' from a raw value like '0.456198…' or '0.46s'."""
+    """Exposure in seconds rounded to 2 dp: '0.46 s' from '0.456198…' or '0.46s'."""
     if value is None:
         return "—"
     raw = str(value).strip().lower().rstrip("s").strip()
@@ -63,13 +63,7 @@ def fmt_exposure(value):
         seconds = float(raw)
     except (TypeError, ValueError):
         return str(value)
-    if seconds <= 0:
-        return "0 s"
-    if seconds < 1:
-        return f"{seconds * 1000:.0f} ms"
-    if seconds < 10:
-        return f"{seconds:.2f} s"
-    return f"{seconds:.1f} s"
+    return f"{seconds:.2f} s"
 
 
 def fmt_clouds(value):

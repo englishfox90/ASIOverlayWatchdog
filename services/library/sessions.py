@@ -51,9 +51,9 @@ def night_key(epoch):
     return dt.strftime("%Y-%m-%d")
 
 
-def parse_temp_c(text):
-    """Best-effort Celsius float from a stored temp display string, or None."""
-    if not text:
+def _parse_float(text):
+    """First float found in a string ('2.3' / '2.3 px' -> 2.3), or None."""
+    if text is None or text == "":
         return None
     m = _TEMP_RE.search(str(text))
     if not m:
@@ -62,6 +62,25 @@ def parse_temp_c(text):
         return float(m.group())
     except ValueError:
         return None
+
+
+def parse_temp_c(text):
+    """Best-effort Celsius float from a stored temp display string, or None."""
+    return _parse_float(text) if text else None
+
+
+def best_seeing(rows):
+    """The (label, fwhm) of the sharpest frame (lowest FWHM), or (None, None).
+
+    Lower FWHM = better seeing, so 'best' is the minimum across the night.
+    """
+    best_fwhm = None
+    label = None
+    for r in rows:
+        fwhm = _parse_float(r.get("fwhm"))
+        if fwhm is not None and (best_fwhm is None or fwhm < best_fwhm):
+            best_fwhm, label = fwhm, r.get("seeing")
+    return label, best_fwhm
 
 
 def _is_clear(condition, clouds):
@@ -178,6 +197,8 @@ def summarize_sessions(index, since=None):
         cover = grp[len(grp) // 2]  # mid-night frame: usually a real sky shot
         statuses = [row_status(r) for r in grp]
         clear = sum(1 for s in statuses if s == STATUS_CLEAR)
+        star_counts = [r["star_count"] for r in grp if r.get("star_count") is not None]
+        seeing_label, seeing_fwhm = best_seeing(grp)
         sessions.append({
             "key": key,
             "start_epoch": grp[0]["captured_at"],
@@ -191,6 +212,9 @@ def summarize_sessions(index, since=None):
             "band": status_segments(grp, grp[0]["captured_at"], grp[-1]["captured_at"]),
             "clear_pct": round(100 * clear / len(grp)) if grp else None,
             "roof_closed": any(s == STATUS_CLOSED for s in statuses),
+            "max_stars": max(star_counts) if star_counts else None,
+            "best_seeing": seeing_label,
+            "best_fwhm": seeing_fwhm,
         })
     sessions.sort(key=lambda s: s["start_epoch"], reverse=True)
     return sessions

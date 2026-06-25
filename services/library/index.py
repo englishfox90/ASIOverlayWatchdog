@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS images (
     roof         TEXT,
     condition    TEXT,
     clouds       INTEGER,
+    star_count   INTEGER,
+    seeing       TEXT,
+    fwhm         TEXT,
     created_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_images_captured_at ON images(captured_at);
@@ -36,16 +39,19 @@ CREATE INDEX IF NOT EXISTS idx_images_captured_at ON images(captured_at);
 _FIELDS = (
     "captured_at", "path", "width", "height", "bytes",
     "session", "exposure", "gain", "temp", "camera", "weather",
-    "roof", "condition", "clouds", "created_at",
+    "roof", "condition", "clouds", "star_count", "seeing", "fwhm", "created_at",
 )
 
 # Columns added after the original release. Older databases predate them, so we
 # ALTER them in on open (SQLite has no "ADD COLUMN IF NOT EXISTS"). Existing rows
-# get NULLs — historical frames simply render as 'unknown' on the condition band.
+# get NULLs — historical frames simply render as 'unknown' / '—'.
 _MIGRATIONS = (
     ("roof", "TEXT"),
     ("condition", "TEXT"),
     ("clouds", "INTEGER"),
+    ("star_count", "INTEGER"),
+    ("seeing", "TEXT"),
+    ("fwhm", "TEXT"),
 )
 
 
@@ -108,7 +114,8 @@ class LibraryIndex:
         where, params = self._range_clause(since, until)
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT id, captured_at, temp, roof, condition, clouds FROM images{where} "
+                "SELECT id, captured_at, temp, roof, condition, clouds, "
+                f"star_count, seeing, fwhm FROM images{where} "
                 "ORDER BY captured_at ASC, id ASC", params
             ).fetchall()
         return [dict(r) for r in rows]

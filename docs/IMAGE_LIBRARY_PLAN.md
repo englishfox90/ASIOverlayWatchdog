@@ -28,8 +28,11 @@
 > existing panels). **Phase 4 (headless support + resize de-duplication) remains — optional.**
 >
 > **Phase 5 (session-scrubber redesign) is done:** the flat thumbnail grid is replaced by a
-> three-screen flow imported from the "Pier camera gallery navigation" Claude Design project —
-> **session list → night scrubber → single image**. Frames are grouped into observing *nights*
+> two-screen flow imported from the "Pier camera gallery navigation" Claude Design project —
+> **session list → night scrubber** (the design's third single-image popup was built then removed as
+> redundant; the night view's hero + metadata panel is the detail view). The scrubber is laid out in
+> frame-index space so the filmstrip, playhead, condition band, and ticks stay aligned under uneven
+> capture cadence; gaps show as event pins. Frames are grouped into observing *nights*
 > (local-noon cutoff, so an evening-to-morning run isn't split at midnight) via
 > `services/library/sessions.py`. Each night shows a **condition band**: green = roof open + clear,
 > amber = roof open + not clear, red = roof closed, dark = capture gap, grey = unknown. The band is

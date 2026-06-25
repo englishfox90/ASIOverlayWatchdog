@@ -15,6 +15,7 @@ if project_root not in sys.path:
 from services.library import sessions as S
 from services.library.index import LibraryIndex
 from services.library import ImageLibrary
+from ui.panels.library_format import fmt_exposure  # Qt-free pure formatter
 
 
 def _epoch(y, mo, d, h, mi=0):
@@ -127,10 +128,41 @@ class TestSummarize:
         first = result[1]
         assert first["clear_pct"] == 100
 
+    def test_star_and_seeing_aggregates(self):
+        n = _epoch(2026, 6, 24, 22, 0)
+        rows = [
+            {"id": 1, "captured_at": n, "roof": "Open", "condition": "Clear",
+             "clouds": 0, "star_count": 1200, "seeing": "Fair", "fwhm": "4.5"},
+            {"id": 2, "captured_at": n + 60, "roof": "Open", "condition": "Clear",
+             "clouds": 0, "star_count": 2100, "seeing": "Good", "fwhm": "3.1"},
+            {"id": 3, "captured_at": n + 120, "roof": "Open", "condition": "Clear",
+             "clouds": 0, "star_count": 1800, "seeing": "Good", "fwhm": "3.4"},
+        ]
+        s = S.summarize_sessions(_FakeIndex(rows))[0]
+        assert s["max_stars"] == 2100               # peak across the night
+        assert s["best_seeing"] == "Good"           # label of the sharpest frame
+        assert round(s["best_fwhm"], 1) == 3.1      # lowest FWHM
+
+    def test_aggregates_none_without_star_data(self):
+        s = S.summarize_sessions(self._index())[0]
+        assert s["max_stars"] is None
+        assert s["best_seeing"] is None
+
 
 # --------------------------------------------------------------------------
 # index migration + metadata extraction
 # --------------------------------------------------------------------------
+
+class TestExposureFormat:
+    def test_rounds_to_two_decimals(self):
+        assert fmt_exposure("0.45619849624060") == "0.46 s"
+        assert fmt_exposure("2.5") == "2.50 s"
+        assert fmt_exposure("0.018") == "0.02 s"
+
+    def test_strips_trailing_s_and_handles_missing(self):
+        assert fmt_exposure("0.46s") == "0.46 s"
+        assert fmt_exposure(None) == "—"
+
 
 class TestPersistence:
     def test_migration_adds_columns_to_old_db(self, tmp_path):
@@ -148,7 +180,7 @@ class TestPersistence:
 
         idx = LibraryIndex(db)  # opening should ALTER the new columns in
         cols = {r["name"] for r in idx._conn.execute("PRAGMA table_info(images)").fetchall()}
-        assert {"roof", "condition", "clouds"} <= cols
+        assert {"roof", "condition", "clouds", "star_count", "seeing", "fwhm"} <= cols
         idx.close()
 
     def test_extract_meta_pulls_roof_condition_clouds(self):
@@ -163,8 +195,22 @@ class TestPersistence:
         assert out["condition"] == "Partly Cloudy"
         assert out["clouds"] == 45
 
+    def test_extract_meta_pulls_star_metrics(self):
+        out = ImageLibrary._extract_meta(
+            {"STAR_COUNT": "1234", "SEEING": "Good", "FWHM": "2.3"}
+        )
+        assert out["star_count"] == 1234
+        assert out["seeing"] == "Good"
+        assert out["fwhm"] == "2.3"
+
     def test_extract_meta_handles_na_and_absence(self):
-        out = ImageLibrary._extract_meta({"ROOF_STATUS": "N/A", "SKY_CONDITION": "N/A"})
+        out = ImageLibrary._extract_meta(
+            {"ROOF_STATUS": "N/A", "SKY_CONDITION": "N/A",
+             "STAR_COUNT": "N/A", "SEEING": "N/A", "FWHM": "N/A"}
+        )
         assert out["roof"] is None
         assert out["condition"] is None
         assert out["clouds"] is None
+        assert out["star_count"] is None
+        assert out["seeing"] is None
+        assert out["fwhm"] is None

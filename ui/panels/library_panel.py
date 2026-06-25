@@ -16,7 +16,6 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget
 from ..theme.tokens import Colors
 from .library_session_list import SessionListView
 from .library_night_view import NightView
-from .library_image_viewer import ImageViewerDialog
 
 # Range filter options offered by the session list; the controller just takes
 # the resolved lookback seconds (None = all time).
@@ -58,7 +57,6 @@ class LibraryPanel(QWidget):
         self.session_list.refresh_requested.connect(self._reload_sessions)
         self.night_view.back_requested.connect(self.show_sessions)
         self.night_view.frame_request.connect(self._request_frame)
-        self.night_view.image_activated.connect(self._open_viewer)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -96,14 +94,6 @@ class LibraryPanel(QWidget):
         controller = self._controller()
         if controller is not None:
             controller.request_frame(image_id)
-
-    def _open_viewer(self):
-        controller = self._controller()
-        frames = self.night_view.frames()
-        if controller is None or not frames:
-            return
-        ImageViewerDialog(frames, self.night_view.current_index(),
-                          controller.read_full, self).exec()
 
     # -- controller signal handlers ---------------------------------------
 

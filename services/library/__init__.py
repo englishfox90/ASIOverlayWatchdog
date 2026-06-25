@@ -70,6 +70,23 @@ def _parse_pct(text):
     return int(digits) if digits else None
 
 
+def _clean_na(text):
+    """Trimmed string, or None for empty / 'N/A' placeholders."""
+    if text is None:
+        return None
+    s = str(text).strip()
+    return None if not s or s.upper() == "N/A" else s
+
+
+def _parse_int(text):
+    """Integer from a value like '1234' or '0', or None ('N/A' -> None)."""
+    s = _clean_na(text)
+    if s is None:
+        return None
+    digits = "".join(c for c in s if c.isdigit())
+    return int(digits) if digits else None
+
+
 class ImageLibrary:
     """Owns the library store, index, and the background save worker.
 
@@ -333,4 +350,8 @@ class ImageLibrary:
             "roof": _first_word(ml.get("roof_status")) or _first_word(m.get("ROOF_STATUS")),
             "condition": ml.get("sky_condition") or _strip_pct(m.get("SKY_CONDITION")),
             "clouds": _parse_pct(m.get("WEATHER_CLOUDS") or m.get("clouds")),
+            # Star-detection tokens (present when the observing-window gate ran it).
+            "star_count": _parse_int(m.get("STAR_COUNT")),
+            "seeing": _clean_na(m.get("SEEING")),
+            "fwhm": _clean_na(m.get("FWHM")),
         }

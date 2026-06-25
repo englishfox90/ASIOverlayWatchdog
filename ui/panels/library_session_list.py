@@ -223,6 +223,14 @@ class _SessionCard(CardWidget):
         temp = fmt_temp_c(self._session.get("min_temp_c"))
         if temp:
             parts.append(f"min {temp}")
+        # Star/seeing peaks only appear on nights where star detection ran
+        # (roof open + dark), so they stay off daytime / roof-closed cards.
+        stars = self._session.get("max_stars")
+        if stars:
+            parts.append(f"peak {stars:,} stars")
+        seeing = self._session.get("best_seeing")
+        if seeing:
+            parts.append(f"best seeing {seeing}")
         clear_pct = self._session.get("clear_pct")
         stats = CaptionLabel("      ".join(parts))
         stats.setStyleSheet(f"color: {Colors.text_muted};")

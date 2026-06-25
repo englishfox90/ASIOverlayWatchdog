@@ -30,10 +30,12 @@ _TICK_MS = 80
 
 # Metadata grid order (two columns). Values + colors are filled per frame in
 # _update_meta; this just fixes the labels and layout.
-_META_KEYS = ("sky", "roof", "clouds", "sensor", "exposure", "gain", "camera", "res")
+_META_KEYS = ("sky", "roof", "seeing", "stars", "clouds", "sensor",
+              "exposure", "gain", "camera", "res")
 _META_LABELS = {
-    "sky": "Sky", "roof": "Roof", "clouds": "Clouds", "sensor": "Sensor",
-    "exposure": "Exposure", "gain": "Gain", "camera": "Camera", "res": "Resolution",
+    "sky": "Sky", "roof": "Roof", "seeing": "Seeing", "stars": "Stars",
+    "clouds": "Clouds", "sensor": "Sensor", "exposure": "Exposure",
+    "gain": "Gain", "camera": "Camera", "res": "Resolution",
 }
 
 
@@ -42,7 +44,6 @@ class NightView(QWidget):
 
     back_requested = Signal()
     frame_request = Signal(int)   # image id to load into the hero
-    image_activated = Signal()    # open the current frame in the single-image view
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -98,12 +99,11 @@ class NightView(QWidget):
         return row
 
     def _build_hero(self):
-        self.hero = _ClickableFrame()
+        self.hero = QFrame()
         self.hero.setStyleSheet(
             f"background-color: #08070d; border-radius: {Layout.radius_md}px;"
         )
         self.hero.setMinimumSize(360, 360)
-        self.hero.clicked.connect(self._on_hero_clicked)
 
         hero_layout = QVBoxLayout(self.hero)
         hero_layout.setContentsMargins(0, 0, 0, 0)
@@ -260,7 +260,6 @@ class NightView(QWidget):
         self.scrubber.set_data(
             self._frames,
             payload.get("filmstrip", []),
-            self._session.get("band"),
             self._session.get("gaps"),
         )
         self._build_events(self._session.get("gaps", []))
@@ -280,17 +279,6 @@ class NightView(QWidget):
             self.play_btn.setText("Play")
             self.play_btn.setIcon(mdi('play'))
 
-    def current_index(self):
-        return self.scrubber.current_index()
-
-    def frames(self):
-        return self._frames
-
-    def current_frame(self):
-        idx = self.scrubber.current_index()
-        if 0 <= idx < len(self._frames):
-            return self._frames[idx]
-        return None
 
     # -- transport / scrubbing --------------------------------------------
 
@@ -384,6 +372,9 @@ class NightView(QWidget):
             roof_color = Colors.success_text if roof.lower().startswith("open") else Colors.error_text
         self._set_meta("roof", roof or "—", roof_color)
 
+        self._set_meta("seeing", _fmt_seeing(frame.get("seeing"), frame.get("fwhm")))
+        sc = frame.get("star_count")
+        self._set_meta("stars", f"{sc:,}" if sc is not None else "—")
         self._set_meta("clouds", fmt_clouds(clouds))
         self._set_meta("sensor", frame.get("temp") or "—")
         self._set_meta("exposure", fmt_exposure(frame.get("exposure")))
@@ -440,10 +431,6 @@ class NightView(QWidget):
         self.scrubber.set_index(index)
         self._on_index_changed(index)
 
-    def _on_hero_clicked(self):
-        if self.current_frame() is not None:
-            self.image_activated.emit()
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.overlay_label.text():
@@ -451,17 +438,15 @@ class NightView(QWidget):
             self.overlay_label.move(x, 10)
 
 
-class _ClickableFrame(QFrame):
-    clicked = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setCursor(Qt.PointingHandCursor)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mouseReleaseEvent(event)
+def _fmt_seeing(seeing, fwhm):
+    """Combine the seeing label and FWHM: 'Good · 2.3 px', or one, or '—'."""
+    if seeing and fwhm:
+        return f"{seeing} · {fwhm} px"
+    if seeing:
+        return seeing
+    if fwhm:
+        return f"{fwhm} px"
+    return "—"
 
 
 class _LinkLabel(CaptionLabel):
