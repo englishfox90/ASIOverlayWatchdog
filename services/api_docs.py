@@ -274,6 +274,51 @@ def _esc(text: str) -> str:
     return _html.escape(str(text))
 
 
+def _render_params(op: dict) -> str:
+    """Render an operation's query/path parameters as a small table, if any."""
+    params = op.get("parameters") or []
+    if not params:
+        return ""
+    rows = []
+    for p in params:
+        schema = p.get("schema", {})
+        typ = schema.get("type", "")
+        default = schema.get("default")
+        extra = f" (default {default})" if default is not None else ""
+        req = "yes" if p.get("required") else "no"
+        rows.append(
+            f"<tr><td class='path'>{_esc(p.get('name', ''))}</td>"
+            f"<td class='type'>{_esc(typ)}{_esc(extra)}</td>"
+            f"<td>{_esc(p.get('in', ''))}</td>"
+            f"<td>{_esc(req)}</td>"
+            f"<td>{_esc(p.get('description', ''))}</td></tr>"
+        )
+    return (
+        "<div class='tag'>Query parameters</div>"
+        "<table><thead><tr><th>Name</th><th>Type</th><th>In</th>"
+        "<th>Required</th><th>Description</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _render_responses(op: dict) -> str:
+    """Render an operation's response status codes + descriptions, if any."""
+    responses = op.get("responses") or {}
+    if not responses:
+        return ""
+    rows = []
+    for code, meta in responses.items():
+        rows.append(
+            f"<tr><td class='path'>{_esc(code)}</td>"
+            f"<td>{_esc(meta.get('description', ''))}</td></tr>"
+        )
+    return (
+        "<div class='tag'>Responses</div>"
+        "<table><thead><tr><th>Status</th><th>Description</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
 def render_docs_html(spec: dict) -> str:
     """Render the OpenAPI spec to a self-contained HTML reference page."""
     info = spec.get("info", {})
@@ -291,7 +336,8 @@ def render_docs_html(spec: dict) -> str:
                 f'<div class="endpoint">'
                 f'<span class="method">{_esc(method.upper())}</span>'
                 f'<span class="path">{_esc(path)}</span>'
-                f'<div><strong>{summary}</strong></div>{desc_html}</div>'
+                f'<div><strong>{summary}</strong></div>{desc_html}'
+                f'{_render_params(op)}{_render_responses(op)}</div>'
             )
 
     # Capture fields table from the shared catalog (via the spec's schema).

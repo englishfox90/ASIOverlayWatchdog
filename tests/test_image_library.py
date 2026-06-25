@@ -362,6 +362,15 @@ class TestOpenAPILibraryRoutes:
         assert "/library/image" in spec["paths"]
         assert "LibraryManifest" in spec["components"]["schemas"]
 
+    def test_docs_html_details_endpoint_params_and_responses(self):
+        from services.api_docs import build_openapi_spec, render_docs_html
+        html = render_docs_html(build_openapi_spec(library_path="/library"))
+        # The library endpoints are now detailed (not just the URL): query
+        # params and response codes render in the HTML reference.
+        assert "Query parameters" in html
+        assert "since" in html and "limit" in html and "offset" in html
+        assert "Responses" in html and "304" in html
+
     def test_library_routes_absent_when_path_none(self):
         from services.api_docs import build_openapi_spec
         spec = build_openapi_spec(library_path=None)

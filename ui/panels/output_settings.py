@@ -288,7 +288,53 @@ class OutputSettingsPanel(QScrollArea):
         cleanup_card.add_row("Strategy", self.cleanup_strategy_combo, "Which files to delete first")
         
         layout.addWidget(cleanup_card)
-        
+
+        # === IMAGE LIBRARY ===
+        library_card = CollapsibleCard("Image Library", mdi('image-multiple'))
+
+        self.library_enabled_switch = SwitchRow(
+            "Enable Library",
+            "Keep a browsable history of downscaled frames (in-app + web API)"
+        )
+        self.library_enabled_switch.toggled.connect(self._on_library_settings_changed)
+        library_card.add_widget(self.library_enabled_switch)
+
+        self.library_retention_spin = SpinBox()
+        self.library_retention_spin.setRange(1, 365)
+        self.library_retention_spin.setSuffix(" days")
+        self.library_retention_spin.valueChanged.connect(self._on_library_settings_changed)
+        library_card.add_row("Retention", self.library_retention_spin,
+                             "Keep images for this many days")
+
+        self.library_max_size_spin = DoubleSpinBox()
+        self.library_max_size_spin.setRange(0.1, 1000.0)
+        self.library_max_size_spin.setDecimals(1)
+        self.library_max_size_spin.setSuffix(" GB")
+        self.library_max_size_spin.valueChanged.connect(self._on_library_settings_changed)
+        library_card.add_row("Max Size", self.library_max_size_spin,
+                             "Prune oldest once the library exceeds this size")
+
+        self.library_max_dim_spin = SpinBox()
+        self.library_max_dim_spin.setRange(100, 4000)
+        self.library_max_dim_spin.setSuffix(" px")
+        self.library_max_dim_spin.valueChanged.connect(self._on_library_settings_changed)
+        library_card.add_row("Max Dimension", self.library_max_dim_spin,
+                             "Longest edge of stored images")
+
+        self.library_quality_spin = SpinBox()
+        self.library_quality_spin.setRange(1, 95)
+        self.library_quality_spin.valueChanged.connect(self._on_library_settings_changed)
+        library_card.add_row("JPEG Quality", self.library_quality_spin, "1-95")
+
+        self.library_api_switch = SwitchRow(
+            "Expose Web API",
+            "Serve /library and /library/image from the web server"
+        )
+        self.library_api_switch.toggled.connect(self._on_library_settings_changed)
+        library_card.add_widget(self.library_api_switch)
+
+        layout.addWidget(library_card)
+
         layout.addStretch()
     
     # === EVENT HANDLERS ===
@@ -441,7 +487,21 @@ class OutputSettingsPanel(QScrollArea):
             self.main_window.config.set('cleanup_max_size_gb', self.max_size_spin.value())
             self.main_window.config.set('cleanup_strategy', self.cleanup_strategy_combo.currentText())
             self.settings_changed.emit()
-    
+
+    def _on_library_settings_changed(self):
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            library = self.main_window.config.get('library', {})
+            library['enabled'] = self.library_enabled_switch.is_checked()
+            library['retention_days'] = self.library_retention_spin.value()
+            library['max_size_gb'] = self.library_max_size_spin.value()
+            library['max_dimension'] = self.library_max_dim_spin.value()
+            library['jpeg_quality'] = self.library_quality_spin.value()
+            library['api_enabled'] = self.library_api_switch.is_checked()
+            self.main_window.config.set('library', library)
+            self.settings_changed.emit()
+
     # === CONFIG LOADING ===
     
     def load_from_config(self, config):
@@ -493,5 +553,14 @@ class OutputSettingsPanel(QScrollArea):
             idx = self.cleanup_strategy_combo.findText(strategy)
             if idx >= 0:
                 self.cleanup_strategy_combo.setCurrentIndex(idx)
+
+            # Image Library
+            library = config.get('library', {})
+            self.library_enabled_switch.set_checked(library.get('enabled', True))
+            self.library_retention_spin.setValue(library.get('retention_days', 7))
+            self.library_max_size_spin.setValue(library.get('max_size_gb', 2.0))
+            self.library_max_dim_spin.setValue(library.get('max_dimension', 750))
+            self.library_quality_spin.setValue(library.get('jpeg_quality', 85))
+            self.library_api_switch.set_checked(library.get('api_enabled', True))
         finally:
             self._loading_config = False
