@@ -104,10 +104,9 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
             app_logger.debug(f"Query params: {query_params}")
 
         # Library endpoints are delegated to services/web_library.py (keeps this
-        # module under the size cap); they're gated on the live library config so
-        # toggling the API off in Settings takes effect without a restart.
-        library_enabled = self._library_api_enabled()
-
+        # module under the size cap). The library gate reads the live config, so
+        # only evaluate it for paths that could actually be library routes — the
+        # hot /latest and /status paths must not pay for it on every request.
         if clean_path == config_path:
             self._serve_image()
         elif clean_path == status_path:
@@ -116,13 +115,13 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
             self._serve_openapi()
         elif clean_path == docs_path:
             self._serve_docs()
-        elif library_enabled and clean_path == library_path + '/image':
+        elif clean_path == library_path + '/image' and self._library_api_enabled():
             web_library.serve_image(self, self._library(), query_params)
-        elif library_enabled and clean_path == library_path:
+        elif clean_path == library_path and self._library_api_enabled():
             web_library.serve_list(self, self._library(), library_path, query_params)
         else:
             available = ", ".join([config_path, status_path, openapi_path, docs_path])
-            if library_enabled:
+            if self._library_api_enabled():
                 available += f", {library_path}, {library_path}/image"
             self.send_error(404, f"Path not found. Available: {available}")
     

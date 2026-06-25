@@ -19,7 +19,8 @@ def parse_time_param(values):
     raw = values[0]
     try:
         return int(float(raw))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: float('inf')/'-inf' parses but int() overflows.
         pass
     try:
         return int(datetime.fromisoformat(raw).timestamp())

@@ -329,6 +329,28 @@ class TestLibraryReadAPI(TestImageLibraryEndToEnd):
 
 
 # --------------------------------------------------------------------------
+# Query-param parsing
+# --------------------------------------------------------------------------
+
+class TestParseTimeParam:
+    def test_epoch_iso_and_garbage(self):
+        from services.web_library import parse_time_param
+        assert parse_time_param(None) is None
+        assert parse_time_param(["1700000000"]) == 1700000000
+        assert parse_time_param(["1700000000.5"]) == 1700000000
+        assert parse_time_param(["2023-11-14T22:13:20"]) == \
+            int(datetime(2023, 11, 14, 22, 13, 20).timestamp())
+        assert parse_time_param(["not-a-time"]) is None
+
+    def test_non_finite_does_not_raise(self):
+        # 'inf'/'-inf' parse as float but int() overflows — must be swallowed.
+        from services.web_library import parse_time_param
+        assert parse_time_param(["inf"]) is None
+        assert parse_time_param(["-inf"]) is None
+        assert parse_time_param(["nan"]) is None
+
+
+# --------------------------------------------------------------------------
 # OpenAPI spec includes library routes only when enabled
 # --------------------------------------------------------------------------
 
