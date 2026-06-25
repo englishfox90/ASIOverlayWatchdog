@@ -40,7 +40,7 @@ def _fmt_time(epoch):
     """Local 'YYYY-MM-DD HH:MM:SS' for a stored capture epoch."""
     try:
         return datetime.fromtimestamp(int(epoch)).strftime("%Y-%m-%d %H:%M:%S")
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OSError, OverflowError):
         return "—"
 
 
@@ -57,18 +57,27 @@ class _Thumbnail(QFrame):
 
     clicked = Signal(dict)
 
+    OBJECT_NAME = "LibraryThumbnail"
+
+    # Styled once on the parent via the #objectName selector (set in
+    # LibraryPanel._setup_ui) rather than per-instance — a Python class name is
+    # not a reliable Qt stylesheet selector, and re-parsing a stylesheet on each
+    # of ~120 cells is wasteful.
+    @staticmethod
+    def stylesheet():
+        return (
+            f"#{_Thumbnail.OBJECT_NAME} {{"
+            f" background-color: {Colors.bg_card};"
+            f" border: 1px solid {Colors.border_subtle};"
+            f" border-radius: {Layout.radius_md}px; }}"
+            f" #{_Thumbnail.OBJECT_NAME}:hover {{ border-color: {Colors.accent_default}; }}"
+        )
+
     def __init__(self, item, pixmap, parent=None):
         super().__init__(parent)
         self._item = item
+        self.setObjectName(self.OBJECT_NAME)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(f"""
-            _Thumbnail {{
-                background-color: {Colors.bg_card};
-                border: 1px solid {Colors.border_subtle};
-                border-radius: {Layout.radius_md}px;
-            }}
-            _Thumbnail:hover {{ border-color: {Colors.accent_default}; }}
-        """)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(Spacing.xs, Spacing.xs, Spacing.xs, Spacing.xs)
         layout.setSpacing(Spacing.xs)
@@ -155,6 +164,7 @@ class LibraryPanel(QScrollArea):
 
         # --- thumbnail grid ---
         self.grid_host = QWidget()
+        self.grid_host.setStyleSheet(_Thumbnail.stylesheet())  # styles all cells
         self.grid = QGridLayout(self.grid_host)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(Spacing.md)
@@ -208,7 +218,8 @@ class LibraryPanel(QScrollArea):
 
         avail = self.viewport().width() or self.width() or (THUMB_WIDTH + Spacing.md)
         columns = max(1, avail // (THUMB_WIDTH + Spacing.md))
-        for idx, item in enumerate(items):
+        placed = 0  # advances only for cells actually added, so skips leave no hole
+        for item in items:
             pixmap = QPixmap()
             pixmap.loadFromData(item.get("data", b""))
             if pixmap.isNull():
@@ -219,7 +230,8 @@ class LibraryPanel(QScrollArea):
             meta = {k: v for k, v in item.items() if k != "data"}
             thumb = _Thumbnail(meta, thumb_pix, self.grid_host)
             thumb.clicked.connect(self._open_viewer)
-            self.grid.addWidget(thumb, idx // columns, idx % columns)
+            self.grid.addWidget(thumb, placed // columns, placed % columns)
+            placed += 1
 
     def on_load_failed(self, message):
         self._loading = False
@@ -285,4 +297,4 @@ class _ImageViewerDialog(QDialog):
         w, h = item.get("width"), item.get("height")
         if w and h:
             lines.append(f"Resolution: {w}×{h}")
-        return "    ".join(lines)
+        return "   ·   ".join(lines)
