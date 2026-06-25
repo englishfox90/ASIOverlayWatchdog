@@ -45,7 +45,9 @@ class SessionListView(QScrollArea):
         content = QWidget()
         self.setWidget(content)
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(Spacing.base, Spacing.base, Spacing.base, Spacing.base)
+        # Extra right margin so the count/Refresh and the card chevron don't hug
+        # the edge (and leaves room for the scrollbar when the list overflows).
+        layout.setContentsMargins(Spacing.base, Spacing.base, Spacing.lg, Spacing.base)
         layout.setSpacing(Spacing.card_gap)
 
         layout.addWidget(self._build_controls())
