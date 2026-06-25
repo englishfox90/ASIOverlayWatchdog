@@ -10,8 +10,8 @@ import io
 from PIL import Image
 
 
-def downscale_to_jpeg(img, max_edge=750, quality=85):
-    """Downscale ``img`` so its longest edge is <= ``max_edge`` and JPEG-encode it.
+def downscale_to_jpeg(img, max_edge=750, quality=85, mode="longest"):
+    """Downscale ``img`` so a chosen edge is <= ``max_edge`` and JPEG-encode it.
 
     Aspect ratio is preserved and the image is only ever shrunk, never upscaled
     (an image already within the cap is encoded at its native size). RGBA/P/LA
@@ -19,8 +19,10 @@ def downscale_to_jpeg(img, max_edge=750, quality=85):
 
     Args:
         img: A PIL ``Image.Image``.
-        max_edge: Maximum length of the longest edge in pixels.
+        max_edge: Maximum length of the measured edge in pixels.
         quality: JPEG quality (1-95).
+        mode: Which edge ``max_edge`` caps — ``"longest"`` (default), ``"height"``
+            (Discord's bandwidth cap), or ``"width"``.
 
     Returns:
         Tuple ``(jpeg_bytes, width, height)`` where width/height are the encoded
@@ -29,11 +31,17 @@ def downscale_to_jpeg(img, max_edge=750, quality=85):
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
 
+    if mode == "height":
+        measure = img.height
+    elif mode == "width":
+        measure = img.width
+    else:
+        measure = max(img.width, img.height)
+
     # A non-positive cap means "no limit" — never let a stray 0/negative config
     # collapse the image to 1x1.
-    longest = max(img.width, img.height)
-    if max_edge and max_edge > 0 and longest > max_edge:
-        ratio = max_edge / longest
+    if max_edge and max_edge > 0 and measure > max_edge:
+        ratio = max_edge / measure
         new_size = (max(1, round(img.width * ratio)), max(1, round(img.height * ratio)))
         img = img.resize(new_size, Image.LANCZOS)
 

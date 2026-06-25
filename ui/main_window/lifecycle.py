@@ -125,6 +125,12 @@ class _MainWindowLifecycleMixin:
         if self.image_processor:
             self.image_processor.stop()
 
+        # Drain the output dispatcher before the web server / library it feeds.
+        try:
+            self._stop_output_dispatcher()
+        except Exception:
+            pass
+
         if self.web_server:
             try:
                 self.web_server.stop()

@@ -1,5 +1,6 @@
 import io
 import os
+import queue
 import random
 import threading
 import traceback
@@ -200,12 +201,6 @@ class _MainWindowOutputMixin:
             # output_image is always clean — sent to file sinks and servers.
             self.live_panel.update_preview(preview_image, metadata)
 
-            # Archive a downscaled copy to the rolling image library. This is an
-            # independent sink (not gated on web/Discord) and never blocks —
-            # enqueue() hands off to the library's background worker.
-            if self.image_library:
-                self.image_library.enqueue(output_image, metadata)
-
             output_config = self.config.get('output', {})
             discord_config = self.config.get('discord', {})
             has_outputs = (
@@ -213,10 +208,16 @@ class _MainWindowOutputMixin:
                 discord_config.get('enabled', False)
             )
 
+            # Hand the heavy output work to a background thread. The library
+            # archive (a full-res PIL copy), the web push (a full-res PNG encode
+            # then decode + LANCZOS downsize), and Discord all used to run here,
+            # synchronously, on the GUI thread — a multi-hundred-ms freeze every
+            # frame. output_image is never mutated after the processor emits it,
+            # so the worker can own it without a defensive copy on this thread.
+            self._dispatch_outputs(output_path, output_image, metadata, has_outputs)
+
             if has_outputs:
                 self.app_bar.set_status('sending')
-                self._push_to_output_servers(output_path, output_image)
-
                 if self.is_capturing:
                     QTimer.singleShot(300, lambda: self.app_bar.set_status('waiting'))
                 else:
@@ -423,6 +424,66 @@ class _MainWindowOutputMixin:
             last_capture_epoch=(cc.last_successful_frame_epoch() if cc else None),
             last_error=self._last_capture_error, recovery=recovery,
         )
+
+    # =========================================================================
+    # OUTPUT DISPATCH (off the GUI thread)
+    # =========================================================================
+
+    # Small bound — the processor emits one frame at a time, so the dispatcher
+    # is normally idle; this is burst headroom for fast (daytime) cadence. If it
+    # ever fills, the oldest pending frame is dropped (newest /latest wins).
+    _OUTPUT_QUEUE_MAXSIZE = 4
+    _OUTPUT_STOP = object()
+
+    def _start_output_dispatcher(self):
+        """Create the dispatch queue and start its worker. Called once at init."""
+        self._output_dispatch_queue = queue.Queue(maxsize=self._OUTPUT_QUEUE_MAXSIZE)
+        self._output_dispatch_thread = threading.Thread(
+            target=self._output_dispatch_loop, name="OutputDispatch", daemon=True
+        )
+        self._output_dispatch_thread.start()
+
+    def _dispatch_outputs(self, output_path, output_image, metadata, has_outputs):
+        """Queue the library archive + server push for the background worker.
+
+        Non-blocking. Drops the oldest pending job if the worker has fallen
+        behind, so a slow encode never stalls the capture/GUI thread.
+        """
+        self._put_dispatch_job((output_path, output_image, metadata, has_outputs))
+
+    def _put_dispatch_job(self, job):
+        """Put a job on the dispatch queue, dropping the oldest if it is full."""
+        try:
+            self._output_dispatch_queue.put_nowait(job)
+        except queue.Full:
+            try:
+                self._output_dispatch_queue.get_nowait()  # drop oldest
+                self._output_dispatch_queue.put_nowait(job)
+            except (queue.Empty, queue.Full):
+                pass
+
+    def _output_dispatch_loop(self):
+        while True:
+            job = self._output_dispatch_queue.get()
+            if job is self._OUTPUT_STOP:
+                break
+            output_path, output_image, metadata, has_outputs = job
+            try:
+                if self.image_library:
+                    self.image_library.enqueue(output_image, metadata)
+                if has_outputs:
+                    self._push_to_output_servers(output_path, output_image)
+            except Exception as e:
+                app_logger.error(f"Output dispatch failed: {e}")
+                app_logger.error(traceback.format_exc())
+
+    def _stop_output_dispatcher(self):
+        """Stop the dispatch worker, letting an in-flight push finish."""
+        thread = getattr(self, '_output_dispatch_thread', None)
+        if not thread or not thread.is_alive():
+            return
+        self._put_dispatch_job(self._OUTPUT_STOP)  # drop-oldest guarantees it lands
+        thread.join(timeout=5.0)
 
     def _push_to_output_servers(self, image_path: str, processed_img):
         try:

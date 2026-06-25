@@ -100,6 +100,10 @@ class MainWindow(
         self.image_library = ImageLibrary(lambda: self.config.data)
         self.image_library.start()
 
+        # Background worker that drains per-frame output dispatch (library
+        # archive + web/Discord push) so the GUI thread never does the encode.
+        self._start_output_dispatcher()
+
         self._setup_window()
         self._setup_ui()
         self._setup_connections()
@@ -217,6 +221,14 @@ class MainWindow(
         self.library_controller.frames_ready.connect(self.library_panel.set_frames)
         self.library_controller.frame_ready.connect(self.library_panel.on_frame_ready)
         self.library_controller.load_failed.connect(self.library_panel.on_load_failed)
+        # Live updates: the library worker fires this callback after each frame
+        # is archived; it re-emits frame_archived onto the GUI thread (queued),
+        # and the panel updates the open session/list without a manual refresh.
+        self.library_controller.frame_archived.connect(self.library_panel.on_frame_archived)
+        if self.image_library:
+            self.image_library.set_frame_saved_callback(
+                self.library_controller.notify_frame_saved
+            )
 
         self.timelapse_controller = TimelapseController(self)
 

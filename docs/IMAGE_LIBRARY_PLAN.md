@@ -1,6 +1,6 @@
 # Image Library — Feature Design / Project Plan
 
-> **Status (2026-06-24): Phase 1 implemented.** This document scopes a new "Image
+> **Status (2026-06-24): Phases 1–5 implemented; Phase 4 complete.** This document scopes a new "Image
 > Library" feature: a rolling, on-disk store of downscaled (Discord-size) capture
 > frames, retained for ~7 days, browsable in-app via a new Library panel and retrievable
 > over the existing web/HTTP API.
@@ -46,6 +46,25 @@
 > `library_scrubber.py`, `library_image_viewer.py`, `library_band.py`, `library_format.py`.
 > Controller gains `load_sessions` / `load_session_frames` / coalescing `request_frame`. Tests in
 > `tests/test_library_sessions.py`.
+>
+> **Phase 4 is done:** the remaining functional work has landed.
+> - **Headless support** — `services/headless_runner.py` now creates and starts its
+>   own `ImageLibrary`, enqueues each processed frame, hands it to
+>   `WebOutputServer(image_library=…)`, and stops it on cleanup, so unattended
+>   installs archive frames and serve `/library` like the GUI.
+> - **Resize de-duplication** — `downscale_to_jpeg` gained a `mode` arg
+>   (`longest`/`height`/`width`); `discord_alerts.py` now calls it with
+>   `mode="height"`, removing its inline LANCZOS+JPEG copy while preserving the
+>   exact height-cap behaviour.
+> - **Live Library updates** — the library worker fires an `on_frame_saved`
+>   callback after each insert; `LibraryController` re-emits it as the thread-safe
+>   `frame_archived` Qt signal; `LibraryPanel` appends the frame to the open night
+>   (live-following the playhead only when it's parked at the live edge) and
+>   coalesces a session-list reload — no manual refresh / re-drill. `load_sessions`
+>   is now coalescing, which also fixes the old range-change-while-loading drop.
+> - **Not built (deliberately):** the "live theme refresh for the gallery" item is
+>   obsolete — the flat thumbnail gallery it referenced was replaced by the Phase 5
+>   session-scrubber UI. "Pre-computed thumbnails" remains deferred (only-if-needed).
 >
 > **Note on ML gating:** `ml_service.py` is the *production* inference path (gated only by model
 > files + `ml_models.enabled`); the `is_dev_mode_available()` gate in
@@ -400,35 +419,33 @@ Watch file sizes against the ~600-line cap; the package split exists to stay und
 2. **Phase 2 — web API.** `/library` + `/library/image`, OpenAPI registration, tests.
 3. **Phase 3 — in-app panel.** Library panel + controller, nav registration, lazy grid,
    viewer dialog. **(Done.)**
-4. **Phase 4 (optional, later) — remaining work.** Phases 1–3 are complete and shipped on
-   `claude/image-library-storage-qzipyt`. What's left, roughly in priority order:
+4. **Phase 4 — DONE.** The functional remaining work has landed on
+   `claude/image-library-storage-qzipyt`:
 
-   1. **Headless support (functional gap).** `services/headless_runner.py` does not create
-      or pass an `ImageLibrary`, so an unattended/headless run neither archives frames nor
-      serves the `/library` endpoints (they 404 even when enabled). Phases 1–3 wire only the
-      GUI (`MainWindow`) path. Give the headless runner its own `ImageLibrary`: start/stop in
-      its lifecycle, enqueue on each processed frame (the headless equivalent of
-      `_on_image_processed`), and pass it to `WebOutputServer(image_library=…)`. This is the
-      most user-visible gap — 24/7 observatory installs typically run headless.
+   1. **Headless support (DONE).** `services/headless_runner.py` now creates and starts its
+      own `ImageLibrary`, enqueues each processed frame in `_process_and_save`, passes it to
+      `WebOutputServer(image_library=…)`, and stops it on cleanup. Unattended installs now
+      archive frames and serve `/library`.
 
-   2. **Resize de-duplication (cleanup).** Refactor Discord (`discord_alerts.py`, height-cap
-      resize) — and optionally the web `/latest` byte-budget downscaler — to call the shared
-      `services/image_resize.py` helper, removing the duplicate resize implementations. Give
-      `downscale_to_jpeg` an optional axis/`mode` so Discord's height-cap behavior is
-      preserved exactly. Re-run `test_discord.py` after.
+   2. **Resize de-duplication (DONE).** `downscale_to_jpeg` gained a `mode`
+      (`longest`/`height`/`width`); `discord_alerts.py` calls it with `mode="height"`,
+      dropping its inline LANCZOS+JPEG copy with the height-cap behaviour preserved. The web
+      `/latest` byte-budget downscaler was left alone (separate budget logic, out of scope).
 
-   3. **Live theme refresh for the gallery (polish).** Thumbnail cell styling is applied once
-      on the grid host (`#LibraryThumbnail`) using the accent color at build time. After an
-      accent-theme change the hover border can be stale until the next gallery refresh.
-      Mirror `nav_rail.refresh_styles()` — re-apply `_Thumbnail.stylesheet()` on theme change.
-      Low priority; most panels don't live-update accent either.
+   3. **Live Library updates (DONE — was not in the original list).** New frames update the
+      Library live: the worker fires `ImageLibrary.set_frame_saved_callback`, the controller
+      re-emits the cross-thread `frame_archived` signal, and the panel appends to the open
+      night (live-follow at the edge) + coalesces a session-list reload.
 
-   4. **Range-change while loading (minor UX).** If the user changes the range dropdown while
-      a page load is in flight, the panel's `_loading` guard drops the new selection silently
-      (they get the in-flight range's results). Track a pending request and re-fire after the
-      current load finishes, or disable the dropdown while loading.
+   4. **Range-change while loading (DONE).** `LibraryController.load_sessions` now coalesces —
+      a request made while a load is in flight re-runs with the latest range when it finishes,
+      so a fast range-dropdown change is never dropped.
 
-   5. **Pre-computed thumbnails (efficiency, only if needed).** The gallery currently reads
+   5. **Live theme refresh for the gallery (OBSOLETE).** The flat thumbnail gallery this
+      referenced was replaced by the Phase 5 session-scrubber UI; there is no `#LibraryThumbnail`
+      grid host to restyle anymore.
+
+   6. **Pre-computed thumbnails (efficiency, only if needed — deferred).** The gallery currently reads
       full (Discord-size, ~50–100 KB) JPEGs to build 200 px thumbnails and decodes/scales them
       on the UI thread. Fine for a manual gallery at `GALLERY_LIMIT=120`. If galleries grow or
       feel janky, generate a small thumbnail tier at save time (in `services/library`) and have

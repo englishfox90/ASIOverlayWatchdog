@@ -265,6 +265,39 @@ class NightView(QWidget):
         self._build_events(self._session.get("gaps", []))
         self._on_index_changed(self.scrubber.current_index())
 
+    def append_frame(self, record):
+        """Add a just-archived frame to the open night, live.
+
+        No-op unless a night is loaded and the frame belongs to it. If the
+        playhead is parked on the last frame (and not playing) it follows the
+        live edge onto the new frame; otherwise the timeline simply grows under
+        a stationary playhead so a user mid-scrub isn't yanked away.
+        """
+        if self._session is None or not self._frames:
+            return
+        if S.night_key(record.get("captured_at", 0)) != self._session.get("key"):
+            return
+        rid = record.get("id")
+        if rid is None or rid in self._id_index:
+            return
+
+        following = (not self._timer.isActive() and
+                     self.scrubber.current_index() >= len(self._frames) - 1)
+        self._frames.append(record)
+        self._id_index[rid] = len(self._frames) - 1
+
+        gaps = S.detect_gaps(self._frames)
+        self._session["gaps"] = gaps
+        self.scrubber.update_data(self._frames, gaps)
+        self._build_events(gaps)
+
+        if following:
+            idx = len(self._frames) - 1
+            self.scrubber.set_index(idx)
+            self._on_index_changed(idx)
+        else:
+            self._set_counter(self.scrubber.current_index())
+
     def on_frame_ready(self, image_id, data):
         if image_id != self._pending_hero_id:
             return  # stale; the playhead moved on
@@ -324,7 +357,12 @@ class NightView(QWidget):
         self.frame_request.emit(frame["id"])
         self._update_overlay(index, frame)
         self._update_meta(frame)
-        self.counter_label.setText(f"frame {index + 1:,} / {len(self._frames):,} · drag to scrub")
+        self._set_counter(index)
+
+    def _set_counter(self, index):
+        self.counter_label.setText(
+            f"frame {index + 1:,} / {len(self._frames):,} · drag to scrub"
+        )
 
     # -- rendering helpers -------------------------------------------------
 

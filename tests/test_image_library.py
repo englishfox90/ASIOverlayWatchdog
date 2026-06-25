@@ -54,6 +54,19 @@ class TestDownscale:
         from io import BytesIO
         assert Image.open(BytesIO(data)).mode == "RGB"
 
+    def test_height_mode_caps_height(self):
+        # Discord's bandwidth cap is on height, not the longest edge: a wide
+        # frame keeps its width and only shrinks if its height exceeds the cap.
+        img = Image.new("RGB", (2000, 1000), (50, 60, 70))
+        _, w, h = downscale_to_jpeg(img, max_edge=750, mode="height")
+        assert h == 750
+        assert (w, h) == (1500, 750)  # aspect ratio preserved
+
+    def test_height_mode_never_upscales(self):
+        img = Image.new("RGB", (2000, 400), (10, 20, 30))
+        _, w, h = downscale_to_jpeg(img, max_edge=750, mode="height")
+        assert (w, h) == (2000, 400)
+
 
 # --------------------------------------------------------------------------
 # store
@@ -240,6 +253,42 @@ class TestImageLibraryEndToEnd:
             lib.enqueue(Image.new("RGB", (100, 100)), {})
             time.sleep(0.2)
             assert lib.index.count() == 0
+        finally:
+            lib.stop()
+
+    def test_frame_saved_callback_fires_with_id(self, temp_dir, monkeypatch):
+        # The live-update path: the worker invokes the callback after insert,
+        # handing over the record with its assigned id and display metadata.
+        self._point_root_at(temp_dir, monkeypatch)
+        seen = []
+        lib = ImageLibrary(self._provider(temp_dir), on_frame_saved=seen.append)
+        lib.start()
+        try:
+            lib.enqueue(Image.new("RGB", (300, 200)), {"camera": "ASI676"})
+            assert self._wait_for_rows(lib, 1)
+            deadline = time.time() + 2
+            while time.time() < deadline and not seen:
+                time.sleep(0.02)
+            assert seen, "on_frame_saved was not invoked"
+            record = seen[0]
+            assert isinstance(record.get("id"), int)
+            assert record["camera"] == "ASI676"
+            assert record["id"] == lib.index.query(limit=1)[0]["id"]
+        finally:
+            lib.stop()
+
+    def test_frame_saved_callback_errors_are_swallowed(self, temp_dir, monkeypatch):
+        # A throwing callback must never break the worker / lose the frame.
+        self._point_root_at(temp_dir, monkeypatch)
+
+        def boom(_record):
+            raise RuntimeError("callback blew up")
+
+        lib = ImageLibrary(self._provider(temp_dir), on_frame_saved=boom)
+        lib.start()
+        try:
+            lib.enqueue(Image.new("RGB", (120, 120)), {})
+            assert self._wait_for_rows(lib, 1), "frame should still be archived"
         finally:
             lib.stop()
 

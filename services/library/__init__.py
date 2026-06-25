@@ -95,14 +95,24 @@ class ImageLibrary:
             on every save so toggles (enable, retention, size) take effect live.
     """
 
-    def __init__(self, config_provider):
+    def __init__(self, config_provider, on_frame_saved=None):
         self._config_provider = config_provider
+        self._on_frame_saved = on_frame_saved
         self._queue = queue.Queue(maxsize=_QUEUE_MAXSIZE)
         self._worker = None
         self._running = False
         self._last_prune = 0.0
         self.store = None
         self.index = None
+
+    def set_frame_saved_callback(self, callback):
+        """Register a callback fired (on the worker thread) after each frame is
+        archived. Receives the inserted record dict, including its new ``id``.
+
+        Used by the UI to live-update the Library without a manual refresh. The
+        callback must not block — marshal to the GUI thread via a Qt signal.
+        """
+        self._on_frame_saved = callback
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -287,8 +297,18 @@ class ImageLibrary:
             "created_at": int(time.time()),
             **self._extract_meta(metadata),
         }
-        self.index.insert(record)
+        record["id"] = self.index.insert(record)
+        self._notify_saved(record)
         self._maybe_prune(cfg)
+
+    def _notify_saved(self, record):
+        cb = self._on_frame_saved
+        if cb is None:
+            return
+        try:
+            cb(record)
+        except Exception as e:
+            app_logger.debug(f"Image library frame-saved callback failed: {e}")
 
     def _maybe_prune(self, cfg):
         interval = max(1, int(cfg.get("prune_interval_minutes", 15))) * 60

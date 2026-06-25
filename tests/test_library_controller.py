@@ -94,6 +94,39 @@ def test_read_full_roundtrip_and_missing(temp_dir, monkeypatch):
         lib.stop()
 
 
+def test_load_sessions_emits_shaped_summaries(temp_dir, monkeypatch):
+    lib = _seed_library(temp_dir, monkeypatch, n=3)
+    controller = LibraryController(_FakeMainWindow(lib))
+    try:
+        captured = []
+        controller.sessions_ready.connect(captured.append)
+        controller._load_sessions(since_seconds=None)  # synchronous; direct delivery
+
+        assert captured, "sessions_ready was not emitted"
+        sessions = captured[0]
+        assert len(sessions) == 1  # all seeded frames land in one night
+        s = sessions[0]
+        assert s["frame_count"] == 3
+        assert s["cover_data"][:2] == b"\xff\xd8"  # cover thumbnail decoded
+    finally:
+        lib.stop()
+
+
+def test_notify_frame_saved_reemits_record(temp_dir, monkeypatch):
+    # The worker-thread callback just re-fires frame_archived; on the same
+    # thread the connection delivers synchronously, so we can assert directly.
+    lib = _seed_library(temp_dir, monkeypatch, n=1)
+    controller = LibraryController(_FakeMainWindow(lib))
+    try:
+        seen = []
+        controller.frame_archived.connect(seen.append)
+        record = {"id": 42, "captured_at": 123, "camera": "ASI676"}
+        controller.notify_frame_saved(record)
+        assert seen == [record]
+    finally:
+        lib.stop()
+
+
 def test_gallery_limit_caps_page(temp_dir, monkeypatch):
     assert GALLERY_LIMIT >= 1
     lib = _seed_library(temp_dir, monkeypatch, n=3)

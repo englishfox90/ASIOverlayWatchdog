@@ -62,8 +62,7 @@ class Scrubber(QWidget):
 
     def set_data(self, frames, filmstrip_items, gaps):
         """Load one night. ``filmstrip_items`` is ``[(frame_index, jpeg bytes)]``."""
-        self._frames = frames or []
-        self._id_index = {row["id"]: i for i, row in enumerate(self._frames)}
+        self._load_frames(frames, gaps)
 
         self._film = []
         for idx, data in (filmstrip_items or []):
@@ -71,8 +70,29 @@ class Scrubber(QWidget):
             if pix.loadFromData(data):
                 self._film.append((idx, pix))
 
-        self._band = self._build_band()
+        self._index = len(self._frames) // 2 if self._frames else 0
+        self.update()
 
+    def update_data(self, frames, gaps):
+        """Replace the night's frames/gaps while preserving the playhead.
+
+        Used when a frame arrives live: unlike ``set_data`` this keeps the
+        current index (clamped) and the existing sampled filmstrip, so the
+        playhead doesn't jump back to the middle as the timeline grows.
+        """
+        self._load_frames(frames, gaps)
+        self._index = min(self._index, len(self._frames) - 1) if self._frames else 0
+        self.update()
+
+    def _load_frames(self, frames, gaps):
+        """Rebuild frames, the id→index map, the condition band, and event pins.
+
+        Shared by ``set_data`` / ``update_data``; each then sets the filmstrip
+        and playhead index per its own policy.
+        """
+        self._frames = frames or []
+        self._id_index = {row["id"]: i for i, row in enumerate(self._frames)}
+        self._band = self._build_band()
         # Pins sit at the index boundary where the gap occurred, so they line up
         # with the thumbnail before the gap rather than a clock position.
         self._pins = []
@@ -80,9 +100,6 @@ class Scrubber(QWidget):
             before = self._id_index.get(g["before_id"])
             if before is not None:
                 self._pins.append((self._index_frac(before), g))
-
-        self._index = len(self._frames) // 2 if self._frames else 0
-        self.update()
 
     def _build_band(self):
         """Condition segments in frame-index space (merging equal neighbours)."""

@@ -11,6 +11,7 @@ threads; this panel renders what the controller emits and forwards the user's
 navigation back to it. The controller's signals are wired to the handler methods
 here in ``MainWindow._setup_ui``.
 """
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget
 
 from ..theme.tokens import Colors
@@ -25,6 +26,10 @@ RANGE_OPTIONS = [
     ("Last 30 days", 30 * 24 * 3600),
 ]
 
+# Coalescing window for live session-list refreshes. Frames arrive every
+# 5-15 s, so this batches a burst into a single reload instead of one per frame.
+LIVE_SESSION_REFRESH_MS = 2000
+
 
 class LibraryPanel(QWidget):
     """Full-page Library with internal session-list ⇄ night-view navigation."""
@@ -33,6 +38,10 @@ class LibraryPanel(QWidget):
         super().__init__(parent)
         self.main_window = parent
         self._loaded_once = False
+        # Live updates accumulate while the list isn't the active screen; reload
+        # on return rather than churning a hidden widget.
+        self._sessions_dirty = False
+        self._live_timer = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -65,17 +74,21 @@ class LibraryPanel(QWidget):
         if not self._loaded_once:
             self._loaded_once = True
             self._reload_sessions()
+        elif self._sessions_dirty and self.stack.currentWidget() is self.session_list:
+            self._reload_sessions(show_loading=False)
 
     def _controller(self):
         return getattr(self.main_window, 'library_controller', None)
 
     # -- navigation --------------------------------------------------------
 
-    def _reload_sessions(self):
+    def _reload_sessions(self, show_loading=True):
         controller = self._controller()
         if controller is None:
             return
-        self.session_list.set_loading()
+        self._sessions_dirty = False
+        if show_loading:
+            self.session_list.set_loading()
         controller.load_sessions(since_seconds=self.session_list.current_range())
 
     def open_session(self, session):
@@ -89,6 +102,8 @@ class LibraryPanel(QWidget):
     def show_sessions(self):
         self.night_view.stop()
         self.stack.setCurrentWidget(self.session_list)
+        if self._sessions_dirty:
+            self._reload_sessions(show_loading=False)
 
     def _request_frame(self, image_id):
         controller = self._controller()
@@ -108,3 +123,29 @@ class LibraryPanel(QWidget):
 
     def on_load_failed(self, message):
         self.session_list.set_error(message)
+
+    # -- live updates ------------------------------------------------------
+
+    def on_frame_archived(self, record):
+        """A new frame was archived — keep whatever's open live, no refresh.
+
+        If the night view is showing the frame's night, append it there. The
+        session-list refresh is always scheduled; the debounced slot decides
+        whether to reload now (list visible) or flag it stale for next show.
+        """
+        if self.stack.currentWidget() is self.night_view:
+            self.night_view.append_frame(record)
+        self._schedule_live_session_refresh()
+
+    def _schedule_live_session_refresh(self):
+        if self._live_timer is None:
+            self._live_timer = QTimer(self)
+            self._live_timer.setSingleShot(True)
+            self._live_timer.timeout.connect(self._do_live_session_refresh)
+        self._live_timer.start(LIVE_SESSION_REFRESH_MS)
+
+    def _do_live_session_refresh(self):
+        if self.stack.currentWidget() is self.session_list and self.isVisible():
+            self._reload_sessions(show_loading=False)
+        else:
+            self._sessions_dirty = True

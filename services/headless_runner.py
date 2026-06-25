@@ -19,6 +19,7 @@ from .camera import ZWOCamera
 from .web_output import WebOutputServer
 from .processor import add_overlays
 from .cleanup import run_cleanup
+from .library import ImageLibrary
 
 
 class HeadlessRunner:
@@ -38,6 +39,7 @@ class HeadlessRunner:
         self.config = Config()
         self.zwo_camera = None
         self.web_server = None
+        self.image_library = None
         self.image_count = 0
         self._last_capture_epoch = None  # Unix ts of last successful frame (for /status)
         self._last_error = None          # Most recent capture error (for /status health)
@@ -67,7 +69,14 @@ class HeadlessRunner:
             # Load configuration
             self._log("Loading configuration...")
             self._load_config()
-            
+
+            # Rolling image library — archives downscaled frames off the hot
+            # path and backs the /library endpoints. Start before the web server
+            # so it can be handed in. enqueue() no-ops while library.enabled is
+            # false, so this is safe to start unconditionally.
+            self.image_library = ImageLibrary(lambda: self.config.data)
+            self.image_library.start()
+
             # Start web server if configured
             if self.config.get('output', {}).get('mode') == 'webserver':
                 self._start_webserver()
@@ -140,10 +149,14 @@ class HeadlessRunner:
         image_path = output_config.get('webserver_path', '/latest')
         status_path = output_config.get('webserver_status_path', '/status')
         docs_path = output_config.get('webserver_docs_path', '/docs')
+        library_path = output_config.get('webserver_library_path', '/library')
 
         self._log(f"Starting web server on {host}:{port}...")
 
-        self.web_server = WebOutputServer(host, port, image_path, status_path, docs_path)
+        self.web_server = WebOutputServer(
+            host, port, image_path, status_path, docs_path,
+            library_path=library_path, image_library=self.image_library,
+        )
         if self.web_server.start():
             self._log(f"✓ Web server running: {self.web_server.get_url()}")
             self._log(f"  Status endpoint: {self.web_server.get_status_url()}")
@@ -348,6 +361,10 @@ class HeadlessRunner:
             else:
                 img.save(output_path, 'PNG', optimize=True)
             
+            # Archive a downscaled copy to the rolling image library (non-blocking).
+            if self.image_library:
+                self.image_library.enqueue(img, metadata)
+
             # Push to web server if running
             if self.web_server and self.web_server.running:
                 img_bytes = io.BytesIO()
@@ -390,6 +407,13 @@ class HeadlessRunner:
                 self._log("Web server stopped")
         except Exception as e:
             self._log(f"Error stopping web server: {e}")
+
+        try:
+            if self.image_library:
+                self.image_library.stop()
+                self._log("Image library stopped")
+        except Exception as e:
+            self._log(f"Error stopping image library: {e}")
         
         self._log(f"Headless session complete. Captured {self.image_count} images.")
         self._log("=" * 60)

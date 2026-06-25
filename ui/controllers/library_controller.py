@@ -40,10 +40,22 @@ class LibraryController(QObject):
     frames_ready = Signal(object)     # {'session', 'frames', 'filmstrip'}
     frame_ready = Signal(int, object)  # (image_id, jpeg bytes) for the playhead
 
+    # Fired (queued onto the GUI thread) when a new frame is archived, so the
+    # panel can live-update the session list / open night without a refresh.
+    frame_archived = Signal(object)   # the inserted record dict (incl. 'id')
+
     def __init__(self, main_window):
         super().__init__(main_window)
         self._main_window = main_window
         self._loader = None
+
+        # Coalescing session loader: a request made while a load is in flight
+        # re-runs with the latest range when it finishes, so a fast range-combo
+        # change (or a live refresh) is never silently dropped.
+        self._session_loader = None
+        self._session_lock = threading.Lock()
+        self._session_pending = False
+        self._session_since = None
 
         # Coalescing single-frame loader (scrubber). One persistent worker reads
         # whichever frame was most recently requested and drops the rest.
@@ -100,15 +112,41 @@ class LibraryController(QObject):
 
     # -- session list -------------------------------------------------------
 
+    def notify_frame_saved(self, record):
+        """Library worker callback — re-emit on the GUI thread (queued signal).
+
+        Registered as ImageLibrary's frame-saved callback; runs on the library
+        worker thread, so it does nothing but fire the cross-thread signal.
+        """
+        try:
+            self.frame_archived.emit(record)
+        except Exception as e:
+            app_logger.debug(f"frame_archived emit failed: {e}")
+
     def load_sessions(self, since_seconds=None):
-        """Load night summaries (+ a cover thumbnail each) on a worker thread."""
-        if self._loader and self._loader.is_alive():
-            return
-        self._loader = threading.Thread(
-            target=self._load_sessions, args=(since_seconds,),
-            name="LibrarySessionLoader", daemon=True,
-        )
-        self._loader.start()
+        """Load night summaries (+ a cover thumbnail each) on a worker thread.
+
+        Coalesces: if a load is already running, record the latest requested
+        range and re-run once it finishes rather than dropping the request.
+        """
+        with self._session_lock:
+            self._session_since = since_seconds
+            self._session_pending = True
+            if self._session_loader and self._session_loader.is_alive():
+                return
+            self._session_loader = threading.Thread(
+                target=self._session_loop, name="LibrarySessionLoader", daemon=True,
+            )
+            self._session_loader.start()
+
+    def _session_loop(self):
+        while True:
+            with self._session_lock:
+                if not self._session_pending:
+                    return
+                since_seconds = self._session_since
+                self._session_pending = False
+            self._load_sessions(since_seconds)
 
     def _load_sessions(self, since_seconds):
         lib = self._library
@@ -188,9 +226,9 @@ class LibraryController(QObject):
     def shutdown(self):
         self._frame_stop = True
         self._frame_event.set()
-        loader = self._loader
-        if loader and loader.is_alive():
-            loader.join(timeout=5.0)
+        for loader in (self._loader, self._session_loader):
+            if loader and loader.is_alive():
+                loader.join(timeout=5.0)
         worker = self._frame_worker
         if worker and worker.is_alive():
             worker.join(timeout=2.0)
