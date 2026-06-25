@@ -374,17 +374,42 @@ Watch file sizes against the ~600-line cap; the package split exists to stay und
    yet — verify the DB + files populate and prune correctly.
 2. **Phase 2 — web API.** `/library` + `/library/image`, OpenAPI registration, tests.
 3. **Phase 3 — in-app panel.** Library panel + controller, nav registration, lazy grid,
-   viewer dialog.
-4. **Phase 4 (optional, later).**
-   - **Headless support.** `services/headless_runner.py` does not create or pass an
-     `ImageLibrary`, so an unattended/headless run neither archives frames nor serves the
-     `/library` endpoints (they 404 even when enabled). Phases 1–3 wire only the GUI
-     (`MainWindow`) path. Give the headless runner its own `ImageLibrary` (start/stop in
-     its lifecycle, enqueue on each processed frame, pass it to `WebOutputServer`) so
-     24/7 observatory runs get the same archive + API as the GUI.
-   - **Resize de-duplication.** Refactor Discord (and possibly the web `/latest`
-     downscaler) to call the shared `image_resize` helper, removing the duplicate resize
-     implementations.
+   viewer dialog. **(Done.)**
+4. **Phase 4 (optional, later) — remaining work.** Phases 1–3 are complete and shipped on
+   `claude/image-library-storage-qzipyt`. What's left, roughly in priority order:
+
+   1. **Headless support (functional gap).** `services/headless_runner.py` does not create
+      or pass an `ImageLibrary`, so an unattended/headless run neither archives frames nor
+      serves the `/library` endpoints (they 404 even when enabled). Phases 1–3 wire only the
+      GUI (`MainWindow`) path. Give the headless runner its own `ImageLibrary`: start/stop in
+      its lifecycle, enqueue on each processed frame (the headless equivalent of
+      `_on_image_processed`), and pass it to `WebOutputServer(image_library=…)`. This is the
+      most user-visible gap — 24/7 observatory installs typically run headless.
+
+   2. **Resize de-duplication (cleanup).** Refactor Discord (`discord_alerts.py`, height-cap
+      resize) — and optionally the web `/latest` byte-budget downscaler — to call the shared
+      `services/image_resize.py` helper, removing the duplicate resize implementations. Give
+      `downscale_to_jpeg` an optional axis/`mode` so Discord's height-cap behavior is
+      preserved exactly. Re-run `test_discord.py` after.
+
+   3. **Live theme refresh for the gallery (polish).** Thumbnail cell styling is applied once
+      on the grid host (`#LibraryThumbnail`) using the accent color at build time. After an
+      accent-theme change the hover border can be stale until the next gallery refresh.
+      Mirror `nav_rail.refresh_styles()` — re-apply `_Thumbnail.stylesheet()` on theme change.
+      Low priority; most panels don't live-update accent either.
+
+   4. **Range-change while loading (minor UX).** If the user changes the range dropdown while
+      a page load is in flight, the panel's `_loading` guard drops the new selection silently
+      (they get the in-flight range's results). Track a pending request and re-fire after the
+      current load finishes, or disable the dropdown while loading.
+
+   5. **Pre-computed thumbnails (efficiency, only if needed).** The gallery currently reads
+      full (Discord-size, ~50–100 KB) JPEGs to build 200 px thumbnails and decodes/scales them
+      on the UI thread. Fine for a manual gallery at `GALLERY_LIMIT=120`. If galleries grow or
+      feel janky, generate a small thumbnail tier at save time (in `services/library`) and have
+      the gallery read those instead — this also shrinks the bytes shipped over `/library`.
+      Note: scaling can't move to the controller thread without pulling QtGui into it (which
+      would break the headless controller test), so a stored-thumbnail tier is the better lever.
 
 Phases 1–3 are independently shippable; the API and UI both read the same store, so
 either can land first after Phase 1.
