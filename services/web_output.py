@@ -9,7 +9,7 @@ import json
 import hashlib
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from PIL import Image
@@ -22,6 +22,11 @@ WEB_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 class ImageHTTPHandler(BaseHTTPRequestHandler):
     """HTTP request handler for serving images and status."""
+
+    # Per-request socket timeout (applied by StreamRequestHandler.setup). Bounds
+    # how long a stalled client can tie up a request thread — without it a dead
+    # socket mid-response blocks forever, which used to hang server shutdown.
+    timeout = 30
 
     # Class-level variables shared between all handler instances
     latest_image_path = None
@@ -339,8 +344,15 @@ class WebOutputServer:
             return False
         
         try:
-            # Create server
-            self.server = HTTPServer((self.host, self.port), ImageHTTPHandler)
+            # Threaded server: each request runs on its own daemon thread, so a
+            # single stalled client can't block the accept loop — that block is
+            # what made server.shutdown() hang for minutes on exit. block_on_close
+            # is off so server_close() abandons (rather than joins) any in-flight
+            # request thread; daemon threads + the handler timeout above bound how
+            # long a straggler can linger.
+            self.server = ThreadingHTTPServer((self.host, self.port), ImageHTTPHandler)
+            self.server.daemon_threads = True
+            self.server.block_on_close = False
             self.server.config_path = self.image_path
             self.server.status_path = self.status_path
             self.server.docs_path = self.docs_path
