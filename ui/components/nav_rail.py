@@ -200,6 +200,7 @@ class NavRail(QFrame):
             (_ico('filmstrip-box-multiple'), "Timelapse", 'timelapse'),
         ]
         nav_items.append((_ico('meteor'), "Meteor Tracker", 'meteor'))
+        nav_items.append((_ico('image-multiple'), "Library", 'library'))
         nav_items.append((_ico('math-log'), "Logs", 'logs'))
 
         for icon, label, key in nav_items:

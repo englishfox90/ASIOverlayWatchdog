@@ -137,6 +137,12 @@ class _MainWindowLifecycleMixin:
             except Exception:
                 pass
 
+        if getattr(self, 'library_controller', None):
+            try:
+                self.library_controller.shutdown()
+            except Exception:
+                pass
+
         if self.timelapse_controller:
             try:
                 self._wait_for_timelapse_finalization()

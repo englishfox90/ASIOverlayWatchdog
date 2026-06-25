@@ -34,10 +34,12 @@ from ..panels.settings_panel import SettingsPanel
 from ..panels.logs_panel import LogsPanel
 from ..panels.allsky_settings import AllSkySettingsPanel
 from ..panels.meteor_panel import MeteorPanel
+from ..panels.library_panel import LibraryPanel
 from ..controllers.image_processor import ImageProcessor
 from ..controllers.timelapse_controller import TimelapseController
 from ..controllers.allsky_controller import AllSkyController
 from ..controllers.meteor_controller import MeteorController
+from ..controllers.library_controller import LibraryController
 
 from .capture import _MainWindowCaptureMixin
 from .output import _MainWindowOutputMixin
@@ -206,7 +208,12 @@ class MainWindow(
         self.allsky_panel = AllSkySettingsPanel(self)
         self.meteor_panel = MeteorPanel(self)
         self.logs_panel = LogsPanel(self)
+        self.library_panel = LibraryPanel(self)
         self.settings_panel = SettingsPanel(self)
+
+        self.library_controller = LibraryController(self)
+        self.library_controller.page_ready.connect(self.library_panel.on_page_ready)
+        self.library_controller.load_failed.connect(self.library_panel.on_load_failed)
 
         self.timelapse_controller = TimelapseController(self)
 
@@ -232,6 +239,7 @@ class MainWindow(
         self.inspector_stack.addWidget(self.meteor_panel)        # Index 6
         self.inspector_stack.addWidget(self.logs_panel)          # Index 7
         self.inspector_stack.addWidget(self.settings_panel)      # Index 8
+        self.inspector_stack.addWidget(self.library_panel)       # Index 9
 
         # Defer splitter restoration until window is shown
         # This ensures we have accurate available width
@@ -456,6 +464,7 @@ class MainWindow(
             'meteor': 6,
             'logs': 7,
             'settings': 8,
+            'library': 9,
         }
 
         index = section_map.get(section, 0)
@@ -470,8 +479,8 @@ class MainWindow(
             self.config.set('inspector_visible', False)
             self.config.set('last_nav_section', section)
             self.config.save()
-        elif section in ('overlays', 'settings'):
-            # Overlays/Settings: hide live panel, show panel full width
+        elif section in ('overlays', 'settings', 'library'):
+            # Overlays/Settings/Library: hide live panel, show panel full width
             self.live_panel.hide()
             self.live_panel.set_preview_only(False)
             self.inspector_stack.show()

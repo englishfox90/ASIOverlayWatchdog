@@ -19,7 +19,13 @@
 > `library.enabled && library.api_enabled`. Tests in `tests/test_image_library.py` and
 > `tests/test_webserver.py`.
 >
-> **Phase 3 (in-app panel) remains.** Read the rest of this doc before continuing it.
+> **Phase 3 (in-app panel) is done:** a new "Library" nav entry + `ui/panels/library_panel.py`
+> (full-width gallery: range filter dropdown, refresh, responsive thumbnail grid, click-to-
+> enlarge viewer dialog) backed by `ui/controllers/library_controller.py` (loads pages off the
+> UI thread, emits `page_ready`/`load_failed`). Registered in `window.py` (stack index 9,
+> nav map, full-width branch), shut down in `lifecycle.py`. Controller logic tested in
+> `tests/test_library_controller.py` (GUI not runnable in CI; widget names verified against
+> existing panels). **Phase 4 (headless support + resize de-duplication) remains — optional.**
 
 ---
 
@@ -369,9 +375,16 @@ Watch file sizes against the ~600-line cap; the package split exists to stay und
 2. **Phase 2 — web API.** `/library` + `/library/image`, OpenAPI registration, tests.
 3. **Phase 3 — in-app panel.** Library panel + controller, nav registration, lazy grid,
    viewer dialog.
-4. **Phase 4 (optional, later).** Refactor Discord (and possibly the web `/latest`
-   downscaler) to call the shared `image_resize` helper, removing the duplicate resize
-   implementations.
+4. **Phase 4 (optional, later).**
+   - **Headless support.** `services/headless_runner.py` does not create or pass an
+     `ImageLibrary`, so an unattended/headless run neither archives frames nor serves the
+     `/library` endpoints (they 404 even when enabled). Phases 1–3 wire only the GUI
+     (`MainWindow`) path. Give the headless runner its own `ImageLibrary` (start/stop in
+     its lifecycle, enqueue on each processed frame, pass it to `WebOutputServer`) so
+     24/7 observatory runs get the same archive + API as the GUI.
+   - **Resize de-duplication.** Refactor Discord (and possibly the web `/latest`
+     downscaler) to call the shared `image_resize` helper, removing the duplicate resize
+     implementations.
 
 Phases 1–3 are independently shippable; the API and UI both read the same store, so
 either can land first after Phase 1.
