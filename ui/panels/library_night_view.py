@@ -20,18 +20,21 @@ from qfluentwidgets import PushButton, CaptionLabel, BodyLabel, StrongBodyLabel
 from services.library import sessions as S
 from ..theme.tokens import Colors, Spacing, Layout
 from ..theme.icons import mdi
-from .library_band import STATUS_COLORS, STATUS_LABELS
+from .library_band import STATUS_COLORS, STATUS_SHORT
 from .library_scrubber import Scrubber
-from .library_format import fmt_clock, fmt_gap, fmt_time_seconds
+from .library_format import fmt_clock, fmt_gap, fmt_exposure, fmt_clouds
 
 # Playback advances this many frames per tick, by speed button.
 _SPEEDS = (1, 8, 30)
 _TICK_MS = 80
 
-_META_FIELDS = (
-    ("Temp", "temp"), ("Exposure", "exposure"), ("Gain", "gain"),
-    ("Camera", "camera"), ("Weather", "weather"),
-)
+# Metadata grid order (two columns). Values + colors are filled per frame in
+# _update_meta; this just fixes the labels and layout.
+_META_KEYS = ("sky", "roof", "clouds", "sensor", "exposure", "gain", "camera", "res")
+_META_LABELS = {
+    "sky": "Sky", "roof": "Roof", "clouds": "Clouds", "sensor": "Sensor",
+    "exposure": "Exposure", "gain": "Gain", "camera": "Camera", "res": "Resolution",
+}
 
 
 class NightView(QWidget):
@@ -119,9 +122,13 @@ class NightView(QWidget):
 
     def _build_meta_panel(self):
         panel = QFrame()
+        panel.setObjectName("MetaPanel")
         panel.setFixedWidth(264)
+        # Scope to #MetaPanel: a bare 'QFrame {…}' rule would cascade the border
+        # onto every child, because QLabel derives from QFrame — that pills each
+        # metadata label into a little bordered box.
         panel.setStyleSheet(
-            f"QFrame {{ background-color: {Colors.bg_card};"
+            f"#MetaPanel {{ background-color: {Colors.bg_card};"
             f" border: 1px solid {Colors.border_subtle};"
             f" border-radius: {Layout.radius_md}px; }}"
         )
@@ -139,15 +146,14 @@ class NightView(QWidget):
         v.addLayout(header)
 
         self.meta_grid = QGridLayout()
-        self.meta_grid.setHorizontalSpacing(Spacing.md)
-        self.meta_grid.setVerticalSpacing(Spacing.sm)
+        self.meta_grid.setHorizontalSpacing(Spacing.base)
+        self.meta_grid.setVerticalSpacing(Spacing.md)
         self._meta_values = {}
-        for i, (label, key) in enumerate(_META_FIELDS + (("Resolution", "_res"),)):
-            col = (i % 2) * 2
-            rowi = i // 2
-            cap = CaptionLabel(label)
+        for i, key in enumerate(_META_KEYS):
+            cap = CaptionLabel(_META_LABELS[key])
             cap.setStyleSheet(f"color: {Colors.text_muted};")
             val = BodyLabel("—")
+            val.setWordWrap(True)
             val.setStyleSheet(f"color: {Colors.text_primary};")
             cell = QVBoxLayout()
             cell.setSpacing(0)
@@ -155,7 +161,7 @@ class NightView(QWidget):
             cell.addWidget(val)
             host = QWidget()
             host.setLayout(cell)
-            self.meta_grid.addWidget(host, rowi, col, 1, 2)
+            self.meta_grid.addWidget(host, i // 2, i % 2)
             self._meta_values[key] = val
         v.addLayout(self.meta_grid)
 
@@ -175,8 +181,9 @@ class NightView(QWidget):
 
     def _build_scrubber_block(self):
         block = QFrame()
+        block.setObjectName("ScrubBlock")
         block.setStyleSheet(
-            f"QFrame {{ background-color: {Colors.gray_2};"
+            f"#ScrubBlock {{ background-color: {Colors.gray_2};"
             f" border-radius: {Layout.radius_md}px; }}"
         )
         v = QVBoxLayout(block)
@@ -346,20 +353,56 @@ class NightView(QWidget):
             f"{fmt_clock(frame['captured_at'])} · frame {index + 1:,}"
         )
         self.overlay_label.adjustSize()
+        # Top-center: the burned-in overlays sit in the image corners, so center
+        # is the one spot that won't collide with them.
+        x = max(8, (self.hero.width() - self.overlay_label.width()) // 2)
+        self.overlay_label.move(x, 10)
+        self.overlay_label.raise_()
 
     def _update_meta(self, frame):
-        for _label, key in _META_FIELDS:
-            self._meta_values[key].setText(str(frame.get(key) or "—"))
-        w, h = frame.get("width"), frame.get("height")
-        self._meta_values["_res"].setText(f"{w}×{h}" if w and h else "—")
-
         status = S.row_status(frame)
-        self.cond_badge.setText(STATUS_LABELS.get(status, "Unknown"))
+        roof = frame.get("roof")
+        condition = frame.get("condition")
+        clouds = frame.get("clouds")
+
+        # Sky: prefer the model's condition; fall back to clouds-derived clarity.
+        if condition:
+            sky_text = condition
+        elif clouds is not None:
+            sky_text = "Clear" if S._is_clear(None, clouds) else "Cloudy"
+        else:
+            sky_text = "—"
+        sky_color = {
+            S.STATUS_CLEAR: Colors.success_text,
+            S.STATUS_CLOUDY: Colors.warning_text,
+            S.STATUS_CLOSED: Colors.text_secondary,
+        }.get(status, Colors.text_primary)
+        self._set_meta("sky", sky_text, sky_color)
+
+        roof_color = Colors.text_primary
+        if roof:
+            roof_color = Colors.success_text if roof.lower().startswith("open") else Colors.error_text
+        self._set_meta("roof", roof or "—", roof_color)
+
+        self._set_meta("clouds", fmt_clouds(clouds))
+        self._set_meta("sensor", frame.get("temp") or "—")
+        self._set_meta("exposure", fmt_exposure(frame.get("exposure")))
+        self._set_meta("gain", str(frame.get("gain") or "—"))
+        self._set_meta("camera", str(frame.get("camera") or "—"))
+        w, h = frame.get("width"), frame.get("height")
+        self._set_meta("res", f"{w}×{h}" if w and h else "—")
+
+        self.cond_badge.setText(STATUS_SHORT.get(status, "Unknown"))
         color = STATUS_COLORS.get(status, Colors.gray_6)
         self.cond_badge.setStyleSheet(
             f"color: {Colors.bg_app}; background-color: {color};"
             f" border-radius: {Layout.radius_full}px; padding: 2px 9px;"
         )
+
+    def _set_meta(self, key, text, color=None):
+        label = self._meta_values[key]
+        label.setText(text)
+        label.setStyleSheet(f"color: {color or Colors.text_primary};")
 
     def _update_issue_badge(self, session):
         gap = session.get("max_gap_seconds", 0)
@@ -400,6 +443,12 @@ class NightView(QWidget):
     def _on_hero_clicked(self):
         if self.current_frame() is not None:
             self.image_activated.emit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.overlay_label.text():
+            x = max(8, (self.hero.width() - self.overlay_label.width()) // 2)
+            self.overlay_label.move(x, 10)
 
 
 class _ClickableFrame(QFrame):

@@ -18,14 +18,14 @@ from services.library import sessions as S
 from ..theme.tokens import Colors, Spacing, Layout
 from ..theme.icons import mdi
 from .library_band import STATUS_LABELS
-from .library_format import fmt_full
+from .library_format import fmt_full, fmt_exposure, fmt_clouds
 
 VIEWER_MAX = 720  # px — longest edge shown in the dialog
 
-# (label, frame key) — metadata grid, four columns.
+# (label, frame key) — metadata grid, four columns. ``None`` keys are computed.
 _FIELDS = (
     ("Camera", "camera"), ("Exposure", "exposure"), ("Gain", "gain"),
-    ("Temp", "temp"), ("Weather", "weather"),
+    ("Sensor", "temp"), ("Clouds", "clouds"),
 )
 
 
@@ -139,6 +139,10 @@ class ImageViewerDialog(QDialog):
         for label, key in fields:
             if key is None:
                 value = f"{w}×{h}" if w and h else "—"
+            elif key == "exposure":
+                value = fmt_exposure(frame.get("exposure"))
+            elif key == "clouds":
+                value = fmt_clouds(frame.get("clouds"))
             else:
                 value = str(frame.get(key) or "—")
             cells.append((label, value))

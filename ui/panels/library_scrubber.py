@@ -9,13 +9,17 @@ the night view loads that frame into the hero preview.
 Painted directly rather than built from nested layouts so dragging stays smooth
 and the playhead can overlay the strip + band precisely.
 """
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QToolTip
 from PySide6.QtGui import QPainter, QPixmap, QColor, QPen, QFont, QBrush
-from PySide6.QtCore import Qt, Signal, QRectF
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 
 from ..theme.tokens import Colors
 from .library_band import status_color
-from .library_format import fmt_clock
+from .library_format import fmt_clock, fmt_gap
+
+# A gap at/above this length is flagged red rather than amber on the timeline.
+_LONG_GAP_SECONDS = 1800  # 30 min
+_PIN_HOVER_PX = 7         # cursor-to-pin x distance that triggers the tooltip
 
 _PAD_X = 4
 _PINS_TOP = 0
@@ -38,11 +42,13 @@ class Scrubber(QWidget):
         self._frames = []
         self._pixmaps = []
         self._band = []
-        self._pins = []        # fractions (0-1) of capture-gap events
+        self._pins = []        # [(frac, gap_dict)] — capture-gap event pins
+        self._id_index = {}    # image id -> frame index (pin click-to-seek)
         self._index = 0
         self._dragging = False
         self.setFixedHeight(_TOTAL_H)
         self.setMinimumWidth(120)
+        self.setMouseTracking(True)  # hover tooltips on event pins
         self.setCursor(Qt.PointingHandCursor)
 
     # -- data --------------------------------------------------------------
@@ -58,11 +64,13 @@ class Scrubber(QWidget):
                 self._pixmaps.append(pix)
 
         self._pins = []
+        self._id_index = {row["id"]: i for i, row in enumerate(self._frames)}
         if self._frames:
             start = self._frames[0]["captured_at"]
             span = max(1, self._frames[-1]["captured_at"] - start)
             for g in (gaps or []):
-                self._pins.append(max(0.0, min(1.0, (g["at"] - start) / span)))
+                frac = max(0.0, min(1.0, (g["at"] - start) / span))
+                self._pins.append((frac, g))
 
         self._index = len(self._frames) // 2 if self._frames else 0
         self.update()
@@ -83,16 +91,46 @@ class Scrubber(QWidget):
     # -- interaction -------------------------------------------------------
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self._frames:
-            self._dragging = True
-            self._seek_to_x(event.position().x())
+        if event.button() != Qt.LeftButton or not self._frames:
+            return
+        gap = self._pin_at_x(event.position().x())
+        if gap is not None:
+            self._seek_to_id(gap["after_id"])  # clicking a pin jumps past the gap
+            return
+        self._dragging = True
+        self._seek_to_x(event.position().x())
 
     def mouseMoveEvent(self, event):
         if self._dragging:
             self._seek_to_x(event.position().x())
+            return
+        gap = self._pin_at_x(event.position().x())
+        if gap is not None:
+            QToolTip.showText(
+                event.globalPosition().toPoint(),
+                f"Capture gap · {fmt_gap(gap['seconds'])}\nstarting {fmt_clock(gap['at'])}",
+                self,
+            )
+        else:
+            QToolTip.hideText()
 
     def mouseReleaseEvent(self, event):
         self._dragging = False
+
+    def _pin_at_x(self, x):
+        """The gap whose pin is within hover range of ``x``, or None."""
+        for frac, gap in self._pins:
+            if abs(self._frac_to_x(frac) - x) <= _PIN_HOVER_PX:
+                return gap
+        return None
+
+    def _seek_to_id(self, image_id):
+        index = self._id_index.get(image_id)
+        if index is None:
+            return
+        self._index = index
+        self.update()
+        self.index_changed.emit(index)
 
     def _seek_to_x(self, x):
         frac = self._x_to_frac(x)
@@ -142,13 +180,13 @@ class Scrubber(QWidget):
         cell_w = (w - gap * (n - 1)) / n
         for i, pix in enumerate(self._pixmaps):
             x = _PAD_X + i * (cell_w + gap)
-            target = QRectF(x, _STRIP_TOP, cell_w, _STRIP_H)
-            scaled = pix.scaled(int(cell_w) + 1, _STRIP_H, Qt.KeepAspectRatioByExpanding,
+            # Letterbox (KeepAspectRatio, centered) so square and rectangular
+            # frames both show un-cropped and un-stretched — pier cameras vary.
+            scaled = pix.scaled(int(cell_w), _STRIP_H, Qt.KeepAspectRatio,
                                 Qt.SmoothTransformation)
-            painter.save()
-            painter.setClipRect(target)
-            painter.drawPixmap(target.topLeft(), scaled)
-            painter.restore()
+            ox = x + (cell_w - scaled.width()) / 2
+            oy = _STRIP_TOP + (_STRIP_H - scaled.height()) / 2
+            painter.drawPixmap(QPointF(ox, oy), scaled)
 
     def _paint_band(self, painter, w):
         painter.fillRect(QRectF(_PAD_X, _BAND_TOP, w, _BAND_H), QColor(Colors.gray_3))
@@ -159,11 +197,13 @@ class Scrubber(QWidget):
                              QBrush(status_color(status)))
 
     def _paint_pins(self, painter):
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(Colors.warning_default))
-        for frac in self._pins:
+        for frac, gap in self._pins:
             cx = self._frac_to_x(frac)
-            painter.drawEllipse(QRectF(cx - 3, _PINS_TOP, 6, 6))
+            severe = gap["seconds"] >= _LONG_GAP_SECONDS
+            color = QColor(Colors.error_default if severe else Colors.warning_default)
+            painter.setPen(QPen(QColor(Colors.gray_2), 1.5))  # outline for contrast
+            painter.setBrush(color)
+            painter.drawEllipse(QRectF(cx - 4, _PINS_TOP, 8, 8))
 
     def _paint_playhead(self, painter):
         if not self._frames:

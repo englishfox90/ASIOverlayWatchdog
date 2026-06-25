@@ -54,6 +54,34 @@ def fmt_gap(seconds):
     return f"{minutes // 60}h {minutes % 60:02d}m gap"
 
 
+def fmt_exposure(value):
+    """Tidy exposure: '456 ms' / '2.50 s' from a raw value like '0.456198…' or '0.46s'."""
+    if value is None:
+        return "—"
+    raw = str(value).strip().lower().rstrip("s").strip()
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return str(value)
+    if seconds <= 0:
+        return "0 s"
+    if seconds < 1:
+        return f"{seconds * 1000:.0f} ms"
+    if seconds < 10:
+        return f"{seconds:.2f} s"
+    return f"{seconds:.1f} s"
+
+
+def fmt_clouds(value):
+    """'45%' from a cloud-cover int/str, or '—'."""
+    if value is None:
+        return "—"
+    try:
+        return f"{int(value)}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def fmt_duration(seconds):
     """Compact span like '10h 0m'."""
     seconds = int(seconds or 0)

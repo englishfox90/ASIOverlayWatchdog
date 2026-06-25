@@ -31,6 +31,15 @@ STATUS_LABELS = {
     S.STATUS_UNKNOWN: "Unknown",
 }
 
+# Short labels for the compact status badge.
+STATUS_SHORT = {
+    S.STATUS_CLEAR: "Clear",
+    S.STATUS_CLOUDY: "Cloudy",
+    S.STATUS_CLOSED: "Roof closed",
+    S.STATUS_GAP: "No capture",
+    S.STATUS_UNKNOWN: "Unknown",
+}
+
 
 def status_color(status):
     return QColor(STATUS_COLORS.get(status, Colors.gray_6))
