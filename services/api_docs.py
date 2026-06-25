@@ -274,10 +274,14 @@ def _esc(text: str) -> str:
     return _html.escape(str(text))
 
 
-def _html_table(headers: list, rows: list) -> str:
-    """Wrap pre-built <tr> ``rows`` in a table with the given column ``headers``."""
+def _html_table(headers: list, rows: list, label: str = None) -> str:
+    """Wrap pre-built <tr> ``rows`` in a table with the given column ``headers``.
+
+    An optional ``label`` renders a small caption tag above the table.
+    """
+    tag = f"<div class='tag'>{_esc(label)}</div>" if label else ""
     head = "".join(f"<th>{_esc(h)}</th>" for h in headers)
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+    return f"{tag}<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
 
 
 def _render_params(op: dict) -> str:
@@ -298,8 +302,8 @@ def _render_params(op: dict) -> str:
             f"<td>{_esc(req)}</td>"
             f"<td>{_esc(p.get('description', ''))}</td></tr>"
         )
-    return "<div class='tag'>Query parameters</div>" + _html_table(
-        ["Name", "Type", "In", "Required", "Description"], rows)
+    return _html_table(["Name", "Type", "In", "Required", "Description"], rows,
+                       label="Query parameters")
 
 
 def _render_responses(op: dict) -> str:
@@ -312,7 +316,7 @@ def _render_responses(op: dict) -> str:
         f"<td>{_esc(meta.get('description', ''))}</td></tr>"
         for code, meta in responses.items()
     ]
-    return "<div class='tag'>Responses</div>" + _html_table(["Status", "Description"], rows)
+    return _html_table(["Status", "Description"], rows, label="Responses")
 
 
 def render_docs_html(spec: dict) -> str:

@@ -319,12 +319,13 @@ class OutputSettingsPanel(QScrollArea):
         self.library_max_dim_spin.setSuffix(" px")
         self.library_max_dim_spin.valueChanged.connect(self._on_library_settings_changed)
         library_card.add_row("Max Dimension", self.library_max_dim_spin,
-                             "Longest edge of stored images")
+                             "Longest edge of stored images (applies to new frames only)")
 
         self.library_quality_spin = SpinBox()
         self.library_quality_spin.setRange(1, 95)
         self.library_quality_spin.valueChanged.connect(self._on_library_settings_changed)
-        library_card.add_row("JPEG Quality", self.library_quality_spin, "1-95")
+        library_card.add_row("JPEG Quality", self.library_quality_spin,
+                             "1-95 (applies to new frames only)")
 
         self.library_api_switch = SwitchRow(
             "Expose Web API",
