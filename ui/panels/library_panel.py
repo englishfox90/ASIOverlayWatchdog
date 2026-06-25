@@ -10,7 +10,7 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame, QLabel,
-    QDialog, QGridLayout, QSizePolicy
+    QDialog, QGridLayout
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
@@ -21,10 +21,19 @@ from qfluentwidgets import (
 
 from ..theme.tokens import Colors, Typography, Spacing, Layout
 from ..theme.icons import mdi
-from ..controllers.library_controller import RANGE_OPTIONS
 
 THUMB_WIDTH = 200   # px — gallery thumbnail width
 VIEWER_MAX = 820    # px — longest edge shown in the viewer dialog
+
+# Dropdown options for the range filter: (label, lookback seconds | None for all).
+# This is presentation (which windows the UI offers); the controller just takes
+# the resolved 'since_seconds'.
+RANGE_OPTIONS = [
+    ("Last 24 hours", 24 * 3600),
+    ("Last 3 days", 3 * 24 * 3600),
+    ("Last 7 days", 7 * 24 * 3600),
+    ("All", None),
+]
 
 
 def _fmt_time(epoch):
@@ -166,14 +175,18 @@ class LibraryPanel(QScrollArea):
     def _controller(self):
         return getattr(self.main_window, 'library_controller', None)
 
+    def _set_status(self, text):
+        """Show a centered status message, or hide the line when text is empty."""
+        self.status_label.setText(text)
+        self.status_label.setVisible(bool(text))
+
     def refresh(self):
         controller = self._controller()
         if controller is None or self._loading:
             return
         self._loading = True
         self._loaded_once = True
-        self.status_label.setText("Loading…")
-        self.status_label.show()
+        self._set_status("Loading…")
         since = RANGE_OPTIONS[self.range_combo.currentIndex()][1]
         controller.refresh(since_seconds=since)
 
@@ -185,11 +198,10 @@ class LibraryPanel(QScrollArea):
 
         if not items:
             self.count_label.setText("")
-            self.status_label.setText("No images archived for this range yet.")
-            self.status_label.show()
+            self._set_status("No images archived for this range yet.")
             return
 
-        self.status_label.hide()
+        self._set_status("")
         shown = len(items)
         suffix = f" (showing newest {shown})" if total > shown else ""
         self.count_label.setText(f"{total} image{'s' if total != 1 else ''}{suffix}")
@@ -211,8 +223,7 @@ class LibraryPanel(QScrollArea):
 
     def on_load_failed(self, message):
         self._loading = False
-        self.status_label.setText(f"Could not load library: {message}")
-        self.status_label.show()
+        self._set_status(f"Could not load library: {message}")
 
     # -- viewer ------------------------------------------------------------
 
@@ -220,8 +231,7 @@ class LibraryPanel(QScrollArea):
         controller = self._controller()
         data = controller.read_full(item["id"]) if controller else None
         if not data:
-            self.status_label.setText("That image is no longer available.")
-            self.status_label.show()
+            self._set_status("That image is no longer available.")
             return
         pixmap = QPixmap()
         pixmap.loadFromData(data)
@@ -270,8 +280,7 @@ class _ImageViewerDialog(QDialog):
             ("Camera", "camera"), ("Exposure", "exposure"), ("Gain", "gain"),
             ("Temp", "temp"), ("Weather", "weather"), ("Session", "session"),
         ):
-            value = item.get(key)
-            if value:
+            if value := item.get(key):
                 lines.append(f"{label}: {value}")
         w, h = item.get("width"), item.get("height")
         if w and h:

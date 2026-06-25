@@ -137,7 +137,7 @@ class _MainWindowLifecycleMixin:
             except Exception:
                 pass
 
-        if getattr(self, 'library_controller', None):
+        if self.library_controller:
             try:
                 self.library_controller.shutdown()
             except Exception:

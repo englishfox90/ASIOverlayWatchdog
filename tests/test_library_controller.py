@@ -19,9 +19,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from services.library import ImageLibrary  # noqa: E402
-from ui.controllers.library_controller import (  # noqa: E402
-    LibraryController, RANGE_OPTIONS, GALLERY_LIMIT,
-)
+from ui.controllers.library_controller import LibraryController, GALLERY_LIMIT  # noqa: E402
 
 
 class _FakeMainWindow(QObject):
@@ -49,12 +47,6 @@ def _seed_library(temp_dir, monkeypatch, n=3):
         time.sleep(0.02)
     assert lib.index.count() == n
     return lib
-
-
-def test_range_options_shape():
-    assert [label for label, _ in RANGE_OPTIONS] == \
-        ["Last 24 hours", "Last 3 days", "Last 7 days", "All"]
-    assert RANGE_OPTIONS[-1][1] is None  # "All" => no lower bound
 
 
 def test_load_emits_shaped_items(temp_dir, monkeypatch):

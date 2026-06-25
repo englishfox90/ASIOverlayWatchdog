@@ -85,6 +85,7 @@ class MainWindow(
         self.weather_service = None
         self.timelapse_controller = None
         self.meteor_controller = None
+        self.library_controller = None
         self.system_tray = None  # Set by main_pyside.py when in tray mode
 
         self._init_weather_service()

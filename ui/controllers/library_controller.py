@@ -17,15 +17,6 @@ from services.logger import app_logger
 # carries the (Discord-size) JPEG bytes, so this also bounds transient memory.
 GALLERY_LIMIT = 120
 
-# Range filter options shown in the panel, mapped to a "since" window in seconds
-# (None = no lower bound). Order is preserved in the dropdown.
-RANGE_OPTIONS = [
-    ("Last 24 hours", 24 * 3600),
-    ("Last 3 days", 3 * 24 * 3600),
-    ("Last 7 days", 7 * 24 * 3600),
-    ("All", None),
-]
-
 
 class LibraryController(QObject):
     """Background loader for the Library panel."""
