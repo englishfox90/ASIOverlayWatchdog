@@ -619,24 +619,12 @@ class _MainWindowCaptureMixin:
         self._on_detect_cameras()
 
     def _start_camera_capture(self):
+        # start_capture() connects on a worker thread and returns before the
+        # camera is open, so is_capturing/zwo_camera aren't ready yet. The chip
+        # and RAW16 capabilities are updated from the capture_started signal
+        # (_on_camera_capture_started); failures arrive via the error signal.
         self._ensure_camera_controller()
         self.camera_controller.start_capture()
-
-        if self.camera_controller.is_capturing:
-            self.app_bar.camera_chip.set_status('connected')
-            self.app_bar.camera_chip.set_label('Connected')
-            app_logger.info("Camera capture started")
-
-            if self.camera_controller.zwo_camera and hasattr(self, 'capture_panel'):
-                try:
-                    supports_raw16 = self.camera_controller.zwo_camera.supports_raw16
-                    bit_depth = self.camera_controller.zwo_camera.sensor_bit_depth
-                    self.capture_panel.update_camera_capabilities(supports_raw16, bit_depth)
-                except Exception as e:
-                    app_logger.debug(f"Could not update camera capabilities: {e}")
-        else:
-            self.app_bar.camera_chip.set_status('error')
-            self.app_bar.camera_chip.set_label('Connection Failed')
 
     def _start_watch_mode(self):
         from .controllers.watch_controller import WatchControllerQt
@@ -694,21 +682,41 @@ class _MainWindowCaptureMixin:
     def _on_camera_capture_started(self):
         """Handle controller capture_started signal.
 
-        Fires when the controller starts capture — usually from the user's
-        own button click (where we've already mirrored the state), but also
-        from auto-recovery, which otherwise leaves the AppBar's Start/Stop
-        button showing "Start" while capture is actually running.
+        Fires on the main thread once the worker has actually connected and the
+        capture loop is running — the first point where zwo_camera is populated,
+        so the reliable place to read camera capabilities (RAW16 support, bit
+        depth). Reached both from the user's own button click and from
+        auto-recovery (which otherwise leaves the AppBar showing "Start").
         """
-        if self.is_capturing:
-            return
-        app_logger.info("Capture resumed by auto-recovery — syncing UI state")
-        self.is_capturing = True
-        self.app_bar.set_capturing(True)
-        self.app_bar.set_status('waiting')
         self.app_bar.camera_chip.set_status('connected')
         self.app_bar.camera_chip.set_label('Connected')
-        self._last_capture_error = None
-        self.push_capture_status()
+        self._update_camera_capabilities()
+
+        # Auto-recovery restarted capture with no user click, so the rest of the
+        # UI state still says "stopped" — sync it. The user-initiated path has
+        # already mirrored this in start_capture().
+        if not self.is_capturing:
+            app_logger.info("Capture resumed by auto-recovery — syncing UI state")
+            self.is_capturing = True
+            self.app_bar.set_capturing(True)
+            self.app_bar.set_status('waiting')
+            self._last_capture_error = None
+            self.push_capture_status()
+
+    def _update_camera_capabilities(self):
+        """Push the connected camera's RAW16 support to the Capture panel.
+
+        Must run after the camera is open — start_capture() connects on a worker
+        thread, so zwo_camera is only populated by the time capture_started fires.
+        """
+        cam = self.camera_controller.zwo_camera if self.camera_controller else None
+        if not cam or not hasattr(self, 'capture_panel'):
+            return
+        try:
+            self.capture_panel.update_camera_capabilities(
+                cam.supports_raw16, cam.sensor_bit_depth)
+        except Exception as e:
+            app_logger.debug(f"Could not update camera capabilities: {e}")
 
     def _on_raw16_mode_changed(self, enabled: bool):
         if not self.camera_controller or not self.camera_controller.is_capturing:
