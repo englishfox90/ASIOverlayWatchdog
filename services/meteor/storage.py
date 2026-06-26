@@ -14,6 +14,19 @@ from PIL import Image
 
 from .detector import MeteorDetection
 
+_LOG_FILENAME = "meteor_detections.jsonl"
+
+
+def resolve_log_path(meteor_config):
+    """Canonical meteor-log path: the configured ``log_file`` or the app-data
+    default. Single source of truth for both the writer (meteor controller) and
+    readers (the library timeline)."""
+    log_file = (meteor_config or {}).get("log_file", "").strip()
+    if log_file:
+        return log_file
+    from services.app_config import get_app_data_dir
+    return os.path.join(get_app_data_dir(), _LOG_FILENAME)
+
 
 def log_detections(
     log_path: str,

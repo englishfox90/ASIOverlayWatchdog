@@ -66,6 +66,15 @@ def fmt_exposure(value):
     return f"{seconds:.2f} s"
 
 
+def fmt_count_suffix(count):
+    """' ×N' for a count above 1, else '' — e.g. 'Meteor' vs 'Meteor ×3'."""
+    try:
+        n = int(count)
+    except (TypeError, ValueError):
+        return ""
+    return f" ×{n}" if n > 1 else ""
+
+
 def fmt_clouds(value):
     """'45%' from a cloud-cover int/str, or '—'."""
     if value is None:

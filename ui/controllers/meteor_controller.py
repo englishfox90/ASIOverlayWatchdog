@@ -33,7 +33,9 @@ from services.meteor.noise import DiffNoiseEMA, noise_to_threshold
 from services.meteor.detector import detect_meteors, MeteorDetection, annotate_image
 from services.meteor.streak_profile import sample_profile, dash_score, peak_fade_score
 from services.meteor.persistence import PersistenceFilter
-from services.meteor.storage import log_detections, log_event, save_thumbnail
+from services.meteor.storage import (
+    log_detections, log_event, save_thumbnail, resolve_log_path
+)
 from services.meteor.mask import (
     zone_from_detection, zones_from_config, zones_to_config, ExclusionZone,
 )
@@ -570,8 +572,7 @@ class MeteorController(QObject):
         return self._main_window.config.get("meteor", {})
 
     def _resolve_log_path(self, cfg: dict) -> str:
-        log_file = cfg.get("log_file", "").strip()
-        return log_file or os.path.join(self._appdata_dir(), "meteor_detections.jsonl")
+        return resolve_log_path(cfg)
 
     def _resolve_thumb_dir(self) -> str:
         return os.path.join(self._appdata_dir(), "meteor_thumbnails")

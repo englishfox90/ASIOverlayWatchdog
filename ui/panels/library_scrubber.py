@@ -2,9 +2,10 @@
 Library — night scrubber track (custom-painted, interactive).
 
 A draggable timeline across one night: a sampled filmstrip, the condition band,
-event pins for capture gaps, a playhead, and time ticks. Dragging (or clicking)
-moves the playhead and emits ``index_changed`` with the frame index under it —
-the night view loads that frame into the hero preview.
+event pins (capture gaps, roof open/close, meteor hits), a playhead, and time
+ticks. Dragging (or clicking) moves the playhead and emits ``index_changed``
+with the frame index under it — the night view loads that frame into the hero
+preview.
 
 The whole track is laid out in **frame-index space** (every frame gets an equal
 slice), not clock-time space. That keeps the filmstrip thumbnails, the playhead,
@@ -16,16 +17,17 @@ Painted directly rather than built from nested layouts so dragging stays smooth
 and the playhead can overlay the strip + band precisely.
 """
 from PySide6.QtWidgets import QWidget, QToolTip
-from PySide6.QtGui import QPainter, QPixmap, QColor, QPen, QFont, QBrush
+from PySide6.QtGui import (
+    QPainter, QPixmap, QColor, QPen, QFont, QBrush, QPolygonF
+)
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 
 from services.library.sessions import row_status
+from services.library import events as E
 from ..theme.tokens import Colors
-from .library_band import status_color
-from .library_format import fmt_clock, fmt_gap
+from .library_band import status_color, EVENT_LABELS, EVENT_PIN_COLORS
+from .library_format import fmt_clock, fmt_gap, fmt_count_suffix
 
-# A gap at/above this length is flagged red rather than amber on the timeline.
-_LONG_GAP_SECONDS = 1800  # 30 min
 _PIN_HOVER_PX = 7         # cursor-to-pin x distance that triggers the tooltip
 
 _PAD_X = 4
@@ -49,7 +51,7 @@ class Scrubber(QWidget):
         self._frames = []
         self._film = []        # [(frame_index, QPixmap)] — sampled thumbnails
         self._band = []        # [(frac0, frac1, status)] in frame-index space
-        self._pins = []        # [(frac, gap_dict)] — capture-gap event pins
+        self._pins = []        # [(frac, event_dict)] — gap/roof/meteor event pins
         self._id_index = {}    # image id -> frame index (pin click-to-seek)
         self._index = 0
         self._dragging = False
@@ -60,9 +62,10 @@ class Scrubber(QWidget):
 
     # -- data --------------------------------------------------------------
 
-    def set_data(self, frames, filmstrip_items, gaps):
-        """Load one night. ``filmstrip_items`` is ``[(frame_index, jpeg bytes)]``."""
-        self._load_frames(frames, gaps)
+    def set_data(self, frames, filmstrip_items, events):
+        """Load one night. ``filmstrip_items`` is ``[(frame_index, jpeg bytes)]``;
+        ``events`` is the merged timeline from ``services.library.events``."""
+        self._load_frames(frames, events)
 
         self._film = []
         for idx, data in (filmstrip_items or []):
@@ -73,18 +76,18 @@ class Scrubber(QWidget):
         self._index = len(self._frames) // 2 if self._frames else 0
         self.update()
 
-    def update_data(self, frames, gaps):
-        """Replace the night's frames/gaps while preserving the playhead.
+    def update_data(self, frames, events):
+        """Replace the night's frames/events while preserving the playhead.
 
         Used when a frame arrives live: unlike ``set_data`` this keeps the
         current index (clamped) and the existing sampled filmstrip, so the
         playhead doesn't jump back to the middle as the timeline grows.
         """
-        self._load_frames(frames, gaps)
+        self._load_frames(frames, events)
         self._index = min(self._index, len(self._frames) - 1) if self._frames else 0
         self.update()
 
-    def _load_frames(self, frames, gaps):
+    def _load_frames(self, frames, events):
         """Rebuild frames, the id→index map, the condition band, and event pins.
 
         Shared by ``set_data`` / ``update_data``; each then sets the filmstrip
@@ -93,13 +96,20 @@ class Scrubber(QWidget):
         self._frames = frames or []
         self._id_index = {row["id"]: i for i, row in enumerate(self._frames)}
         self._band = self._build_band()
-        # Pins sit at the index boundary where the gap occurred, so they line up
-        # with the thumbnail before the gap rather than a clock position.
+        # Pins sit in frame-index space at the frame the event belongs to, so
+        # they line up with the thumbnail above rather than a clock position.
         self._pins = []
-        for g in (gaps or []):
-            before = self._id_index.get(g["before_id"])
-            if before is not None:
-                self._pins.append((self._index_frac(before), g))
+        for ev in (events or []):
+            idx = self._event_frame_index(ev)
+            if idx is not None:
+                self._pins.append((self._index_frac(idx), ev))
+
+    def _event_frame_index(self, event):
+        """Frame index a pin should sit at. Gaps pin to the frame before the
+        break; everything else to the event's own frame."""
+        if event["type"] == E.EVENT_GAP and event.get("before_id") is not None:
+            return self._id_index.get(event["before_id"])
+        return self._id_index.get(event.get("image_id"))
 
     def _build_band(self):
         """Condition segments in frame-index space (merging equal neighbours)."""
@@ -139,9 +149,9 @@ class Scrubber(QWidget):
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton or not self._frames:
             return
-        gap = self._pin_at_x(event.position().x())
-        if gap is not None:
-            self._seek_to_id(gap["after_id"])  # clicking a pin jumps past the gap
+        ev = self._pin_at_x(event.position().x())
+        if ev is not None:
+            self._seek_to_id(ev.get("image_id"))  # clicking a pin jumps to its frame
             return
         self._dragging = True
         self._seek_to_x(event.position().x())
@@ -150,12 +160,10 @@ class Scrubber(QWidget):
         if self._dragging:
             self._seek_to_x(event.position().x())
             return
-        gap = self._pin_at_x(event.position().x())
-        if gap is not None:
+        ev = self._pin_at_x(event.position().x())
+        if ev is not None:
             QToolTip.showText(
-                event.globalPosition().toPoint(),
-                f"Capture gap · {fmt_gap(gap['seconds'])}\nstarting {fmt_clock(gap['at'])}",
-                self,
+                event.globalPosition().toPoint(), _pin_tooltip(ev), self
             )
         else:
             QToolTip.hideText()
@@ -164,10 +172,14 @@ class Scrubber(QWidget):
         self._dragging = False
 
     def _pin_at_x(self, x):
-        """The gap whose pin is within hover range of ``x``, or None."""
-        for frac, gap in self._pins:
+        """The event whose pin is within hover range of ``x``, or None.
+
+        Iterated last-first so the most recently painted pin (drawn on top when
+        two events share a frame) is the one the tooltip/click resolves to.
+        """
+        for frac, ev in reversed(self._pins):
             if abs(self._frac_to_x(frac) - x) <= _PIN_HOVER_PX:
-                return gap
+                return ev
         return None
 
     def _seek_to_id(self, image_id):
@@ -248,13 +260,20 @@ class Scrubber(QWidget):
                              QBrush(status_color(status)))
 
     def _paint_pins(self, painter):
-        for frac, gap in self._pins:
+        # Shape encodes the event kind so the timeline reads at a glance without
+        # hovering: gap = circle, roof = triangle (up open / down closed),
+        # meteor = diamond. Colour reinforces it.
+        painter.setPen(QPen(QColor(Colors.gray_2), 1.5))  # outline for contrast
+        for frac, ev in self._pins:
             cx = self._frac_to_x(frac)
-            severe = gap["seconds"] >= _LONG_GAP_SECONDS
-            color = QColor(Colors.error_default if severe else Colors.warning_default)
-            painter.setPen(QPen(QColor(Colors.gray_2), 1.5))  # outline for contrast
-            painter.setBrush(color)
-            painter.drawEllipse(QRectF(cx - 4, _PINS_TOP, 8, 8))
+            etype = ev["type"]
+            painter.setBrush(QColor(EVENT_PIN_COLORS.get(etype, Colors.gray_6)))
+            if etype == E.EVENT_GAP:
+                painter.drawEllipse(QRectF(cx - 4, _PINS_TOP, 8, 8))
+            elif etype in (E.EVENT_ROOF_OPEN, E.EVENT_ROOF_CLOSED):
+                painter.drawPolygon(_roof_triangle(cx, etype == E.EVENT_ROOF_OPEN))
+            else:  # meteor
+                painter.drawPolygon(_meteor_diamond(cx))
 
     def _paint_playhead(self, painter):
         if not self._frames:
@@ -290,3 +309,36 @@ class Scrubber(QWidget):
             else:
                 rect = QRectF(x - 30, y - 10, 60, 12)
                 painter.drawText(rect, Qt.AlignHCenter | Qt.AlignVCenter, label)
+
+
+def _pin_tooltip(event):
+    """Hover text for an event pin."""
+    clock = fmt_clock(event["at"])
+    etype = event["type"]
+    label = EVENT_LABELS.get(etype, "Event")
+    if etype == E.EVENT_GAP:
+        return f"{label} · {fmt_gap(event.get('seconds', 0))}\nstarting {clock}"
+    if etype == E.EVENT_METEOR:
+        label += fmt_count_suffix(event.get("count", 1))
+    return f"{label} · {clock}"
+
+
+def _roof_triangle(cx, opened):
+    """Triangle pin pointing up (roof opened) or down (roof closed)."""
+    top, h = _PINS_TOP, 9
+    if opened:
+        return QPolygonF([
+            QPointF(cx, top), QPointF(cx - 5, top + h), QPointF(cx + 5, top + h),
+        ])
+    return QPolygonF([
+        QPointF(cx - 5, top), QPointF(cx + 5, top), QPointF(cx, top + h),
+    ])
+
+
+def _meteor_diamond(cx):
+    """Diamond pin for a meteor hit."""
+    cy, r = _PINS_TOP + 4.5, 5
+    return QPolygonF([
+        QPointF(cx, cy - r), QPointF(cx + r, cy),
+        QPointF(cx, cy + r), QPointF(cx - r, cy),
+    ])

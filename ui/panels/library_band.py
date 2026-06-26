@@ -12,6 +12,7 @@ from PySide6.QtGui import QPainter, QColor, QBrush, QPainterPath
 from PySide6.QtCore import Qt
 
 from services.library import sessions as S
+from services.library import events as E
 from ..theme.tokens import Colors
 
 STATUS_COLORS = {
@@ -38,6 +39,29 @@ STATUS_SHORT = {
     S.STATUS_CLOSED: "Roof closed",
     S.STATUS_GAP: "No capture",
     S.STATUS_UNKNOWN: "Unknown",
+}
+
+# Timeline-event presentation, keyed by event type — one source of truth shared
+# by the night-view events list and the scrubber pins (mirrors the STATUS_*
+# tables above). Pin shape stays in the scrubber's painter; only label/colour,
+# which both surfaces share, live here.
+EVENT_LABELS = {
+    E.EVENT_GAP: "Capture gap",
+    E.EVENT_ROOF_OPEN: "Roof opened",
+    E.EVENT_ROOF_CLOSED: "Roof closed",
+    E.EVENT_METEOR: "Meteor",
+}
+EVENT_TEXT_COLORS = {       # text-weight colours for the events list
+    E.EVENT_GAP: Colors.text_secondary,
+    E.EVENT_ROOF_OPEN: Colors.success_text,
+    E.EVENT_ROOF_CLOSED: Colors.error_text,
+    E.EVENT_METEOR: Colors.accent_text,
+}
+EVENT_PIN_COLORS = {        # saturated fills for the scrubber pins
+    E.EVENT_GAP: Colors.error_default,
+    E.EVENT_ROOF_OPEN: Colors.success_default,
+    E.EVENT_ROOF_CLOSED: Colors.error_default,
+    E.EVENT_METEOR: Colors.accent_text,
 }
 
 

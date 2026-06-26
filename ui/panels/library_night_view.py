@@ -18,11 +18,16 @@ from PySide6.QtGui import QPixmap
 from qfluentwidgets import PushButton, CaptionLabel, BodyLabel, StrongBodyLabel
 
 from services.library import sessions as S
+from services.library import events as E
 from ..theme.tokens import Colors, Spacing, Layout
 from ..theme.icons import mdi
-from .library_band import STATUS_COLORS, STATUS_SHORT
+from .library_band import (
+    STATUS_COLORS, STATUS_SHORT, EVENT_LABELS, EVENT_TEXT_COLORS
+)
 from .library_scrubber import Scrubber
-from .library_format import fmt_clock, fmt_gap, fmt_exposure, fmt_clouds
+from .library_format import (
+    fmt_clock, fmt_gap, fmt_exposure, fmt_clouds, fmt_count_suffix
+)
 
 # Playback advances this many frames per tick, by speed button.
 _SPEEDS = (1, 8, 30)
@@ -50,6 +55,7 @@ class NightView(QWidget):
         self._session = None
         self._frames = []
         self._id_index = {}
+        self._meteors = []
         self._speed = _SPEEDS[0]
         self._pending_hero_id = None
 
@@ -239,6 +245,7 @@ class NightView(QWidget):
         self._session = session
         self._frames = []
         self._id_index = {}
+        self._meteors = []
         self.title_label.setText(f"Night · {session.get('key', '')}")
         self._update_issue_badge(session)
         self.hero_image.setText("Loading night…")
@@ -252,17 +259,17 @@ class NightView(QWidget):
             return  # a newer night was opened before this load returned
         self._frames = payload.get("frames", [])
         self._id_index = {row["id"]: i for i, row in enumerate(self._frames)}
+        self._meteors = payload.get("meteors", [])
 
         if not self._frames:
             self.hero_image.setText("No frames archived for this night.")
             return
 
-        self.scrubber.set_data(
-            self._frames,
-            payload.get("filmstrip", []),
-            self._session.get("gaps"),
+        events = E.build_timeline(
+            self._frames, self._session.get("gaps", []), self._meteors
         )
-        self._build_events(self._session.get("gaps", []))
+        self.scrubber.set_data(self._frames, payload.get("filmstrip", []), events)
+        self._render_event_list(events)
         self._on_index_changed(self.scrubber.current_index())
 
     def append_frame(self, record):
@@ -288,8 +295,9 @@ class NightView(QWidget):
 
         gaps = S.detect_gaps(self._frames)
         self._session["gaps"] = gaps
-        self.scrubber.update_data(self._frames, gaps)
-        self._build_events(gaps)
+        events = E.build_timeline(self._frames, gaps, self._meteors)
+        self.scrubber.update_data(self._frames, events)
+        self._render_event_list(events)
 
         if following:
             idx = len(self._frames) - 1
@@ -445,21 +453,36 @@ class NightView(QWidget):
         else:
             self.issue_badge.setVisible(False)
 
-    def _build_events(self, gaps):
+    def _render_event_list(self, events):
         while self.events_box.count():
             item = self.events_box.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        if not gaps:
-            none_label = CaptionLabel("No capture gaps")
+
+        if not events:
+            none_label = CaptionLabel("No events tonight")
             none_label.setStyleSheet(f"color: {Colors.text_muted};")
             self.events_box.addWidget(none_label)
             return
-        for gap in gaps:
-            label = _LinkLabel(f"{fmt_clock(gap['at'])}  ·  {fmt_gap(gap['seconds'])}")
-            label.setStyleSheet(f"color: {Colors.text_secondary};")
-            label.clicked.connect(lambda g=gap: self._seek_to_id(g["after_id"]))
+
+        for event in events:
+            text, color = self._event_label(event)
+            label = _LinkLabel(f"{fmt_clock(event['at'])}  ·  {text}")
+            label.setStyleSheet(f"color: {color};")
+            label.clicked.connect(lambda e=event: self._seek_to_id(e.get("image_id")))
             self.events_box.addWidget(label)
+
+    @staticmethod
+    def _event_label(event):
+        """('display text', color) for one timeline event."""
+        etype = event["type"]
+        color = EVENT_TEXT_COLORS.get(etype, Colors.text_secondary)
+        if etype == E.EVENT_GAP:
+            return fmt_gap(event.get("seconds", 0)), color
+        text = EVENT_LABELS.get(etype, "Event")
+        if etype == E.EVENT_METEOR:
+            text += fmt_count_suffix(event.get("count", 1))
+        return text, color
 
     def _seek_to_id(self, image_id):
         self.stop()

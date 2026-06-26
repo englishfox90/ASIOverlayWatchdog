@@ -25,9 +25,10 @@ from datetime import datetime, timedelta
 _NIGHT_CUTOFF_HOUR = 12
 
 # A break between consecutive frames longer than this counts as a capture gap —
-# an event worth surfacing (roof closed, clouds stopped capture, app restart),
-# not normal cadence. Long exposures run 5-15 s, so this clears them comfortably.
-GAP_THRESHOLD_SECONDS = 300  # 5 minutes
+# an event worth surfacing (capture stopped, app restart), not normal cadence.
+# Daytime cadence is one frame every ~10 min and nights are far more regular, so
+# the threshold sits above the daytime interval: only a real >1h stall registers.
+GAP_THRESHOLD_SECONDS = 3600  # 1 hour
 
 # Cloud cover at or below this percent counts as "clear" when only weather data
 # is available (no ML sky condition).
@@ -98,12 +99,25 @@ def _is_clear(condition, clouds):
     return None
 
 
+def roof_state(roof):
+    """Normalise a stored roof string to 'open' / 'closed' / None."""
+    if not roof:
+        return None
+    s = str(roof).strip().lower()
+    if s.startswith("open"):
+        return "open"
+    if s.startswith("clos"):
+        return "closed"
+    return None
+
+
 def frame_status(roof, condition, clouds):
     """Map a frame's roof/sky/cloud signal to a condition-band state."""
-    if roof and str(roof).strip().lower().startswith("clos"):
+    state = roof_state(roof)
+    if state == "closed":
         return STATUS_CLOSED
     clear = _is_clear(condition, clouds)
-    if roof and str(roof).strip().lower().startswith("open"):
+    if state == "open":
         return STATUS_CLEAR if clear else STATUS_CLOUDY
     # Roof unknown: still colour by sky if we have it, else grey.
     if clear is True:

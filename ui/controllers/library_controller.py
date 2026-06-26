@@ -17,6 +17,7 @@ import time
 
 from PySide6.QtCore import QObject, Signal
 
+from services.library import events as library_events
 from services.logger import app_logger
 
 # Newest-first cap on how many frames the legacy flat page loads. Each item
@@ -186,12 +187,24 @@ class LibraryController(QObject):
                 result = lib.read_image(frames[idx]["id"])
                 if result is not None:
                     filmstrip.append((idx, result[0]))
-            self.frames_ready.emit(
-                {"session": session, "frames": frames, "filmstrip": filmstrip}
-            )
+            self.frames_ready.emit({
+                "session": session, "frames": frames, "filmstrip": filmstrip,
+                "meteors": self._meteor_events(frames),
+            })
         except Exception as e:
             app_logger.error(f"Library night load failed: {e}")
             self.load_failed.emit(str(e))
+
+    def _meteor_events(self, frames):
+        """Meteor hits for this night, matched to frames — off the UI thread."""
+        try:
+            cfg = getattr(self._main_window, "config", None)
+            meteor_cfg = cfg.get("meteor", {}) if cfg else {}
+            log_path = library_events.resolve_meteor_log_path(meteor_cfg)
+            return library_events.meteor_hits(frames, log_path)
+        except Exception as e:
+            app_logger.debug(f"Library meteor lookup failed: {e}")
+            return []
 
     # -- scrubber playhead (coalesced) -------------------------------------
 

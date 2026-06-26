@@ -69,15 +69,24 @@ class TestGapsAndSegments:
         return [
             {"id": 1, "captured_at": base, "roof": "Open", "condition": "Clear", "clouds": 0},
             {"id": 2, "captured_at": base + 10, "roof": "Open", "condition": "Clear", "clouds": 0},
-            # 30-minute capture gap here
-            {"id": 3, "captured_at": base + 1810, "roof": "Closed", "condition": None, "clouds": None},
+            # 70-minute capture gap here — clears the 1-hour gap threshold
+            {"id": 3, "captured_at": base + 4210, "roof": "Closed", "condition": None, "clouds": None},
         ]
 
     def test_detect_gaps_finds_the_break(self):
         gaps = S.detect_gaps(self._rows())
         assert len(gaps) == 1
         assert gaps[0]["before_id"] == 2 and gaps[0]["after_id"] == 3
-        assert gaps[0]["seconds"] == 1800
+        assert gaps[0]["seconds"] == 4200
+
+    def test_detect_gaps_ignores_daytime_cadence(self):
+        base = _epoch(2026, 6, 24, 12, 0)
+        rows = [
+            {"id": i, "captured_at": base + i * 600, "roof": "Closed",
+             "condition": None, "clouds": None}
+            for i in range(6)  # one frame every 10 min — normal daytime cadence
+        ]
+        assert S.detect_gaps(rows) == []
 
     def test_status_segments_cover_full_span_and_mark_gap(self):
         rows = self._rows()
