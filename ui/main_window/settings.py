@@ -16,10 +16,6 @@ class _MainWindowSettingsMixin:
 
         self._init_weather_service(from_settings_save=True)
 
-        ml_config = self.config.get('ml_models', {})
-        ml_enabled = ml_config.get('enabled', False) and ml_config.get('show_in_preview', True)
-        self.live_panel.metadata.set_ml_enabled(ml_enabled)
-
         self._update_service_status()
 
         self._update_start_button()
@@ -91,10 +87,6 @@ class _MainWindowSettingsMixin:
             self.allsky_controller.load_from_config()
             self.settings_panel.load_from_config(self.config)
             self.logs_panel.load_from_config(self.config)
-
-            ml_config = self.config.get('ml_models', {})
-            ml_enabled = ml_config.get('enabled', False) and ml_config.get('show_in_preview', True)
-            self.live_panel.metadata.set_ml_enabled(ml_enabled)
 
             output_dir = self.config.get('output_directory', '')
             self.live_panel.set_output_directory(output_dir)

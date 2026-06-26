@@ -189,8 +189,7 @@ class _MainWindowCaptureMixin:
             self.capture_panel.set_detection_error(error)
             app_logger.error(f"Camera detection error: {error}")
             self._notify(f"Camera detection: {error}", "error")
-            self.app_bar.camera_chip.set_status('idle')
-            self.app_bar.camera_chip.set_label('Camera')
+            self.app_bar.set_camera_status('idle')
         else:
             self.capture_panel.set_cameras(cameras)
             self._notify(f"{len(cameras)} camera(s) detected")
@@ -198,8 +197,7 @@ class _MainWindowCaptureMixin:
             self.config.set('available_cameras', cameras)
 
             if cameras:
-                self.app_bar.camera_chip.set_status('connected')
-                self.app_bar.camera_chip.set_label('Ready')
+                self.app_bar.set_camera_status('connected', 'Ready')
 
             saved_name = self.config.get('zwo_selected_camera_name', '')
 
@@ -525,8 +523,7 @@ class _MainWindowCaptureMixin:
             # Slower status updates when idle
             self.status_timer.setInterval(1000)
 
-            self.app_bar.camera_chip.set_status('connected')
-            self.app_bar.camera_chip.set_label('Ready')
+            self.app_bar.set_camera_status('connected', 'Ready')
 
             self._update_start_button()
 
@@ -650,8 +647,7 @@ class _MainWindowCaptureMixin:
         self._notify(f"Camera error: {error_msg}", "error")
 
         if hasattr(self, 'app_bar') and self.app_bar:
-            self.app_bar.camera_chip.set_status('error')
-            self.app_bar.camera_chip.set_label('Camera Error')
+            self.app_bar.set_camera_status('error', 'Camera error')
 
         should_notify = (
             self.camera_controller is None
@@ -688,8 +684,7 @@ class _MainWindowCaptureMixin:
         depth). Reached both from the user's own button click and from
         auto-recovery (which otherwise leaves the AppBar showing "Start").
         """
-        self.app_bar.camera_chip.set_status('connected')
-        self.app_bar.camera_chip.set_label('Connected')
+        self.app_bar.set_camera_status('connected', 'Connected')
         self._update_camera_capabilities()
 
         # Auto-recovery restarted capture with no user click, so the rest of the

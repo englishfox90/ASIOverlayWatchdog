@@ -24,6 +24,8 @@ from ..theme import apply_theme, apply_accent_theme, get_stylesheet
 from ..theme.tokens import Colors, Typography, Spacing, Layout
 from ..components.app_bar import AppBar
 from ..components.nav_rail import NavRail
+from ..components.status_strip import StatusStrip
+from ..components.telemetry_bar import TelemetryBar
 from ..panels.live_monitoring import LiveMonitoringPanel
 from ..panels.capture_settings import CaptureSettingsPanel
 from ..panels.output_settings import OutputSettingsPanel
@@ -164,6 +166,11 @@ class MainWindow(
         self.app_bar = AppBar(self)
         main_layout.addWidget(self.app_bar)
 
+        # === STATUS STRIP (observatory telemetry band) ===
+        self.status_strip = StatusStrip(self)
+        self.app_bar.set_status_strip(self.status_strip)
+        main_layout.addWidget(self.status_strip)
+
         # === CONTENT AREA (Below app bar) ===
         # Stored as instance attribute so InfoBars can parent to it (below the app bar)
         self.content_area = QWidget()
@@ -172,6 +179,11 @@ class MainWindow(
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
         main_layout.addWidget(content_widget, 1)
+
+        # === TELEMETRY BAR (Bottom mono metrics) ===
+        self.telemetry_bar = TelemetryBar(self)
+        self.telemetry_bar.set_version(__version__)
+        main_layout.addWidget(self.telemetry_bar)
 
         # --- Navigation Rail (Left edge) ---
         self.nav_rail = NavRail(self)
@@ -279,6 +291,7 @@ class MainWindow(
 
         self.app_bar.start_clicked.connect(self.start_capture)
         self.app_bar.stop_clicked.connect(self.stop_capture)
+        self.app_bar.connect_clicked.connect(self._on_detect_cameras)
 
         self.capture_panel.settings_changed.connect(self._on_settings_changed)
         self.output_panel.settings_changed.connect(self._on_settings_changed)
@@ -342,6 +355,7 @@ class MainWindow(
         apply_accent_theme(saved_accent)
         self.setStyleSheet(get_stylesheet())
         self.nav_rail.refresh_styles()
+        self.status_strip.refresh_styles()
 
     def set_accent_theme(self, name: str) -> None:
         """Switch accent colour at runtime and refresh all styled widgets."""
@@ -349,6 +363,8 @@ class MainWindow(
         self.setStyleSheet(get_stylesheet())
         if hasattr(self, 'nav_rail'):
             self.nav_rail.refresh_styles()
+        if hasattr(self, 'status_strip'):
+            self.status_strip.refresh_styles()
 
     def _start_timers(self):
         self.status_timer = QTimer(self)
@@ -549,14 +565,29 @@ class MainWindow(
     # STATUS UPDATES
     # =========================================================================
 
+    def _camera_ready(self) -> bool:
+        """Whether the primary action should offer Start (vs Connect Camera).
+
+        Watch mode is always 'ready' (start is gated separately by a valid
+        directory); camera mode is ready when a camera is connected or at least
+        one has been detected.
+        """
+        if self.config.get('capture_mode', 'camera') == 'watch':
+            return True
+        if self.camera_controller and getattr(self.camera_controller, 'is_connected', False):
+            return True
+        return bool(self.config.get('available_cameras'))
+
     def _update_status(self):
         try:
+            self.app_bar.set_camera_connected(self._camera_ready())
             self.app_bar.update_status(
                 is_capturing=self.is_capturing,
                 image_count=self.image_count,
                 camera_controller=self.camera_controller,
                 live_panel=self.live_panel
             )
+            self._update_telemetry_strips()
 
             if self.is_capturing and self.camera_controller:
                 self.live_panel.update_from_camera(self.camera_controller)
@@ -576,6 +607,53 @@ class MainWindow(
 
         except Exception as e:
             app_logger.debug(f"Status update error: {e}")
+
+    def _update_telemetry_strips(self):
+        """Refresh the status strip + bottom telemetry bar from live state.
+
+        Per-frame values (roof/sky/seeing, file/exp/gain/sensor) are pushed by
+        the processed-frame handler; this fills the always-available bits
+        (weather, disk) and applies idle/not-configured treatments.
+        """
+        ready = self._camera_ready()
+
+        # Live preview overlay: no-camera prompt or "showing last frame" when idle.
+        self.live_panel.refresh_overlay(self.is_capturing, ready)
+
+        # Weather tile — read the cached WeatherService value only (the overlay
+        # pipeline refreshes that cache off-thread); never fetch on the GUI thread.
+        if self.weather_service and self.weather_service.is_cache_valid():
+            wd = self.weather_service.cache or {}
+            parts = [p for p in (wd.get('temp'), wd.get('condition'), wd.get('clouds')) if p]
+            self.status_strip.set_weather(" · ".join(parts) if parts else "—", 'primary')
+        elif not self.weather_service:
+            self.status_strip.set_weather("Not configured", 'muted')
+
+        # Roof/Sky read "Not configured" when ML is off; otherwise they're filled
+        # per-frame and dimmed (stale) while capture is idle.
+        ml_on = self.config.get('ml_models', {}).get('enabled', False)
+        if not ml_on:
+            self.status_strip.set_roof("Not configured", 'muted')
+            self.status_strip.set_sky("Not configured", 'muted')
+        self.status_strip.set_sensors_stale(not self.is_capturing)
+
+        # Bottom strip: mute per-frame cells when not actively capturing.
+        if not self.is_capturing:
+            if ready:
+                self.telemetry_bar.set_idle()
+            else:
+                self.telemetry_bar.set_disconnected()
+
+        # Disk free — refreshed roughly every 10s.
+        self._disk_tick = getattr(self, '_disk_tick', 0) + 1
+        if self._disk_tick % 10 == 1:
+            try:
+                from services.performance import get_disk_space
+                out_dir = self.config.get('output_directory', '') or os.path.expanduser('~')
+                disk = get_disk_space(out_dir)
+                self.telemetry_bar.set_disk(disk['free_gb'] if disk else None)
+            except Exception:
+                pass
 
     def _poll_logs(self):
         try:
