@@ -284,6 +284,11 @@ class StatusStrip(QFrame):
         self.sky_tile.set_stale(stale)
         self.seeing_tile.set_stale(stale)
 
+    def set_weather_stale(self, stale: bool):
+        """Dim the weather tile when its OpenWeather cache has gone cold (a dead
+        API key or sustained network failure), so old values aren't read as live."""
+        self.weather_tile.set_stale(stale)
+
     # --- Capture/camera pill --------------------------------------------
     def set_capture_state(self, mode: str, text: str = None):
         self._capture_mode = mode
@@ -315,6 +320,15 @@ class StatusStrip(QFrame):
         roof = ml.get('roof_status')
         if roof in ('Open', 'Closed'):
             self.set_roof(roof, 'ok' if roof == 'Open' else 'error')
+
+        # With the roof closed the pier camera only sees the closed roof, so the
+        # frame-derived sky condition and star/seeing values are meaningless —
+        # show "Roof closed" rather than synthesised noise. (Weather is sourced
+        # independently from OpenWeather, so its tile keeps updating.)
+        if roof == 'Closed':
+            self.set_sky("Roof closed", 'muted')
+            self.set_seeing("Roof closed", 'muted')
+            return
 
         sky = ml.get('sky_condition')
         if sky and sky != 'N/A':

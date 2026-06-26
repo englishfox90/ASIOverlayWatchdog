@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import traceback
 
 from PySide6.QtWidgets import (
@@ -384,6 +385,16 @@ class MainWindow(
         self._watchdog_first_fire_ts = None
         self._watchdog_ui_fatal_sent = False
 
+        # Weather is independent of the camera/roof, so refresh it on its own
+        # cadence rather than only during frame processing — this keeps the
+        # tile live while capture is idle or the roof is closed. fetch_weather()
+        # self-throttles to its 10-min cache, so the API is only hit when stale.
+        self._weather_refreshing = False
+        self.weather_timer = QTimer(self)
+        self.weather_timer.timeout.connect(self._refresh_weather_async)
+        self.weather_timer.start(60_000)  # 60s
+        QTimer.singleShot(2000, self._refresh_weather_async)  # prompt first fill
+
     def _check_admin_privileges(self):
         """Warn once at startup if the app lacks Administrator rights.
 
@@ -631,11 +642,14 @@ class MainWindow(
         )
         if not weather_configured:
             self.status_strip.set_weather("Not configured", 'muted')
-        elif self.weather_service and self.weather_service.cache:
-            wd = self.weather_service.cache
+        elif self.weather_service:
+            wd = self.weather_service.cache or {}
             parts = [p for p in (wd.get('temp'), wd.get('condition'), wd.get('clouds')) if p]
             if parts:
                 self.status_strip.set_weather(" · ".join(parts), 'primary')
+            # Dim the tile when the cache has gone cold (dead API key / sustained
+            # network failure) so a stale reading isn't mistaken for live weather.
+            self.status_strip.set_weather_stale(self.weather_service.is_display_stale())
 
         # Roof/Sky read "Not configured" when ML is off; otherwise they're filled
         # per-frame and dimmed (stale) while capture is idle.
@@ -662,6 +676,32 @@ class MainWindow(
                 self.telemetry_bar.set_disk(disk['free_gb'] if disk else None)
             except Exception:
                 pass
+
+    def _refresh_weather_async(self):
+        """Refresh the OpenWeather cache off the GUI thread.
+
+        Most fires are no-ops: fetch_weather() only touches the network once its
+        10-min cache expires, so while the cache is still valid we skip the
+        thread entirely and only spawn a worker for the actual blocking call.
+        The worker mutates weather_service.cache; the 1 Hz _update_telemetry_strips
+        reads that cache and repaints the tile, so no signal is needed here.
+        """
+        svc = self.weather_service
+        if self._weather_refreshing or not svc or not svc.is_configured():
+            return
+        if svc.is_cache_valid():
+            return  # cache still fresh — nothing to fetch
+        self._weather_refreshing = True
+
+        def _worker():
+            try:
+                svc.fetch_weather()
+            except Exception as e:
+                app_logger.debug(f"Weather refresh failed: {e}")
+            finally:
+                self._weather_refreshing = False
+
+        threading.Thread(target=_worker, name="WeatherRefresh", daemon=True).start()
 
     def _poll_logs(self):
         try:
