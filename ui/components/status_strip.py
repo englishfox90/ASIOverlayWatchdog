@@ -298,23 +298,28 @@ class StatusStrip(QFrame):
 
     # --- Per-frame metadata ---------------------------------------------
     def update_from_metadata(self, metadata: dict):
-        """Fill roof/sky/seeing from a freshly processed frame's metadata."""
+        """Fill roof/sky/seeing/weather from a freshly processed frame's metadata."""
         if not metadata:
             return
+
+        # Weather tokens are merged into metadata by the overlay renderer, so
+        # reading them here keeps the tile in lockstep with the image overlay.
+        wtemp = metadata.get('WEATHER_TEMP')
+        if wtemp:
+            parts = [p for p in (wtemp, metadata.get('WEATHER_CONDITION'),
+                                 metadata.get('WEATHER_CLOUDS')) if p]
+            self.set_weather(" · ".join(parts), 'primary')
+
         ml = metadata.get('_ML_RESULTS') or {}
 
         roof = ml.get('roof_status')
         if roof in ('Open', 'Closed'):
-            conf = ml.get('roof_confidence')
-            txt = f"{roof} · {int(conf * 100)}%" if conf is not None else roof
-            self.set_roof(txt, 'ok' if roof == 'Open' else 'error')
+            self.set_roof(roof, 'ok' if roof == 'Open' else 'error')
 
         sky = ml.get('sky_condition')
         if sky and sky != 'N/A':
-            sconf = ml.get('sky_confidence')
-            txt = f"{sky} · {int(sconf * 100)}%" if sconf is not None else sky
             tone = 'ok' if sky == 'Clear' else ('warn' if sky == 'Partly Cloudy' else 'error')
-            self.set_sky(txt, tone)
+            self.set_sky(sky, tone)
 
         stars = metadata.get('STAR_COUNT')
         if stars not in (None, 'N/A'):

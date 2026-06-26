@@ -620,14 +620,22 @@ class MainWindow(
         # Live preview overlay: no-camera prompt or "showing last frame" when idle.
         self.live_panel.refresh_overlay(self.is_capturing, ready)
 
-        # Weather tile — read the cached WeatherService value only (the overlay
-        # pipeline refreshes that cache off-thread); never fetch on the GUI thread.
-        if self.weather_service and self.weather_service.is_cache_valid():
-            wd = self.weather_service.cache or {}
-            parts = [p for p in (wd.get('temp'), wd.get('condition'), wd.get('clouds')) if p]
-            self.status_strip.set_weather(" · ".join(parts) if parts else "—", 'primary')
-        elif not self.weather_service:
+        # Weather tile — "Not configured" is decided from config (an API key +
+        # a location/coords), not from the service instance/cache. The live
+        # values come from frame metadata (status_strip.update_from_metadata,
+        # same source as the overlay); the cache is only an idle/no-frame fallback.
+        weather_cfg = self.config.get('weather', {})
+        weather_configured = bool(weather_cfg.get('api_key')) and bool(
+            weather_cfg.get('location')
+            or (weather_cfg.get('latitude') and weather_cfg.get('longitude'))
+        )
+        if not weather_configured:
             self.status_strip.set_weather("Not configured", 'muted')
+        elif self.weather_service and self.weather_service.cache:
+            wd = self.weather_service.cache
+            parts = [p for p in (wd.get('temp'), wd.get('condition'), wd.get('clouds')) if p]
+            if parts:
+                self.status_strip.set_weather(" · ".join(parts), 'primary')
 
         # Roof/Sky read "Not configured" when ML is off; otherwise they're filled
         # per-frame and dimmed (stale) while capture is idle.
