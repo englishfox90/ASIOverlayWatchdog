@@ -35,3 +35,15 @@ def mdi(name: str, color: str = None):
         return qta.icon(f'mdi6.{name}', color=color or Colors.text_secondary)
     except Exception:
         return QIcon()
+
+
+def qicon(name: str, color: str = None):
+    """qtawesome icon by name. A bare name is treated as MDI6; a name with a
+    prefix (e.g. ``fa6b.discord``) is used as-is — handy for brand glyphs the
+    bundled MDI6 set lacks."""
+    try:
+        _ensure_windows_font_dir()
+        full = name if '.' in name else f'mdi6.{name}'
+        return qta.icon(full, color=color or Colors.text_secondary)
+    except Exception:
+        return QIcon()

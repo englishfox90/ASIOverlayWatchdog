@@ -200,6 +200,8 @@ class _MainWindowOutputMixin:
             # preview_image may carry the all-sky overlay (GUI only).
             # output_image is always clean — sent to file sinks and servers.
             self.live_panel.update_preview(preview_image, metadata)
+            self.status_strip.update_from_metadata(metadata)
+            self.telemetry_bar.update_from_metadata(metadata)
 
             output_config = self.config.get('output', {})
             discord_config = self.config.get('discord', {})

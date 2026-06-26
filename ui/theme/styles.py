@@ -4,10 +4,24 @@ Generates Qt stylesheets from design tokens for QFluentWidgets
 """
 from qfluentwidgets import setTheme, Theme, setThemeColor, isDarkTheme
 from qfluentwidgets import FluentStyleSheet
-from PySide6.QtGui import QColor, QCursor
+from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox
 from .tokens import Colors, Typography, Spacing, Layout
+
+
+def paint_border_lines(widget, lines, color: str = None):
+    """Draw crisp 1px border lines on a widget from its paintEvent.
+
+    `lines` is an iterable of (x1, y1, x2, y2). Components draw their own
+    borders this way because 1px QSS borders / spacer widgets render
+    inconsistently at fractional DPI scaling.
+    """
+    painter = QPainter(widget)
+    painter.setPen(QPen(QColor(color or Colors.border_subtle), 1))
+    for x1, y1, x2, y2 in lines:
+        painter.drawLine(x1, y1, x2, y2)
+    painter.end()
 
 
 def apply_theme():
