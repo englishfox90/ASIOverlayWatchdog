@@ -41,8 +41,8 @@ DEFAULT_CONFIG = {
     "output_directory": os.path.join(get_app_data_dir(), DEFAULT_OUTPUT_SUBFOLDER),
     "filename_pattern": "latestImage",
     "output_format": "jpg",
-    "jpg_quality": 85,
-    "resize_percent": 85,
+    "jpg_quality": 100,
+    "resize_percent": 74,
     "timestamp_corner": False,
     
     # Output mode settings
@@ -83,8 +83,8 @@ DEFAULT_CONFIG = {
     },
     
     # Global camera settings (NOT per-camera — apply to the whole capture loop)
-    "zwo_interval": 5.0,          # seconds between captures
-    "zwo_auto_exposure": False,   # auto-exposure algorithm enabled (global toggle)
+    "zwo_interval": 300.0,        # seconds between captures
+    "zwo_auto_exposure": True,    # auto-exposure algorithm enabled (global toggle)
     
     # Scheduled capture settings
     # mode:
@@ -92,19 +92,19 @@ DEFAULT_CONFIG = {
     #   "gated"    — only capture inside the time window; disconnect camera outside
     #   "variable" — always capture, but use scheduled_window_interval inside the
     #                window and zwo_interval outside (e.g. fast at night, slow by day)
-    "scheduled_capture_mode": "always",
-    "scheduled_capture_enabled": False,     # legacy flag — kept in sync with mode for back-compat
-    "scheduled_start_time": "17:00",        # 5:00 PM — window start (24hr)
+    "scheduled_capture_mode": "variable",
+    "scheduled_capture_enabled": True,      # legacy flag — kept in sync with mode for back-compat
+    "scheduled_start_time": "16:00",        # 4:00 PM — window start (24hr)
     "scheduled_end_time": "09:00",          # 9:00 AM — window end (next day for overnight)
-    "scheduled_window_interval": 5.0,       # seconds between captures when inside the window (variable mode only)
+    "scheduled_window_interval": 30.0,      # seconds between captures when inside the window (variable mode only)
     
     # White Balance configuration
     "white_balance": {
-        "mode": "asi_auto",  # "asi_auto" | "manual" | "gray_world"
+        "mode": "gray_world",  # "asi_auto" | "manual" | "gray_world"
         "manual_red_gain": 1.0,
         "manual_blue_gain": 1.0,
         "gray_world_low_pct": 5,
-        "gray_world_high_pct": 95
+        "gray_world_high_pct": 100
     },
     
     # Analytics (PostHog)
@@ -116,19 +116,20 @@ DEFAULT_CONFIG = {
 
     "auto_brightness": False,  # Automatically adjust brightness
     "brightness_factor": 1.0,  # Brightness multiplier (0.5 to 2.0, 1.0 = neutral)
-    "saturation_factor": 1.0,  # Saturation multiplier (0.0 to 2.0, 1.0 = neutral)
+    "saturation_factor": 0.98,  # Saturation multiplier (0.0 to 2.0, 1.0 = neutral)
     
     # Auto Stretch settings (MTF - Midtone Transfer Function)
     "auto_stretch": {
-        "enabled": False,
-        "target_median": 0.25,  # Target median value (0.0-1.0, default 0.25 = quarter brightness)
-        "linked_stretch": True,  # Apply same stretch to all RGB channels (False = per-channel MAD clipping)
+        "enabled": True,
+        "target_median": 0.15,  # Target median value (0.0-1.0, default 0.25 = quarter brightness)
+        "linked_stretch": False,  # Apply same stretch to all RGB channels (False = per-channel MAD clipping)
         "preserve_blacks": True,  # Keep true blacks dark instead of lifting to grey
         "black_point": 0.0,  # Manual black point (0.0-0.1) - pixels below this stay black
-        "shadow_aggressiveness": 2.8,  # MAD multiplier for shadow clipping (1.5=aggressive, 2.8=standard, 4.0=gentle)
+        "shadow_aggressiveness": 1.8,  # MAD multiplier for shadow clipping (1.5=aggressive, 2.8=standard, 4.0=gentle)
         "saturation_boost": 1.5,  # Post-stretch saturation boost (1.0=none, 1.5=moderate, 2.0=strong)
         "normalize_channels": True,  # Equalize R/G/B medians before stretch (fixes color cast in dark scenes)
-        "dark_scene_threshold": 0.05  # Median below this triggers dark scene mode (0.0-0.2)
+        "dark_scene_threshold": 0.12,  # Median below this triggers dark scene mode (0.0-0.2)
+        "scnr_amount": 0.46  # Subtractive chromatic noise reduction strength (0.0=off, 1.0=max green removal)
     },
 
     # Star sharpening — cosmetic unsharp mask applied before overlay rendering
