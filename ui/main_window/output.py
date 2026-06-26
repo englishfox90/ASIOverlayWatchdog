@@ -267,12 +267,21 @@ class _MainWindowOutputMixin:
     # OUTPUT SERVER MANAGEMENT
     # =========================================================================
 
+    # Re-attempt cadence for a web server that failed to bind. At logon
+    # autostart the configured bind address (a Tailscale/LAN IP) may not be up
+    # on any interface yet, so the one-shot start fails; without a retry the
+    # web output stays off for the whole session even though Discord — which
+    # binds nothing — keeps working.
+    _WEB_SERVER_RETRY_MS = 15000
+
     def _ensure_output_servers_started(self):
         output_config = self.config.get('output', {})
 
         if output_config.get('webserver_enabled', False):
             if not self.web_server or not self.web_server.running:
                 self._start_web_server()
+        else:
+            self._cancel_web_server_retry()
 
     def _start_web_server(self):
         output_config = self.config.get('output', {})
@@ -295,6 +304,7 @@ class _MainWindowOutputMixin:
             app_logger.info(f"Status endpoint: {status_url}")
             self._notify(f"Web server started: {url}")
             self.app_bar.set_web_status(True, True)
+            self._cancel_web_server_retry()
             self._start_capture_status_timer()
             self.push_capture_status()
         else:
@@ -302,8 +312,38 @@ class _MainWindowOutputMixin:
             self._notify("Web server failed to start", "error")
             self.web_server = None
             self.app_bar.set_web_status(True, False)
+            self._schedule_web_server_retry()
+
+    def _schedule_web_server_retry(self):
+        """Queue another web-server start attempt. The bind may fail at logon
+        autostart because the bind address (Tailscale/LAN IP) isn't up yet;
+        keep retrying until it binds rather than giving up for the session."""
+        if self._web_server_retry_timer is None:
+            self._web_server_retry_timer = QTimer(self)
+            self._web_server_retry_timer.setSingleShot(True)
+            self._web_server_retry_timer.timeout.connect(self._retry_web_server)
+        if not self._web_server_retry_timer.isActive():
+            app_logger.info(
+                f"Web server start failed — retrying in "
+                f"{self._WEB_SERVER_RETRY_MS // 1000}s"
+            )
+            self._web_server_retry_timer.start(self._WEB_SERVER_RETRY_MS)
+
+    def _cancel_web_server_retry(self):
+        if self._web_server_retry_timer is not None and self._web_server_retry_timer.isActive():
+            self._web_server_retry_timer.stop()
+
+    def _retry_web_server(self):
+        output_config = self.config.get('output', {})
+        if not output_config.get('webserver_enabled', False):
+            return
+        if self.web_server and self.web_server.running:
+            return
+        app_logger.info("Retrying web server start...")
+        self._start_web_server()
 
     def _stop_web_server(self):
+        self._cancel_web_server_retry()
         self._stop_capture_status_timer()
         if self.web_server:
             try:

@@ -43,6 +43,7 @@ class HeadlessRunner:
         self.image_count = 0
         self._last_capture_epoch = None  # Unix ts of last successful frame (for /status)
         self._last_error = None          # Most recent capture error (for /status health)
+        self._last_webserver_retry = 0.0  # Throttles web-server bind re-attempts
         self._shutdown_event = threading.Event()
         
         # Register signal handlers for graceful shutdown
@@ -140,10 +141,37 @@ class HeadlessRunner:
             return dict(DEFAULT_CAMERA_PROFILE)
         return self.config.get_camera_profile(cam_name) or dict(DEFAULT_CAMERA_PROFILE)
     
+    # Minimum seconds between web-server bind re-attempts.
+    _WEBSERVER_RETRY_SEC = 15.0
+
+    def _webserver_mode_enabled(self) -> bool:
+        return self.config.get('output', {}).get('mode') == 'webserver'
+
+    def _ensure_webserver(self):
+        """Re-attempt a failed web-server bind from the capture loop.
+
+        At logon autostart the configured bind address (a Tailscale/LAN IP)
+        may not be up on any interface yet, so the initial start in start()
+        fails. Without this, web output stays off for the whole session even
+        though capture and file output keep working. Throttled so a persistent
+        failure doesn't re-attempt (and re-log) on every frame.
+        """
+        if not self._webserver_mode_enabled():
+            return
+        if self.web_server and self.web_server.running:
+            return
+        if (time.time() - self._last_webserver_retry) < self._WEBSERVER_RETRY_SEC:
+            return
+        self._log("Retrying web server start...")
+        self._start_webserver()
+
     def _start_webserver(self):
         """Start web server for image output"""
+        # Stamp every attempt so the loop's retry throttle counts from here,
+        # whether this is the initial start or a re-attempt.
+        self._last_webserver_retry = time.time()
         output_config = self.config.get('output', {})
-        
+
         host = output_config.get('webserver_host', '127.0.0.1')
         port = output_config.get('webserver_port', 8080)
         image_path = output_config.get('webserver_path', '/latest')
@@ -239,6 +267,10 @@ class HeadlessRunner:
         """Main capture loop"""
         while self.running and not self._shutdown_event.is_set():
             try:
+                # Self-heal a web server that failed its initial bind (e.g. the
+                # Tailscale/LAN IP wasn't up yet at logon autostart).
+                self._ensure_webserver()
+
                 # Check scheduled capture window
                 if not self.zwo_camera.is_within_scheduled_window():
                     self._log("Outside scheduled capture window, waiting...")

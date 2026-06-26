@@ -104,6 +104,8 @@ class _MainWindowLifecycleMixin:
             self.log_timer.stop()
         if hasattr(self, 'watchdog_timer') and self.watchdog_timer:
             self.watchdog_timer.stop()
+        if getattr(self, '_web_server_retry_timer', None):
+            self._web_server_retry_timer.stop()
 
         if hasattr(self, 'update_checker') and self.update_checker:
             self.update_checker.stop()
