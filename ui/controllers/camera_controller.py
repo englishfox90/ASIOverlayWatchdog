@@ -184,7 +184,7 @@ class CameraControllerQt(QObject):
             clean_camera_name = camera_name.split('(Index:')[0].strip()
 
         from services.config import DEFAULT_CAMERA_PROFILE
-        profile = self.config.get_camera_profile(clean_camera_name)
+        profile = self.config.get_camera_profile(clean_camera_name, camera_serial)
         app_logger.info(f"Loading settings from camera profile: {clean_camera_name}")
         app_logger.debug(f"Profile contents: {profile}")
 

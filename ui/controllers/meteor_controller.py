@@ -564,7 +564,8 @@ class MeteorController(QObject):
             from services.camera.camera_utils import get_selected_camera_name
             cfg = self._main_window.config
             cam_name = get_selected_camera_name(cfg)
-            profile = cfg.get_camera_profile(cam_name) if cam_name else {}
+            serial = cfg.get('zwo_selected_camera_serial', '')
+            profile = cfg.get_camera_profile(cam_name, serial) if cam_name else {}
             return float(profile.get("exposure_ms", 0)) / 1000.0
         except (TypeError, ValueError, AttributeError):
             return 0.0

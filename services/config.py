@@ -545,6 +545,11 @@ class Config:
                         from .config_migrate import migrate_legacy_camera_keys
                         loaded = migrate_legacy_camera_keys(loaded)
 
+                        # Drop profile keys that are pre-serial name-bug
+                        # artefacts ("Camera 0", "... (Index: 2)").
+                        from .camera_profiles import prune_bogus_profiles
+                        loaded = prune_bogus_profiles(loaded)
+
                         # Merge with defaults to ensure new keys exist
                         config = copy.deepcopy(DEFAULT_CONFIG)
 
@@ -664,84 +669,28 @@ class Config:
         with self._lock:
             self.data["overlays"] = overlays
     
-    def get_camera_profile(self, camera_name):
-        """Get settings profile for a specific camera (by name).
-        
-        Returns a dict with camera-specific settings. If no profile exists,
-        creates one from current global settings (for backward compatibility).
-        
-        Args:
-            camera_name: Full camera name (e.g., "ZWO ASI676MC")
-        
-        Returns:
-            dict: Camera profile with keys: exposure_ms, gain, auto_exposure, etc.
-        """
-        if not camera_name:
-            return None
-        
-        # Get or create camera profiles dict
-        profiles = self.data.get('camera_profiles', {})
-        
-        if camera_name not in profiles:
-            # Seed a new profile with safe hardcoded defaults.
-            # NOTE: auto_exposure is NOT in profiles — it's a global algorithm setting.
-            # NOTE: white-balance *mode* is stored in global `white_balance` config; only
-            #       the manual wb_r/wb_b calibration values are per-camera.
-            profiles[camera_name] = dict(DEFAULT_CAMERA_PROFILE)
-            self.data['camera_profiles'] = profiles
-            self.save()
-            from .logger import app_logger
-            app_logger.info(f"Created new camera profile for: {camera_name}")
-        
-        return profiles[camera_name]
-    
-    def save_camera_profile(self, camera_name, profile_data):
-        """Save settings profile for a specific camera.
-        
-        Args:
-            camera_name: Full camera name (e.g., "ZWO ASI676MC")
-            profile_data: dict with camera settings to save
-        """
-        if not camera_name:
-            return
-        
-        profiles = self.data.get('camera_profiles', {})
-        profiles[camera_name] = profile_data
-        self.data['camera_profiles'] = profiles
-        self.save()
-        from .logger import app_logger
-        app_logger.debug(f"Saved camera profile for: {camera_name}")
-    
-    def update_camera_profile(self, camera_name, **kwargs):
-        """Update specific settings in a camera profile.
-        
-        Args:
-            camera_name: Full camera name
-            **kwargs: Settings to update (e.g., gain=150, exposure_ms=500)
-        """
-        profile = self.get_camera_profile(camera_name)
-        if profile:
-            profile.update(kwargs)
-            self.save_camera_profile(camera_name, profile)
-    
+    def get_camera_profile(self, camera_name, serial=None):
+        """Get a camera's settings profile, keyed by hardware serial when known
+        (falls back to model name). See services/camera_profiles.py."""
+        from .camera_profiles import get_camera_profile
+        return get_camera_profile(self, camera_name, serial)
+
+    def save_camera_profile(self, camera_name, profile_data, serial=None):
+        """Persist a full profile dict for a camera (serial-keyed when known)."""
+        from .camera_profiles import save_camera_profile
+        save_camera_profile(self, camera_name, profile_data, serial)
+
+    def update_camera_profile(self, camera_name, serial=None, **kwargs):
+        """Update individual keys in a camera's profile (e.g. gain=150)."""
+        from .camera_profiles import update_camera_profile
+        update_camera_profile(self, camera_name, serial=serial, **kwargs)
+
     def list_camera_profiles(self):
-        """Get list of all camera names with saved profiles.
-        
-        Returns:
-            list: Camera names that have profiles
-        """
-        return list(self.data.get('camera_profiles', {}).keys())
-    
-    def delete_camera_profile(self, camera_name):
-        """Delete a camera profile.
-        
-        Args:
-            camera_name: Full camera name
-        """
-        profiles = self.data.get('camera_profiles', {})
-        if camera_name in profiles:
-            del profiles[camera_name]
-            self.data['camera_profiles'] = profiles
-            self.save()
-            from .logger import app_logger
-            app_logger.info(f"Deleted camera profile for: {camera_name}")
+        """All profile keys (serials and/or legacy names)."""
+        from .camera_profiles import list_camera_profiles
+        return list_camera_profiles(self)
+
+    def delete_camera_profile(self, camera_name, serial=None):
+        """Delete a camera profile by serial (preferred) or name key."""
+        from .camera_profiles import delete_camera_profile
+        delete_camera_profile(self, camera_name, serial)

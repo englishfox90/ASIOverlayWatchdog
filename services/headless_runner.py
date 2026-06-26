@@ -140,7 +140,8 @@ class HeadlessRunner:
         cam_name = get_selected_camera_name(self.config)
         if not cam_name:
             return dict(DEFAULT_CAMERA_PROFILE)
-        return self.config.get_camera_profile(cam_name) or dict(DEFAULT_CAMERA_PROFILE)
+        serial = self.config.get('zwo_selected_camera_serial', '')
+        return self.config.get_camera_profile(cam_name, serial) or dict(DEFAULT_CAMERA_PROFILE)
     
     # Minimum seconds between web-server bind re-attempts.
     _WEBSERVER_RETRY_SEC = 15.0

@@ -436,15 +436,13 @@ class CameraSettingsWidget(QWidget):
     def _on_camera_selected(self, index):
         if not self._can_save:
             return
-        camera_name = self.camera_combo.currentText()
-        actual_index = index
-        if '(Index: ' in camera_name:
-            try:
-                actual_index = int(camera_name.split('(Index: ')[1].rstrip(')'))
-            except (IndexError, ValueError):
-                pass
+        camera_name = self._clean_camera_name(self.camera_combo.currentText())
+        # The SDK index now rides as hidden item data (set in set_cameras), so
+        # we no longer parse it out of the visible label.
+        data = self.camera_combo.currentData()
+        actual_index = data if isinstance(data, int) else index
         self.main_window.config.set('zwo_selected_camera', actual_index)
-        self.main_window.config.set('zwo_selected_camera_name', self._clean_camera_name(camera_name))
+        self.main_window.config.set('zwo_selected_camera_name', camera_name)
         # Identity is keyed by serial, which is learned on connect. A manual
         # pick may point at a different body, so clear the stored serial — it is
         # re-learned on the next connect. Leaving a stale serial would make the
@@ -457,8 +455,9 @@ class CameraSettingsWidget(QWidget):
         if not self.main_window or not hasattr(self.main_window, 'config'):
             return
         camera_name = self._clean_camera_name(self.main_window.config.get('zwo_selected_camera_name', ''))
+        serial = self.main_window.config.get('zwo_selected_camera_serial', '')
         if camera_name:
-            self.main_window.config.update_camera_profile(camera_name, **kwargs)
+            self.main_window.config.update_camera_profile(camera_name, serial=serial, **kwargs)
         for key, value in kwargs.items():
             self.main_window.config.set(f'zwo_{key}', value)
 
@@ -580,8 +579,9 @@ class CameraSettingsWidget(QWidget):
             self.sdk_path_input.setText(config.get('zwo_sdk_path', ''))
 
             active_name = config.get('zwo_selected_camera_name', '') or config.get('zwo_camera_name', '')
+            active_serial = config.get('zwo_selected_camera_serial', '')
             profile = (
-                self.main_window.config.get_camera_profile(active_name)
+                self.main_window.config.get_camera_profile(active_name, active_serial)
                 if active_name else dict(DEFAULT_CAMERA_PROFILE)
             )
 
@@ -642,7 +642,17 @@ class CameraSettingsWidget(QWidget):
         self.camera_combo.blockSignals(True)
         self.camera_combo.clear()
         if camera_list:
-            self.camera_combo.addItems(camera_list)
+            # Display the model name only — the hardware serial is the identity
+            # now. The SDK index is kept as hidden item data (a starting hint for
+            # connect); it shifts on hot-plug, so showing it is misleading.
+            for pos, entry in enumerate(camera_list):
+                idx = pos
+                if '(Index: ' in entry:
+                    try:
+                        idx = int(entry.split('(Index: ')[1].rstrip(')'))
+                    except (IndexError, ValueError):
+                        idx = pos
+                self.camera_combo.addItem(self._clean_camera_name(entry), idx)
         else:
             self.camera_combo.setPlaceholderText("No cameras detected")
         self.camera_combo.blockSignals(False)

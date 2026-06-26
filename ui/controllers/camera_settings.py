@@ -12,9 +12,10 @@ def apply_camera_settings(zwo_camera, config):
     camera_name = config.get('zwo_selected_camera_name', '')
     if '(Index:' in camera_name:
         camera_name = camera_name.split('(Index:')[0].strip()
+    serial = config.get('zwo_selected_camera_serial', '')
 
     profile = (
-        config.get_camera_profile(camera_name) if camera_name
+        config.get_camera_profile(camera_name, serial) if camera_name
         else dict(DEFAULT_CAMERA_PROFILE)
     )
 
