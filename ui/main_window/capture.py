@@ -277,9 +277,11 @@ class _MainWindowCaptureMixin:
                 self.capture_panel.set_missing_camera_warning(
                     saved_name, phantom_count
                 )
-            elif not saved_name and cameras:
-                # Fresh install (no prior selection): auto-pick the first so
-                # the user isn't staring at an empty combo.
+            elif not saved_name and len(cameras) == 1:
+                # Fresh install on an unambiguous single-camera rig: auto-pick so
+                # the user isn't staring at an empty combo. We deliberately do
+                # NOT auto-pick on a multi-camera rig — grabbing "the first
+                # camera" is how a guide camera got hijacked (June 2026).
                 cam = cameras[0]
                 cam_clean = cam.split(' (Index:')[0] if '(Index:' in cam else cam
                 actual_index = 0
@@ -291,12 +293,19 @@ class _MainWindowCaptureMixin:
                 self.capture_panel.camera_widget.camera_combo.setCurrentIndex(0)
                 self.config.set('zwo_selected_camera', actual_index)
                 self.config.set('zwo_selected_camera_name', cam_clean)
+                self.config.set('zwo_selected_camera_serial', '')  # learned on connect
                 self.config.save()
                 app_logger.info(
-                    f"Auto-selected camera (first install, no saved name): "
+                    f"Auto-selected camera (first install, single camera): "
                     f"'{cam_clean}' (SDK Index: {actual_index})"
                 )
                 self.capture_panel.set_missing_camera_warning('')
+            elif not saved_name and len(cameras) > 1:
+                app_logger.info(
+                    f"{len(cameras)} cameras present and none selected — leaving "
+                    "the choice to the user (refusing to auto-pick on a multi-camera rig)."
+                )
+                self.capture_panel.clear_camera_selection()
 
             self.capture_panel.camera_widget.camera_combo.blockSignals(False)
             self.capture_panel.camera_widget.load_from_config(self.config)

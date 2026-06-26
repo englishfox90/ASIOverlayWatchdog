@@ -67,7 +67,7 @@ def _parse_float(text):
 
 def parse_temp_c(text):
     """Best-effort Celsius float from a stored temp display string, or None."""
-    return _parse_float(text) if text else None
+    return _parse_float(text)
 
 
 def best_seeing(rows):

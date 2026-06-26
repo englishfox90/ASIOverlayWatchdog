@@ -63,7 +63,11 @@ DEFAULT_CONFIG = {
     "zwo_sdk_path": resource_path("ASICamera2.dll"),
     "zwo_camera_index": 0,
     "zwo_camera_name": "",  # Last selected camera name
-    "zwo_selected_camera": 0,  # Last selected camera index
+    "zwo_selected_camera": 0,  # Last selected camera index (transient — shifts on hot-plug)
+    # Stable hardware serial (ASIGetSerialNumber, 16-hex). The authoritative
+    # identity: index and model name are non-unique/unstable. Learned on the
+    # first clean connect for configs that predate this key.
+    "zwo_selected_camera_serial": "",
     
     # Per-camera profiles (NEW: stores settings per camera to prevent cross-contamination)
     # NOTE: auto_exposure is NOT stored here - it's a global algorithm setting, not camera-specific

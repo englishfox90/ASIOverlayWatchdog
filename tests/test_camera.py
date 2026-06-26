@@ -661,10 +661,12 @@ class TestDetectNeverSwapsCameraSilently:
         src = inspect.getsource(
             main_window_capture._MainWindowCaptureMixin._on_cameras_detected
         )
-        # The fresh-install branch: auto-select only when saved_name is empty
-        assert "elif not saved_name and cameras:" in src, (
-            "Detect must only auto-select on fresh install (no saved name), "
-            "never swap to a different camera when the saved one is missing."
+        # Fresh-install branch: auto-select only with no saved name AND an
+        # unambiguous single-camera rig. Auto-picking "the first camera" on a
+        # multi-camera rig is how a guide camera got hijacked (June 2026).
+        assert "elif not saved_name and len(cameras) == 1:" in src, (
+            "Detect must only auto-select on fresh install with a single "
+            "camera, never swap or auto-pick on a multi-camera rig."
         )
         # The old silent-swap branch must be gone
         assert "(not saved_name or not found)" not in src, (

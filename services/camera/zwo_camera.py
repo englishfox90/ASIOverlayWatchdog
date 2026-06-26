@@ -28,7 +28,7 @@ class ZWOCamera:
                  scheduled_end_time="09:00", scheduled_capture_mode=None,
                  scheduled_window_interval=5.0,
                  status_callback=None, camera_name=None,
-                 config_callback=None):
+                 config_callback=None, camera_serial=None):
         # Initialize log callback FIRST (before CameraConnection uses self.log)
         self.on_log_callback = None
         self.on_frame_callback = None
@@ -40,11 +40,13 @@ class ZWOCamera:
         self._connection.config_callback = config_callback
         self._connection.camera_name = camera_name
         self._connection.camera_index = camera_index
-        
+        self._connection.camera_serial = camera_serial
+
         # Legacy attribute aliases (for backward compatibility)
         self.sdk_path = sdk_path
         self.camera_index = camera_index
         self.camera_name = camera_name
+        self.camera_serial = camera_serial  # Stable hardware identity (authoritative)
         self.config_callback = config_callback
         
         # Capture state
@@ -292,14 +294,16 @@ class ZWOCamera:
         
         success = self._connection.reconnect_safe(
             target_camera_name=self.camera_name,
-            settings=settings
+            settings=settings,
+            target_camera_serial=self.camera_serial
         )
-        
+
         if success:
-            # Sync camera_name and camera_index from connection manager
+            # Sync identity from connection manager
             self.camera_name = self._connection.camera_name
             self.camera_index = self._connection.camera_index
-            
+            self.camera_serial = self._connection.camera_serial
+
             # Initialize calibration manager for the reconnected camera
             self._init_calibration_manager()
         
@@ -322,24 +326,35 @@ class ZWOCamera:
             'use_raw16': self.use_raw16,  # RAW16 mode for full bit depth
         }
         
-        # Delegate connection to connection manager
-        # Pass expected name so connect() can verify the SDK returned the right camera
+        # Delegate connection to connection manager. Pass expected name AND
+        # serial so connect() rejects the wrong physical camera (a shifted
+        # index can point the saved selection at a different body).
         success = self._connection.connect(
-            camera_index, settings, expected_camera_name=self.camera_name
+            camera_index, settings, expected_camera_name=self.camera_name,
+            expected_camera_serial=self.camera_serial
         )
-        
+
+        # The saved index may point at the wrong body after a hot-plug; the
+        # serial gate above then fails the open. Fall back to the serial-first
+        # reconnect path, which probes serials to locate the correct index
+        # rather than reconfiguring whichever camera the stale index hit.
+        if not success and (self.camera_serial or self.camera_name):
+            self.log("Direct connect failed — resolving camera by identity...")
+            return self.reconnect_camera_safe()
+
         if success:
-            # Sync camera_name and camera_index from connection manager
+            # Sync identity from connection manager
             self.camera_name = self._connection.camera_name
             self.camera_index = self._connection.camera_index
-            
+            self.camera_serial = self._connection.camera_serial
+
             # Initialize calibration manager
             self._init_calibration_manager()
-            
+
             self.log(f"✓ Camera connection successful")
             if self.scheduled_capture_enabled:
                 self.log(f"Scheduled capture enabled: {self.scheduled_start_time} - {self.scheduled_end_time}")
-        
+
         return success
     
     def _init_calibration_manager(self):

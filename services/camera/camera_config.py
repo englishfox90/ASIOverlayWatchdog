@@ -69,14 +69,40 @@ def validate_control(controls, control_type, value, name, log) -> Tuple[Any, Opt
     return value, None
 
 
-def verify_camera_identity(camera, camera_name: Optional[str], log) -> bool:
+def verify_camera_identity(camera, camera_name: Optional[str], log,
+                           camera_serial: Optional[str] = None) -> bool:
     """
     Verify the open camera handle still points to the expected physical camera.
     Returns True if identity matches, False if mismatch or no camera.
-    Exact name match (after strip) — writing one camera's settings to a
-    different-but-similarly-named camera could mis-configure the hardware.
+
+    When a hardware serial is on file it is the authoritative check — the model
+    name is shared by every body of the same model, so a name-only match can
+    still let one camera's settings be written to another (the guide-camera
+    hijack, June 2026). The serial uniquely identifies the physical device.
+    Falls back to an exact name match (after strip) for bodies/configs without
+    a serial.
     """
-    if not camera or not camera_name:
+    if not camera:
+        return False
+    from .camera_identity import read_serial, serials_match
+
+    if camera_serial:
+        actual_serial = read_serial(camera)
+        if serials_match(camera_serial, actual_serial):
+            return True
+        # A None actual_serial means the SDK couldn't read it this call (not a
+        # confirmed different camera); fall through to the name check rather
+        # than hard-failing a camera that genuinely matches by name.
+        if actual_serial is not None:
+            log(
+                f"✗ Camera identity MISMATCH by serial: expected "
+                f"{camera_serial}, SDK returned {actual_serial}. Refusing operation."
+            )
+            return False
+
+    if not camera_name:
+        # No name to fall back on and serial (if any) was unreadable — cannot
+        # confirm identity, so refuse (matches the original conservative gate).
         return False
     try:
         actual_name = (camera.get_camera_property().get('Name') or '').strip()

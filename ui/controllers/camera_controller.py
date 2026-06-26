@@ -145,97 +145,12 @@ class CameraControllerQt(QObject):
         """Re-detect cameras and resolve the correct index by name.
 
         Camera indices shift when other USB cameras (NINA, guide cam, etc.)
-        come online or go offline.  This method always does a fresh SDK
-        enumeration so we never send the wrong camera's config to a device.
-
-        Returns the resolved camera index.
-        Raises Exception if the target camera is not found.
+        come online or go offline. Delegates to the shared, hijack-safe
+        resolver; the connection layer makes the final serial-checked choice.
+        Raises if the target camera cannot be safely resolved.
         """
-        import zwoasi as asi
-
-        if not sdk_path or not os.path.exists(sdk_path):
-            raise Exception("SDK path not configured or not found.")
-
-        try:
-            asi.init(sdk_path)
-        except Exception as e:
-            if "already" not in str(e).lower():
-                raise Exception(f"SDK init failed: {e}")
-
-        num_cameras = asi.get_num_cameras()
-        if num_cameras == 0:
-            raise Exception("No ZWO cameras detected. Check USB connections.")
-
-        # Build fresh camera list — wrap list_cameras() in a timeout so a
-        # wedged camera in a bad USB state can't hang the capture-start worker.
-        _names = [None]
-        _exc = [None]
-
-        def _list():
-            try:
-                _names[0] = list(asi.list_cameras())
-            except Exception as _e:
-                _exc[0] = _e
-
-        _t = threading.Thread(target=_list, daemon=True)
-        _t.start()
-        _t.join(8.0)
-        if _t.is_alive():
-            raise Exception(
-                "SDK list_cameras() timed out — camera may be in a bad USB state. "
-                "Try the Revive button."
-            )
-        if _exc[0]:
-            raise _exc[0]
-        fresh_cameras = list(enumerate(_names[0] or []))
-
-        if not fresh_cameras:
-            raise Exception("No ZWO cameras could be enumerated.")
-
-        # Clean the saved name (strip " (Index: N)" suffix if present)
-        clean_name = camera_name
-        if '(Index:' in camera_name:
-            clean_name = camera_name.split('(Index:')[0].strip()
-
-        # If name is missing/default ('Unknown', empty), fall back to first camera
-        if not clean_name or clean_name == 'Unknown':
-            idx, name = fresh_cameras[0]
-            app_logger.warning(
-                f"No saved camera name — auto-selecting first camera: '{name}' at index {idx}"
-            )
-            self.config.set('zwo_selected_camera', idx)
-            self.config.set('zwo_selected_camera_name', name)
-            self.config.save()
-            camera_list = [f"{n} (Index: {i})" for i, n in fresh_cameras]
-            self.config.set('available_cameras', camera_list)
-            return idx
-
-        # Try exact match by name
-        for idx, name in fresh_cameras:
-            if clean_name in name:
-                if idx != saved_index:
-                    app_logger.warning(
-                        f"Camera index changed: '{clean_name}' moved from "
-                        f"index {saved_index} → {idx}  (other cameras may have come online)"
-                    )
-                    # Persist the corrected index so config stays current
-                    self.config.set('zwo_selected_camera', idx)
-                    self.config.save()
-                else:
-                    app_logger.info(f"Camera '{clean_name}' confirmed at index {idx}")
-
-                # Update the available_cameras list in config to reflect reality
-                camera_list = [f"{n} (Index: {i})" for i, n in fresh_cameras]
-                self.config.set('available_cameras', camera_list)
-                return idx
-
-        # Camera not found at all — list what IS available for diagnostics
-        available = ", ".join(f"[{i}] {n}" for i, n in fresh_cameras)
-        raise Exception(
-            f"Camera '{clean_name}' not found. "
-            f"Available cameras: {available}. "
-            f"Please click 'Detect Cameras' and select the correct camera."
-        )
+        from services.camera.camera_index_resolver import resolve_camera_index
+        return resolve_camera_index(self.config, sdk_path, camera_name, saved_index)
 
     def start_capture(self):
         """Start camera capture using ZWOCamera's built-in capture loop"""
@@ -260,6 +175,7 @@ class CameraControllerQt(QObject):
         sdk_path = self.config.get('zwo_sdk_path', '')
         saved_camera_index = self.config.get('zwo_selected_camera', 0)
         camera_name = self.config.get('zwo_selected_camera_name', 'Unknown')
+        camera_serial = self.config.get('zwo_selected_camera_serial', '')
 
         app_logger.info(f"Starting capture — saved camera: '{camera_name}' at index {saved_camera_index}")
 
@@ -280,6 +196,7 @@ class CameraControllerQt(QObject):
             'sdk_path': sdk_path,
             'saved_camera_index': saved_camera_index,
             'camera_name': camera_name,
+            'camera_serial': camera_serial,
             'clean_camera_name': clean_camera_name,
             'exposure_ms': profile.get('exposure_ms', DEFAULT_CAMERA_PROFILE['exposure_ms']),
             'gain': profile.get('gain', DEFAULT_CAMERA_PROFILE['gain']),
@@ -347,6 +264,7 @@ class CameraControllerQt(QObject):
                 scheduled_end_time=params['scheduled_end_time'],
                 scheduled_window_interval=params['scheduled_window_interval'],
                 camera_name=params['clean_camera_name'],
+                camera_serial=params['camera_serial'],
             )
             cam.target_brightness = params['target_brightness']
             cam.set_capture_interval(params['capture_interval'])
@@ -374,6 +292,17 @@ class CameraControllerQt(QObject):
             app_logger.debug(f"Stack trace: {traceback.format_exc()}")
             self._capture_start_done.emit(False, str(e))
 
+    def _persist_learned_serial(self):
+        """Persist the camera's hardware serial learned during connect.
+
+        Runs on the Qt main thread (config writes off the capture worker thread).
+        """
+        from services.camera.camera_identity import persist_camera_serial
+        cam = self.zwo_camera
+        serial = getattr(cam, 'camera_serial', None) if cam else None
+        if persist_camera_serial(self.config, serial):
+            app_logger.info(f"Persisted camera serial to config: {serial}")
+
     def _on_capture_start_done(self, ok: bool, err: str):
         """Handle _start_capture_worker result on the main Qt thread."""
         self._capture_starting = False
@@ -390,6 +319,7 @@ class CameraControllerQt(QObject):
                 self.is_connected = False
                 return
             self.is_capturing = True
+            self._persist_learned_serial()
             self.capture_started.emit()
             app_logger.info("Camera capture started")
         else:

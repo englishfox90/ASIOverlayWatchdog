@@ -16,6 +16,7 @@ from datetime import datetime
 from .logger import app_logger
 from .config import Config
 from .camera import ZWOCamera
+from .camera.camera_utils import get_selected_camera_name
 from .web_output import WebOutputServer
 from .processor import add_overlays
 from .cleanup import run_cleanup
@@ -121,7 +122,7 @@ class HeadlessRunner:
         """Load and validate configuration"""
         self.config.load()
 
-        cam_name = self.config.get('zwo_selected_camera_name', '') or self.config.get('zwo_camera_name', '')
+        cam_name = get_selected_camera_name(self.config)
         profile = self._active_profile()
 
         # Log key settings
@@ -136,7 +137,7 @@ class HeadlessRunner:
     def _active_profile(self) -> dict:
         """Return the active camera's profile, or DEFAULT_CAMERA_PROFILE if no camera selected."""
         from services.config import DEFAULT_CAMERA_PROFILE
-        cam_name = self.config.get('zwo_selected_camera_name', '') or self.config.get('zwo_camera_name', '')
+        cam_name = get_selected_camera_name(self.config)
         if not cam_name:
             return dict(DEFAULT_CAMERA_PROFILE)
         return self.config.get_camera_profile(cam_name) or dict(DEFAULT_CAMERA_PROFILE)
@@ -209,7 +210,8 @@ class HeadlessRunner:
             self.zwo_camera = ZWOCamera(
                 sdk_path=sdk_path,
                 camera_index=self.config.get('zwo_selected_camera', 0),
-                camera_name=self.config.get('zwo_camera_name'),
+                camera_name=get_selected_camera_name(self.config),
+                camera_serial=self.config.get('zwo_selected_camera_serial', ''),
                 exposure_sec=exposure_sec,
                 gain=profile.get('gain', DEFAULT_CAMERA_PROFILE['gain']),
                 white_balance_r=profile.get('wb_r', DEFAULT_CAMERA_PROFILE['wb_r']),
@@ -253,7 +255,14 @@ class HeadlessRunner:
             if not self.zwo_camera.connect_camera(camera_index):
                 self._log(f"ERROR: Failed to connect to camera {camera_index}")
                 return False
-            
+
+            # Persist the serial learned on connect so it survives a restart and
+            # can reject the wrong camera if the index later shifts.
+            from services.camera.camera_identity import persist_camera_serial
+            serial = getattr(self.zwo_camera, 'camera_serial', None)
+            if persist_camera_serial(self.config, serial):
+                self._log(f"Persisted camera serial: {serial}")
+
             self._log(f"✓ Connected to camera: {cameras[camera_index]}")
             return True
             

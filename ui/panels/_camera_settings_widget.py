@@ -445,6 +445,11 @@ class CameraSettingsWidget(QWidget):
                 pass
         self.main_window.config.set('zwo_selected_camera', actual_index)
         self.main_window.config.set('zwo_selected_camera_name', self._clean_camera_name(camera_name))
+        # Identity is keyed by serial, which is learned on connect. A manual
+        # pick may point at a different body, so clear the stored serial — it is
+        # re-learned on the next connect. Leaving a stale serial would make the
+        # identity gate reject the camera the user just chose.
+        self.main_window.config.set('zwo_selected_camera_serial', '')
         self.load_from_config(self.main_window.config)
         self.settings_changed.emit()
 
