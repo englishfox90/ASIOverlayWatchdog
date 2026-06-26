@@ -9,6 +9,8 @@ Layout + display formatting only. Values are pushed in from the main window's
 status timer and per-frame handlers; per-frame cells mute to "—" when idle or
 when no camera is connected.
 """
+import re
+
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel
 from PySide6.QtCore import Qt
 
@@ -87,6 +89,23 @@ class TelemetryBar(QFrame):
             self._disk.setText(self._fmt("DISK", f"{self._human_size(free_gb)} free"))
 
     @staticmethod
+    def _fmt_exposure(raw) -> str:
+        """Compact exposure: long float seconds -> 2dp, scaled to ms/s/m."""
+        if raw is None or raw == _DASH:
+            return _DASH
+        m = re.match(r'\s*([0-9]*\.?[0-9]+)\s*(ms|s|m)?', str(raw), re.I)
+        if not m:
+            return str(raw)
+        val = float(m.group(1))
+        unit = (m.group(2) or 's').lower()
+        secs = val / 1000.0 if unit == 'ms' else (val * 60.0 if unit == 'm' else val)
+        if secs >= 60:
+            return f"{secs / 60:.2f}m"
+        if secs >= 1:
+            return f"{secs:.2f}s"
+        return f"{secs * 1000:.0f}ms"
+
+    @staticmethod
     def _human_size(gb: float) -> str:
         """Scale a GB figure to MB/GB/TB for a compact, readable label."""
         if gb >= 1024:
@@ -100,7 +119,7 @@ class TelemetryBar(QFrame):
         if not metadata:
             return
         self._frame_state = 'live'
-        self._exp.setText(self._fmt("EXP", metadata.get('EXPOSURE', _DASH)))
+        self._exp.setText(self._fmt("EXP", self._fmt_exposure(metadata.get('EXPOSURE'))))
         self._gain.setText(self._fmt("GAIN", metadata.get('GAIN', _DASH)))
         sensor = metadata.get('TEMP_F') or metadata.get('TEMP') or _DASH
         self._sensor.setText(self._fmt("SENSOR", sensor))

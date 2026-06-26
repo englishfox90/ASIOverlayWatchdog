@@ -80,7 +80,9 @@ class PreviewWidget(QFrame):
         self._overlay_sub = QLabel()
         self._overlay_sub.setAlignment(Qt.AlignCenter)
         self._overlay_sub.setWordWrap(True)
-        self._overlay_sub.setMaximumWidth(360)
+        # Fixed width gives the wrapped label a stable box so it isn't shrunk to
+        # its content width (which clipped the text under the centered layout).
+        self._overlay_sub.setFixedWidth(440)
         self._overlay_sub.setStyleSheet(
             f"color: {Colors.text_muted}; font-size: {Typography.size_body}px; "
             f"background: transparent;"
