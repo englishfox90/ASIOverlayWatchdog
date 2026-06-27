@@ -72,6 +72,7 @@ noise_models/
 colorize_out/
 stacked_out/
 sample_images/
+issues/
 
 # Wiki (managed locally, pushed via scripts/wiki-push.sh)
 wiki/
