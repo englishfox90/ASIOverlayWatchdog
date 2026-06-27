@@ -267,6 +267,7 @@ def train_model(
     epochs: int = 50,
     learning_rate: float = 0.001,
     val_split: float = 0.15,
+    model_name: str = 'sky_classifier_v1',
 ):
     """
     Train the sky/celestial classifier with GPU optimization.
@@ -492,7 +493,7 @@ def train_model(
     
     # Save model
     output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = output_dir / 'sky_classifier_v1.pth'
+    model_path = output_dir / f'{model_name}.pth'
     
     torch.save({
         'model_state_dict': best_model_state,
@@ -544,9 +545,11 @@ def train_model(
     print(f"  {sky_correct}/{len(all_sky_true)} ({sky_correct/len(all_sky_true)*100:.1f}%)")
     
     print("\nSky Condition per class:")
+    sky_per_class = {}
     for i, cond in enumerate(SKY_CONDITIONS):
         class_total = sum(1 for t in all_sky_true if t == i)
         class_correct = sum(1 for t, p in zip(all_sky_true, all_sky_pred) if t == i and p == i)
+        sky_per_class[cond] = (class_correct, class_total)
         if class_total > 0:
             print(f"  {cond}: {class_correct}/{class_total} ({class_correct/class_total*100:.1f}%)")
     
@@ -588,7 +591,17 @@ def train_model(
         print(f"ONNX export failed: {e}")
         print("You can still use the .pth model with PyTorch")
 
-    return model
+    return {
+        'image_size': image_size,
+        'sky_overall': (sky_correct, len(all_sky_true)),
+        'sky_per_class': sky_per_class,
+        'stars_acc': (stars_correct, len(all_stars_true)),
+        'moon_acc': (moon_correct, len(all_moon_true)),
+        'train_n': len(train_samples),
+        'test_n': len(test_samples),
+        'params': sum(p.numel() for p in model.parameters()),
+        'model_path': str(model_path),
+    }
 
 
 def main():
