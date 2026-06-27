@@ -389,8 +389,15 @@ class CameraConnection:
             self.camera_serial = actual_serial
             if self.config_callback:
                 self.config_callback('zwo_selected_camera_name', self.camera_name)
-                if actual_serial:
-                    self.config_callback('zwo_selected_camera_serial', actual_serial)
+                # Name and serial must always describe the SAME physical body.
+                # The serial read is intermittently flaky (returns None on a
+                # perfectly good camera); if we updated the name here but kept a
+                # previously-stored serial, the two could end up pointing at
+                # different cameras — and a later connect would then reject the
+                # right camera by serial (the 340b/232a desync, 2026-06-26).
+                # When the serial is unreadable, clear it so it is re-learned
+                # cleanly next time rather than left stale against the new name.
+                self.config_callback('zwo_selected_camera_serial', actual_serial or '')
                 self.log(f"Saved camera identity: {self.camera_name} "
                          f"(serial {actual_serial or 'unavailable'})")
 

@@ -645,6 +645,11 @@ class CameraSettingsWidget(QWidget):
             # Display the model name only — the hardware serial is the identity
             # now. The SDK index is kept as hidden item data (a starting hint for
             # connect); it shifts on hot-plug, so showing it is misleading.
+            # NB: pass the index as userData, NOT positionally — ComboBox.addItem
+            # is (text, icon, userData), so a bare int lands in the icon slot and
+            # crashes the dropdown ('int' object has no attribute 'icon') when the
+            # menu renders. currentData() also reads userData, so this is the slot
+            # _on_camera_selected expects.
             for pos, entry in enumerate(camera_list):
                 idx = pos
                 if '(Index: ' in entry:
@@ -652,7 +657,7 @@ class CameraSettingsWidget(QWidget):
                         idx = int(entry.split('(Index: ')[1].rstrip(')'))
                     except (IndexError, ValueError):
                         idx = pos
-                self.camera_combo.addItem(self._clean_camera_name(entry), idx)
+                self.camera_combo.addItem(self._clean_camera_name(entry), userData=idx)
         else:
             self.camera_combo.setPlaceholderText("No cameras detected")
         self.camera_combo.blockSignals(False)
@@ -660,6 +665,20 @@ class CameraSettingsWidget(QWidget):
     def set_detecting(self, is_detecting: bool):
         self.detect_btn.setEnabled(not is_detecting)
         self.detect_btn.setText("Detecting..." if is_detecting else "Detect")
+
+    def set_capture_active(self, active: bool):
+        """Disable camera selection/detection while capturing.
+
+        Changing the selected camera does not switch the live hardware — it only
+        pushes the picked camera's profile onto the running one (the
+        selection/connection decoupling). Locking the picker during capture
+        enforces the real workflow: Stop → pick a camera → Start.
+        """
+        self.camera_combo.setEnabled(not active)
+        self.detect_btn.setEnabled(not active)
+        self.camera_combo.setToolTip(
+            "Stop capture to change cameras" if active else ""
+        )
 
     def update_camera_capabilities(self, supports_raw16: bool, bit_depth: int):
         self._loading_config = True

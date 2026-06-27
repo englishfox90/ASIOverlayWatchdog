@@ -68,6 +68,17 @@ class _MainWindowCaptureMixin:
             self._on_detect_cameras()
 
     def _on_detect_cameras(self):
+        # Coalesce overlapping triggers. The Detect button, the AppBar connect
+        # action, the missing-camera "Detect Again" button and the startup
+        # auto-detect can all fire near-simultaneously, each spawning a full
+        # enumeration thread (four ran in 3s on 2026-06-26). One in-flight
+        # detection is enough; ignore re-entrant calls until it completes. The
+        # flag is cleared in _on_cameras_detected, which every detect path
+        # reaches via the cameras_detected signal.
+        if getattr(self, '_detection_in_progress', False):
+            app_logger.debug("Camera detection already in progress — ignoring duplicate trigger")
+            return
+
         app_logger.info("=== Camera Detection Initiated ===")
 
         sdk_path = self.config.get('zwo_sdk_path', '')
@@ -80,6 +91,7 @@ class _MainWindowCaptureMixin:
             self.capture_panel.set_detection_error(f"SDK not found: {sdk_path}")
             return
 
+        self._detection_in_progress = True
         self.capture_panel.set_detecting(True)
 
         main_window = self
@@ -183,6 +195,7 @@ class _MainWindowCaptureMixin:
         threading.Thread(target=detect_thread, daemon=True).start()
 
     def _on_cameras_detected(self, cameras: list, error: str):
+        self._detection_in_progress = False
         self.capture_panel.set_detecting(False)
 
         if error:
@@ -466,6 +479,11 @@ class _MainWindowCaptureMixin:
                 return
         self.app_bar.set_start_enabled(True)
 
+    def _lock_camera_picker(self, active: bool):
+        """Lock/unlock the Capture-tab camera picker as capture starts/stops."""
+        if hasattr(self, 'capture_panel'):
+            self.capture_panel.set_capture_active(active)
+
     def start_capture(self):
         mode = self.config.get('capture_mode', 'camera')
 
@@ -484,6 +502,7 @@ class _MainWindowCaptureMixin:
 
             self.is_capturing = True
             self.app_bar.set_capturing(True)
+            self._lock_camera_picker(True)
             self.app_bar.set_status('waiting')
             self._last_capture_error = None
             self.push_capture_status()
@@ -501,6 +520,7 @@ class _MainWindowCaptureMixin:
             app_logger.error(f"Failed to start capture: {e}")
             self.is_capturing = False
             self.app_bar.set_capturing(False)
+            self._lock_camera_picker(False)
             self._notify(f"Capture failed: {e}", "error")
             self._send_discord_error(f"Failed to start capture: {e}")
 
@@ -511,6 +531,8 @@ class _MainWindowCaptureMixin:
             self.app_bar.set_capturing(False)
 
             mode = self.config.get('capture_mode', 'camera')
+
+            self._lock_camera_picker(False)
 
             if mode == 'camera' and self.camera_controller:
                 self.camera_controller.stop_capture()
@@ -703,6 +725,7 @@ class _MainWindowCaptureMixin:
             app_logger.info("Capture resumed by auto-recovery — syncing UI state")
             self.is_capturing = True
             self.app_bar.set_capturing(True)
+            self._lock_camera_picker(True)
             self.app_bar.set_status('waiting')
             self._last_capture_error = None
             self.push_capture_status()

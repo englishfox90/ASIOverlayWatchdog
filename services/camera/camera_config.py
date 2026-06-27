@@ -28,30 +28,46 @@ def _set_roi_with_retry(camera, width, height, image_type, log, attempts=5, dela
             time.sleep(delay)
 
 
-def wait_for_controls_ready(camera, log, timeout: float = 8.0, poll_interval: float = 0.5) -> Dict:
-    """Poll get_controls() until the control count stops growing, then return it.
+def wait_for_controls_ready(camera, log, timeout: float = 8.0, poll_interval: float = 0.5,
+                            min_stable_polls: int = 2) -> Dict:
+    """Poll get_controls() until the control count holds steady, then return it.
 
     A freshly-opened ASI camera enumerates its controls incrementally: the
     ASI676MC reports only ~10 of its ~17 controls in the first ~1s after
     open(), and set_roi() returns ASI_ERROR_INVALID_SIZE for the whole
     interval the firmware is still coming up.  A fixed sleep guesses at how
-    long that takes; polling until two consecutive reads return the same
-    count adapts to a slow cold boot without over-waiting on a warm reconnect.
+    long that takes; polling until the count stops growing adapts to a slow
+    cold boot without over-waiting on a warm reconnect.
+
+    The count must hold steady across ``min_stable_polls`` *consecutive*
+    re-reads, not just one repeat.  Incremental enumeration can briefly
+    plateau (e.g. pause at 10 of ~17 controls) before the rest appear;
+    breaking on the first repeat declared the camera "settled" half-ready and
+    set_roi then failed with Invalid size (2026-06-26).  A short
+    sustained-stability window lets a slow climb finish.  Note this cannot
+    revive a genuinely *wedged* body that reports a stuck count forever — that
+    needs a USB disable/enable — it only stops us opening a merely-slow one
+    too early.
 
     Returns the final controls dict (so the caller need not re-fetch).
     """
     deadline = time.time() + timeout
     prev_count = None
+    stable_streak = 0
     while True:
         controls = camera.get_controls()
         count = len(controls)
         if count == prev_count:
-            break  # unchanged across two consecutive reads — enumeration settled
-        if prev_count is not None:
-            log(f"  Controls still enumerating: {prev_count} → {count}")
+            stable_streak += 1
+            if stable_streak >= min_stable_polls:
+                break  # count held steady long enough — enumeration settled
+        else:
+            if prev_count is not None:
+                log(f"  Controls still enumerating: {prev_count} → {count}")
+            stable_streak = 0
         prev_count = count
         if time.time() >= deadline:
-            log(f"  ⚠ Control count still changing at timeout ({count}) — proceeding anyway")
+            log(f"  ⚠ Control count still settling at timeout ({count}) — proceeding anyway")
             break
         time.sleep(poll_interval)
     log(f"  Available controls: {len(controls)} (enumeration settled)")

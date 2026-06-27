@@ -191,6 +191,10 @@ class CaptureSettingsPanel(QScrollArea):
     def clear_camera_selection(self):
         self.camera_widget.camera_combo.setCurrentIndex(-1)
 
+    def set_capture_active(self, active: bool):
+        """Lock the camera picker while capturing (switching cameras is Stop→Start)."""
+        self.camera_widget.set_capture_active(active)
+
     def update_camera_capabilities(self, supports_raw16: bool, bit_depth: int):
         self.camera_widget.update_camera_capabilities(supports_raw16, bit_depth)
 
