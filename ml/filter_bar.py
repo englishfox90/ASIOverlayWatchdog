@@ -47,6 +47,14 @@ class FilterBar(QWidget):
         self.suspect_check.stateChanged.connect(self._emit_changed)
         layout.addWidget(self.suspect_check)
 
+        self.ai_disagree_check = QCheckBox("⚠ AI disagrees")
+        self.ai_disagree_check.setToolTip(
+            "Frames where the validation model's sky verdict differs from your "
+            "label. Run ml/validate_labels.py first to populate ai_suggestion.")
+        self.ai_disagree_check.setStyleSheet("font-weight: bold; color: #0EA5E9;")
+        self.ai_disagree_check.stateChanged.connect(self._emit_changed)
+        layout.addWidget(self.ai_disagree_check)
+
         self.clear_btn = QPushButton("Clear")
         self.clear_btn.setToolTip("Reset all filters")
         self.clear_btn.clicked.connect(self.reset)
@@ -67,16 +75,20 @@ class FilterBar(QWidget):
             weather=self.weather_combo.currentText(),
             bright_moon_up=self.moon_check.isChecked(),
             suspect_only=self.suspect_check.isChecked(),
+            ai_disagrees=self.ai_disagree_check.isChecked(),
         )
 
     def reset(self):
-        for w in (self.sky_combo, self.weather_combo, self.moon_check, self.suspect_check):
+        widgets = (self.sky_combo, self.weather_combo, self.moon_check,
+                   self.suspect_check, self.ai_disagree_check)
+        for w in widgets:
             w.blockSignals(True)
         self.sky_combo.setCurrentIndex(0)
         self.weather_combo.setCurrentIndex(0)
         self.moon_check.setChecked(False)
         self.suspect_check.setChecked(False)
-        for w in (self.sky_combo, self.weather_combo, self.moon_check, self.suspect_check):
+        self.ai_disagree_check.setChecked(False)
+        for w in widgets:
             w.blockSignals(False)
         self.changed.emit()
 

@@ -18,10 +18,11 @@ class FilterCriteria:
     weather: str = "Any"        # Any | Clear sky | Cloudy sky
     bright_moon_up: bool = False
     suspect_only: bool = False
+    ai_disagrees: bool = False  # AI verdict differs from the human sky label
 
     def is_active(self) -> bool:
         return (self.sky_label != "Any" or self.weather != "Any"
-                or self.bright_moon_up or self.suspect_only)
+                or self.bright_moon_up or self.suspect_only or self.ai_disagrees)
 
 
 def extract_filter_meta(cal: dict) -> dict:
@@ -33,6 +34,7 @@ def extract_filter_meta(cal: dict) -> dict:
     w = cal.get("weather_context") or {}
     m = cal.get("moon_context") or {}
     rs = cal.get("roof_state") or {}
+    ai = cal.get("ai_suggestion") or {}
     return {
         "sky_label": labels.get("sky_condition") or "",
         "has_label": bool(labels.get("labeled_at")),
@@ -41,6 +43,8 @@ def extract_filter_meta(cal: dict) -> dict:
         "moon_bright": bool(m.get("is_bright_moon")),
         "moon_up": bool(m.get("moon_is_up")),
         "roof_open": rs.get("roof_open"),
+        "ai_sky": ai.get("sky_condition") or "",
+        "ai_present": bool(ai),
     }
 
 
@@ -52,6 +56,12 @@ def is_suspect(meta: dict) -> bool:
 def frame_matches(meta: dict, c: FilterCriteria) -> bool:
     if c.suspect_only and not is_suspect(meta):
         return False
+
+    if c.ai_disagrees:
+        # Only meaningful when both the human and the AI gave a sky verdict.
+        ai_sky = meta.get("ai_sky") or ""
+        if not ai_sky or not meta.get("sky_label") or ai_sky == meta.get("sky_label"):
+            return False
 
     if c.sky_label == "Unlabeled":
         if meta.get("has_label"):
