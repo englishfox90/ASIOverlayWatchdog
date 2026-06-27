@@ -238,7 +238,10 @@ class SkyClassifier:
     
     def _resize_image(self, img: np.ndarray, size: int) -> np.ndarray:
         """Center-crop to square then block-average (shared with training)."""
-        from ml.image_preprocess import resize_for_model
+        try:
+            from ml.image_preprocess import resize_for_model
+        except ImportError:  # run as a script: ml/ is on path, not the project root
+            from image_preprocess import resize_for_model
         return resize_for_model(img, size)
     
     def predict(self, image: np.ndarray, metadata: Optional[dict] = None) -> SkyPrediction:

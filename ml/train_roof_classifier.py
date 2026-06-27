@@ -130,7 +130,10 @@ class RoofDataset(Dataset):
     
     def resize_image(self, img: np.ndarray, size: int) -> np.ndarray:
         """Center-crop to square then block-average (shared with inference)."""
-        from ml.image_preprocess import resize_for_model
+        try:
+            from ml.image_preprocess import resize_for_model
+        except ImportError:  # run as a script: ml/ is on path, not the project root
+            from image_preprocess import resize_for_model
         return resize_for_model(img, size)
     
     def normalize(self, image: np.ndarray) -> np.ndarray:
