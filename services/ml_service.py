@@ -26,6 +26,7 @@ Usage:
     # - star_density: 0.0-1.0 | None
 """
 import os
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 import numpy as np
@@ -251,15 +252,19 @@ class MLService:
         
         if sky_enabled and roof_is_open and self._sky_classifier is not None:
             try:
+                moon = self._moon_context()
                 sky_meta = {
                     'corner_to_center_ratio': corner_analysis.get('corner_to_center_ratio', 1.0),
                     'median_lum': corner_analysis.get('frame_med', 0.0),
                     'is_astronomical_night': time_context.get('is_astronomical_night', False),
                     'hour': time_context.get('hour', 12),
-                    'moon_illumination': 0.0,  # Could fetch from moon service
-                    'moon_is_up': False,
+                    'moon_illumination': float(moon.get('illumination_pct') or 0.0),
+                    'moon_is_up': bool(moon.get('moon_is_up')),
                 }
-                
+                app_logger.debug(
+                    f"ML Service: sky moon_illum={sky_meta['moon_illumination']:.0f}% "
+                    f"moon_up={sky_meta['moon_is_up']}")
+
                 sky_result = self._sky_classifier.predict(image_array, sky_meta)
                 results['sky_condition'] = sky_result.sky_condition
                 results['sky_confidence'] = round(float(sky_result.sky_confidence), 3)
@@ -333,6 +338,22 @@ class MLService:
             app_logger.debug(f"ML Service: Corner analysis failed: {e}")
             return {'corner_med': 0.0, 'center_med': 0.0, 'frame_med': 0.0, 'corner_to_center_ratio': 1.0}
     
+    def _moon_context(self) -> Dict[str, Any]:
+        """Real moon illumination / up-state for the sky model — the same astral
+        source the training data used. Cached ~5 min (moon moves slowly); {} on error."""
+        cached = getattr(self, '_moon_cache', None)
+        now = time.time()
+        if cached and now - cached[0] < 300:
+            return cached[1]
+        try:
+            from services.moon import compute_moon_context
+            ctx = compute_moon_context() or {}
+        except Exception as e:
+            app_logger.debug(f"ML Service: moon context failed: {e}")
+            ctx = {}
+        self._moon_cache = (now, ctx)
+        return ctx
+
     def _compute_time_context(self) -> Dict[str, Any]:
         """Compute time context for ML features."""
         from datetime import datetime

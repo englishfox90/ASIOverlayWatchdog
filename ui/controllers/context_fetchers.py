@@ -8,151 +8,16 @@ from datetime import datetime, date, timedelta
 import time
 
 from services.logger import app_logger
-from services.config import Config
 
-try:
-    from astral import LocationInfo
-    from astral.moon import phase as moon_phase, moonrise, moonset
-    ASTRAL_AVAILABLE = True
-except ImportError:
-    ASTRAL_AVAILABLE = False
+# Moon math moved to services/moon.py so services can use it without importing
+# up into ui/controllers. Re-exported here for existing callers.
+from services.moon import get_configured_location, compute_moon_context  # noqa: F401
 
 try:
     import requests
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
-
-
-def get_configured_location():
-    """
-    Get latitude/longitude from weather config.
-    
-    Returns:
-        tuple: (latitude, longitude, location_name) or (None, None, None) if not configured
-    """
-    try:
-        config = Config()
-        weather_config = config.get('weather', {})
-        
-        lat_str = weather_config.get('latitude', '')
-        lon_str = weather_config.get('longitude', '')
-        location_name = weather_config.get('location', 'Observatory')
-        
-        if lat_str and lon_str:
-            return float(lat_str), float(lon_str), location_name
-        
-        return None, None, None
-    except Exception as e:
-        app_logger.debug(f"Could not get location from config: {e}")
-        return None, None, None
-
-
-def compute_moon_context():
-    """
-    Compute moon phase and visibility using astral.
-    
-    Moon phases (0-27.99 cycle):
-    - 0: New moon
-    - 7: First quarter
-    - 14: Full moon
-    - 21: Last quarter
-    
-    Returns:
-        dict with moon phase, illumination, and rise/set times
-    """
-    if not ASTRAL_AVAILABLE:
-        return {'available': False, 'reason': 'astral not installed'}
-    
-    try:
-        now = datetime.now()
-        today = date.today()
-        
-        # Get moon phase (0-27.99)
-        phase_value = moon_phase(today)
-        
-        # Calculate illumination percentage (approximate)
-        # Full moon (phase=14) = 100%, New moon (phase=0) = 0%
-        illumination = (1 - abs(phase_value - 14) / 14) * 100
-        
-        # Determine phase name
-        if phase_value < 1:
-            phase_name = 'new_moon'
-        elif phase_value < 7:
-            phase_name = 'waxing_crescent'
-        elif phase_value < 8:
-            phase_name = 'first_quarter'
-        elif phase_value < 14:
-            phase_name = 'waxing_gibbous'
-        elif phase_value < 15:
-            phase_name = 'full_moon'
-        elif phase_value < 21:
-            phase_name = 'waning_gibbous'
-        elif phase_value < 22:
-            phase_name = 'last_quarter'
-        else:
-            phase_name = 'waning_crescent'
-        
-        result = {
-            'available': True,
-            'phase_value': round(phase_value, 2),
-            'phase_name': phase_name,
-            'illumination_pct': round(illumination, 1),
-            'is_bright_moon': illumination > 50,  # More than half illuminated
-        }
-        
-        # Try to get moonrise/moonset times
-        lat, lon, location_name = get_configured_location()
-        if lat is not None and lon is not None:
-            try:
-                loc = LocationInfo(
-                    name=location_name,
-                    region="",
-                    timezone="UTC",
-                    latitude=lat,
-                    longitude=lon
-                )
-                
-                # Get moonrise/moonset (may raise if moon doesn't rise/set)
-                try:
-                    rise = moonrise(loc.observer, today)
-                    result['moonrise'] = rise.isoformat() if rise else None
-                except ValueError:
-                    result['moonrise'] = None  # Moon doesn't rise today
-                
-                try:
-                    set_time = moonset(loc.observer, today)
-                    result['moonset'] = set_time.isoformat() if set_time else None
-                except ValueError:
-                    result['moonset'] = None  # Moon doesn't set today
-                
-                # Determine if moon is currently up
-                local_tz_offset = time.timezone if time.daylight == 0 else time.altzone
-                now_utc = now + timedelta(seconds=local_tz_offset)
-                
-                moon_rise_naive = result.get('moonrise')
-                moon_set_naive = result.get('moonset')
-                
-                if moon_rise_naive and moon_set_naive:
-                    rise_dt = datetime.fromisoformat(moon_rise_naive.replace('+00:00', ''))
-                    set_dt = datetime.fromisoformat(moon_set_naive.replace('+00:00', ''))
-                    
-                    if rise_dt < set_dt:
-                        result['moon_is_up'] = rise_dt <= now_utc <= set_dt
-                    else:
-                        # Moon rises after it sets (crosses midnight)
-                        result['moon_is_up'] = now_utc >= rise_dt or now_utc <= set_dt
-                else:
-                    result['moon_is_up'] = None  # Can't determine
-                    
-            except Exception as e:
-                app_logger.debug(f"Could not get moonrise/moonset: {e}")
-        
-        return result
-        
-    except Exception as e:
-        app_logger.debug(f"Moon context calculation failed: {e}")
-        return {'available': False, 'reason': str(e)}
 
 
 def fetch_roof_state(nina_url="http://localhost:1888"):
