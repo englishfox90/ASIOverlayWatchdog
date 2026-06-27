@@ -47,8 +47,10 @@ class PreviewWidget(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Image label (centered)
-        self.image_label = QLabel("No image yet")
+        # Image label (centered). Starts empty — the message overlay below owns
+        # all "no camera / no image" messaging, so a placeholder here would just
+        # show through behind the translucent overlay as duplicate text.
+        self.image_label = QLabel("")
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setStyleSheet(f"""
             color: {Colors.text_muted};
