@@ -91,7 +91,7 @@ def main():
     ap.add_argument("--labels", default=None, help='Comma list, e.g. "Partly Cloudy,Overcast". Default: all.')
     ap.add_argument("--sample", type=int, default=0, help="Validate a random N-frame subset (0 = all).")
     ap.add_argument("--model", default=os.getenv("OPENROUTER_MODEL"), help="OpenRouter model slug.")
-    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--cost-per-image", type=float, default=0.005, help="Rough $/frame for the estimate.")
     ap.add_argument("--force", action="store_true", help="Re-validate even if this model already did.")
     ap.add_argument("--run", action="store_true", help="Actually call the API (else dry run).")

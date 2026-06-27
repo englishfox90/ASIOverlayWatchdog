@@ -6,9 +6,33 @@ import logging
 import logging.handlers
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from .app_config import APP_NAME, APP_DATA_FOLDER, LOG_FILE
+
+
+class SafeTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """TimedRotatingFileHandler that tolerates the log file being locked.
+
+    Dev tools (labeling_tool, validate_labels, ...) run as separate processes
+    while the 24/7 app holds sentinel.log open. On Windows the rename inside
+    doRollover then fails with PermissionError, and because rolloverAt is never
+    advanced it retries — and errors — on every record. Swallow the failure,
+    reopen the current file, and push rollover to the next period so the loser
+    of the race just keeps appending instead of spamming.
+    """
+
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except OSError:
+            try:
+                if self.stream is None and not self.delay:
+                    self.stream = self._open()
+            except OSError:
+                self.stream = None
+            self.rolloverAt = self.computeRollover(int(time.time()))
 
 
 class AppLogger:
@@ -68,7 +92,7 @@ class AppLogger:
         
         # Always create our own file handler
         log_file = self.log_dir / LOG_FILE
-        handler = logging.handlers.TimedRotatingFileHandler(
+        handler = SafeTimedRotatingFileHandler(
             log_file,
             when='midnight',
             interval=1,
