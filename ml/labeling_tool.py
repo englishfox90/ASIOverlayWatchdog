@@ -25,11 +25,16 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 
-from ml.labeling_io import find_sample_sets, load_fits_as_qpixmap, create_placeholder_pixmap
+from ml.labeling_io import (
+    find_sample_sets, load_fits_as_qpixmap, create_placeholder_pixmap,
+    remove_sample_files,
+)
 from ml.labels_widget import LabelsWidget
 from ml.context_widget import ContextPanel
 from ml.ai_worker import AiLabelWorker
 from ml.review_tab import ReviewTab, to_bool
+from ml.filter_bar import FilterBar
+from ml.label_filters import extract_filter_meta, frame_matches
 from services.logger import app_logger
 
 try:
@@ -52,6 +57,7 @@ class LabelingTool(QMainWindow):
         super().__init__()
         self.data_dir = data_dir
         self.samples = find_sample_sets(data_dir)
+        self.meta_cache = self._build_meta_cache()
         self.current_index = 0
         self.current_cal = {}
 
@@ -86,9 +92,25 @@ class LabelingTool(QMainWindow):
 
         if self.samples:
             self.labels_widget.update_unlabeled_count(self.samples)
+            self.labels_widget.set_jump_dates(self._available_dates())
+            self._update_filter_count()
             self.load_sample(0)
         else:
             QMessageBox.warning(self, "No Data", f"No calibration files found in:\n{data_dir}")
+
+    def _build_meta_cache(self) -> dict:
+        """ts -> compact filter metadata, read once so navigation never re-reads JSON."""
+        cache = {}
+        for sample in self.samples:
+            cal_path = sample.get('calibration')
+            if not cal_path:
+                continue
+            try:
+                with open(cal_path, 'r') as f:
+                    cache[sample['timestamp']] = extract_filter_meta(json.load(f))
+            except Exception:
+                continue
+        return cache
 
     def setup_ui(self):
         central = QWidget()
@@ -109,8 +131,15 @@ class LabelingTool(QMainWindow):
         main_layout.addWidget(self.tabs)
 
         labeling_widget = QWidget()
-        labeling_layout = QHBoxLayout(labeling_widget)
-        self.setup_labeling_ui(labeling_layout)
+        labeling_outer = QVBoxLayout(labeling_widget)
+
+        self.filter_bar = FilterBar()
+        self.filter_bar.changed.connect(self._on_view_changed)
+        labeling_outer.addWidget(self.filter_bar)
+
+        columns = QHBoxLayout()
+        self.setup_labeling_ui(columns)
+        labeling_outer.addLayout(columns)
         self.tabs.addTab(labeling_widget, "📝 Labeling")
 
         self.review_tab = ReviewTab(self.samples)
@@ -153,8 +182,12 @@ class LabelingTool(QMainWindow):
 
         self.labels_widget.prev_requested.connect(self.prev_sample)
         self.labels_widget.next_requested.connect(self.next_sample)
+        self.labels_widget.first_requested.connect(self.go_first)
+        self.labels_widget.last_requested.connect(self.go_last)
+        self.labels_widget.jump_date_requested.connect(self.jump_to_date)
         self.labels_widget.save_requested.connect(self._do_save)
         self.labels_widget.save_next_requested.connect(self._do_save_next)
+        self.labels_widget.remove_requested.connect(self._do_remove)
         self.labels_widget.skip_changed.connect(self._on_skip_changed)
 
     def on_tab_changed(self, index: int):
@@ -212,14 +245,113 @@ class LabelingTool(QMainWindow):
         QShortcut(QKeySequence("Space"), self, self._do_save_next)
         QShortcut(QKeySequence("Left"), self, self.prev_sample)
         QShortcut(QKeySequence("Right"), self, self.next_sample)
+        QShortcut(QKeySequence("Home"), self, self.go_first)
+        QShortcut(QKeySequence("End"), self, self.go_last)
+        QShortcut(QKeySequence("Delete"), self, self._do_remove)
 
-    def find_next_unlabeled(self, start: int, direction: int = 1) -> int:
+    # ── Filtering / stepping ──────────────────────────────────────────────────
+
+    def _filter_active(self) -> bool:
+        return self.filter_bar.criteria().is_active()
+
+    def _stepping_active(self) -> bool:
+        """True when navigation should skip non-matching frames."""
+        return self._filter_active() or self.labels_widget.skip_labeled_checked
+
+    def _matches(self, sample: dict) -> bool:
+        """Frame passes the filter bar AND the skip-labeled toggle."""
+        meta = self.meta_cache.get(sample.get('timestamp'))
+        if meta is None:
+            return False
+        if not frame_matches(meta, self.filter_bar.criteria()):
+            return False
+        if self.labels_widget.skip_labeled_checked and meta['has_label']:
+            return False
+        return True
+
+    def find_next_matching(self, start: int, direction: int = 1) -> int:
         index = start + direction
         while 0 <= index < len(self.samples):
-            if not self.labels_widget.is_sample_labeled(self.samples[index]):
+            if self._matches(self.samples[index]):
                 return index
             index += direction
         return -1
+
+    def find_first_match(self) -> int:
+        for i, sample in enumerate(self.samples):
+            if self._matches(sample):
+                return i
+        return -1
+
+    def find_last_match(self) -> int:
+        for i in range(len(self.samples) - 1, -1, -1):
+            if self._matches(self.samples[i]):
+                return i
+        return -1
+
+    def go_first(self):
+        if not self.samples:
+            return
+        target = self.find_first_match() if self._stepping_active() else 0
+        if target >= 0:
+            self.load_sample(target)
+
+    def go_last(self):
+        if not self.samples:
+            return
+        target = self.find_last_match() if self._stepping_active() else len(self.samples) - 1
+        if target >= 0:
+            self.load_sample(target)
+
+    def _available_dates(self) -> list:
+        """Unique capture dates (YYYYMMDD) as (display, raw) pairs, in order."""
+        seen = set()
+        dates = []
+        for sample in self.samples:
+            raw = sample.get('timestamp', '')[:8]
+            if len(raw) == 8 and raw.isdigit() and raw not in seen:
+                seen.add(raw)
+                dates.append((f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}", raw))
+        return dates
+
+    def jump_to_date(self, date_str: str):
+        """Jump to the first frame captured on/after the chosen night (absolute)."""
+        for i, sample in enumerate(self.samples):
+            if sample.get('timestamp', '')[:8] >= date_str:
+                self.load_sample(i)
+                return
+        if self.samples:
+            self.load_sample(len(self.samples) - 1)
+
+    def _matching_count(self) -> int:
+        return sum(1 for s in self.samples if self._matches(s))
+
+    def _update_filter_count(self):
+        self.filter_bar.set_count(self._matching_count(), len(self.samples))
+
+    def _on_view_changed(self):
+        """Filter or skip-labeled toggled: recount and jump to a match if needed."""
+        self.labels_widget.update_unlabeled_count(self.samples)
+        self._update_filter_count()
+        if not self.samples:
+            return
+        if self._stepping_active() and not self._matches(self.samples[self.current_index]):
+            nxt = self.find_next_matching(self.current_index, 1)
+            target = nxt if nxt >= 0 else self.find_first_match()
+            if target >= 0:
+                self.load_sample(target)
+                return
+        self._refresh_nav_buttons()
+
+    def _refresh_nav_buttons(self):
+        idx = self.current_index
+        if self._stepping_active():
+            prev_enabled = self.find_next_matching(idx, -1) >= 0
+            next_enabled = self.find_next_matching(idx, 1) >= 0
+        else:
+            prev_enabled = idx > 0
+            next_enabled = idx < len(self.samples) - 1
+        self.labels_widget.set_nav_enabled(prev_enabled, next_enabled)
 
     def load_sample(self, index: int):
         if not self.samples:
@@ -241,10 +373,9 @@ class LabelingTool(QMainWindow):
         sample = self.samples[index]
 
         folder_name = sample.get('folder', Path()).name
-        skip_mode = self.labels_widget.skip_labeled_checked
-        if skip_mode:
-            prev_enabled = self.find_next_unlabeled(index, -1) >= 0
-            next_enabled = self.find_next_unlabeled(index, 1) >= 0
+        if self._stepping_active():
+            prev_enabled = self.find_next_matching(index, -1) >= 0
+            next_enabled = self.find_next_matching(index, 1) >= 0
         else:
             prev_enabled = index > 0
             next_enabled = index < len(self.samples) - 1
@@ -403,32 +534,78 @@ class LabelingTool(QMainWindow):
         if 'calibration' not in sample:
             return
         if self.labels_widget.save_labels(self.current_cal, sample['calibration']):
+            self.meta_cache[sample['timestamp']] = extract_filter_meta(self.current_cal)
             self.labels_widget.update_unlabeled_count(self.samples)
+            self._update_filter_count()
 
     def _do_save_next(self):
         self._do_save()
         self.next_sample()
 
-    def _on_skip_changed(self):
+    def _do_remove(self):
+        """Move the current sample's files to the _removed folder and advance."""
+        if not self.samples:
+            return
+        sample = self.samples[self.current_index]
+        ts = sample.get('timestamp', '?')
+        trash_dir = self.data_dir / "_removed"
+        reply = QMessageBox.question(
+            self, "Remove image",
+            f"Move sample {ts} out of the dataset?\n\n"
+            f"Its calibration JSON and lum FITS are moved to:\n{trash_dir}\n"
+            f"(recoverable — move them back to undo).",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            moved = remove_sample_files(sample, trash_dir)
+        except Exception as e:
+            QMessageBox.warning(self, "Remove failed", f"Could not move files:\n{e}")
+            return
+
+        app_logger.info(f"Removed sample {ts}: moved {len(moved)} file(s) to {trash_dir}")
+        self.meta_cache.pop(ts, None)
+        del self.samples[self.current_index]      # in-place so ReviewTab's list stays in sync
+        self.labels_widget.mark_saved()           # nothing pending for the removed frame
+
+        if not self.samples:
+            self.current_cal = {}
+            QMessageBox.information(self, "Removed", "No samples remain in the dataset.")
+            return
+
         self.labels_widget.update_unlabeled_count(self.samples)
-        if self.labels_widget.skip_labeled_checked:
-            if self.labels_widget.is_sample_labeled(self.samples[self.current_index]):
-                self.next_sample()
+        self.labels_widget.set_jump_dates(self._available_dates())
+        self._update_filter_count()
+
+        new_index = min(self.current_index, len(self.samples) - 1)
+        if self._stepping_active() and not self._matches(self.samples[new_index]):
+            nxt = self.find_next_matching(new_index, 1)
+            if nxt < 0:
+                nxt = self.find_first_match()
+            if nxt >= 0:
+                new_index = nxt
+        self.current_index = new_index
+        self.load_sample(new_index)
+
+    def _on_skip_changed(self):
+        self._on_view_changed()
 
     def prev_sample(self):
-        if self.labels_widget.skip_labeled_checked:
-            next_idx = self.find_next_unlabeled(self.current_index, -1)
-            if next_idx >= 0:
-                self.load_sample(next_idx)
+        if self._stepping_active():
+            prev_idx = self.find_next_matching(self.current_index, -1)
+            if prev_idx >= 0:
+                self.load_sample(prev_idx)
         elif self.current_index > 0:
             self.load_sample(self.current_index - 1)
 
     def next_sample(self):
-        if self.labels_widget.skip_labeled_checked:
-            next_idx = self.find_next_unlabeled(self.current_index, 1)
+        if self._stepping_active():
+            next_idx = self.find_next_matching(self.current_index, 1)
             if next_idx >= 0:
                 self.load_sample(next_idx)
-            else:
+            elif self.labels_widget.skip_labeled_checked and not self._filter_active():
                 QMessageBox.information(self, "Done", "All samples have been labeled!")
         elif self.current_index < len(self.samples) - 1:
             self.load_sample(self.current_index + 1)

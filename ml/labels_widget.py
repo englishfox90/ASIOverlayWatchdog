@@ -18,8 +18,12 @@ class LabelsWidget(QWidget):
 
     prev_requested = Signal()
     next_requested = Signal()
+    first_requested = Signal()
+    last_requested = Signal()
+    jump_date_requested = Signal(str)
     save_requested = Signal()
     save_next_requested = Signal()
+    remove_requested = Signal()
     skip_changed = Signal()
 
     def __init__(self, parent=None):
@@ -32,7 +36,14 @@ class LabelsWidget(QWidget):
 
         # Navigation
         nav_group = QGroupBox("Navigation")
-        nav_layout = QHBoxLayout(nav_group)
+        nav_outer = QVBoxLayout(nav_group)
+        nav_layout = QHBoxLayout()
+        nav_outer.addLayout(nav_layout)
+
+        self.first_btn = QPushButton("⏮ First")
+        self.first_btn.setToolTip("Jump to the first sample (Home)")
+        self.first_btn.clicked.connect(self.first_requested)
+        nav_layout.addWidget(self.first_btn)
 
         self.prev_btn = QPushButton("← Previous (A)")
         self.prev_btn.clicked.connect(self.prev_requested)
@@ -46,6 +57,11 @@ class LabelsWidget(QWidget):
         self.next_btn.clicked.connect(self.next_requested)
         nav_layout.addWidget(self.next_btn)
 
+        self.last_btn = QPushButton("Last ⏭")
+        self.last_btn.setToolTip("Jump to the last sample (End)")
+        self.last_btn.clicked.connect(self.last_requested)
+        nav_layout.addWidget(self.last_btn)
+
         nav_layout.addSpacing(20)
 
         self.skip_labeled = QCheckBox("Skip labeled")
@@ -56,6 +72,16 @@ class LabelsWidget(QWidget):
         self.unlabeled_count = QLabel("")
         self.unlabeled_count.setStyleSheet("color: #888;")
         nav_layout.addWidget(self.unlabeled_count)
+
+        jump_layout = QHBoxLayout()
+        jump_layout.addWidget(QLabel("Jump to date:"))
+        self.date_combo = QComboBox()
+        self.date_combo.setMinimumWidth(160)
+        self.date_combo.setToolTip("Jump to the first frame captured on a given night")
+        self.date_combo.activated.connect(self._on_date_activated)
+        jump_layout.addWidget(self.date_combo)
+        jump_layout.addStretch()
+        nav_outer.addLayout(jump_layout)
 
         layout.addWidget(nav_group)
 
@@ -145,6 +171,12 @@ class LabelsWidget(QWidget):
 
         layout.addLayout(save_layout)
 
+        self.remove_btn = QPushButton("🗑 Remove image (Del)")
+        self.remove_btn.setStyleSheet("background: #7f1d1d; color: white; padding: 8px;")
+        self.remove_btn.setToolTip("Move this sample out of the dataset, into the _removed folder (recoverable)")
+        self.remove_btn.clicked.connect(self.remove_requested)
+        layout.addWidget(self.remove_btn)
+
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #888;")
         layout.addWidget(self.status_label)
@@ -166,6 +198,25 @@ class LabelsWidget(QWidget):
         self.timestamp_label.setText(f"[{folder}]  Timestamp: {timestamp}")
         self.prev_btn.setEnabled(prev_enabled)
         self.next_btn.setEnabled(next_enabled)
+
+    def set_nav_enabled(self, prev_enabled: bool, next_enabled: bool):
+        self.prev_btn.setEnabled(prev_enabled)
+        self.next_btn.setEnabled(next_enabled)
+
+    def set_jump_dates(self, dates: list):
+        """Populate the date jump dropdown. dates: list of (display, raw) tuples."""
+        self.date_combo.blockSignals(True)
+        self.date_combo.clear()
+        self.date_combo.addItem("— select —", "")
+        for display, raw in dates:
+            self.date_combo.addItem(display, raw)
+        self.date_combo.setCurrentIndex(0)
+        self.date_combo.blockSignals(False)
+
+    def _on_date_activated(self, index: int):
+        raw = self.date_combo.itemData(index)
+        if raw:
+            self.jump_date_requested.emit(raw)
 
     def update_unlabeled_count(self, samples: list):
         total = len(samples)
@@ -321,11 +372,18 @@ class LabelsWidget(QWidget):
         labels['stars_visible'] = self.stars_visible.isChecked()
         labels['star_density'] = self.star_density.value() if self.stars_visible.isChecked() else 0
         labels['moon_visible'] = self.moon_visible.isChecked()
-        labels['clouds_visible'] = self.clouds_visible.isChecked()
 
-        sky_cond = self.sky_condition.currentText()
-        if sky_cond:
-            labels['sky_condition'] = sky_cond
+        if self.roof_open.isChecked():
+            # Sky condition is only meaningful when the pier camera can see the sky.
+            labels['clouds_visible'] = self.clouds_visible.isChecked()
+            sky_cond = self.sky_condition.currentText()
+            if sky_cond:
+                labels['sky_condition'] = sky_cond
+            else:
+                labels.pop('sky_condition', None)
+        else:
+            labels.pop('clouds_visible', None)
+            labels.pop('sky_condition', None)
 
         notes = self.notes_edit.text().strip()
         if notes:
