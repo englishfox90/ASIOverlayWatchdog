@@ -39,7 +39,10 @@ def main():
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--out-root", default="ml/models/_size_sweep")
+    ap.add_argument("--pool", action="store_true",
+                    help="Global-avg-pool variant (input-size independent, fewer params).")
     args = ap.parse_args()
+    tag = "_pool" if args.pool else ""
 
     sizes = [int(s) for s in args.sizes.split(",")]
     bad = [s for s in sizes if s % 32]
@@ -54,11 +57,12 @@ def main():
         print("#" * 64)
         m = train_model(
             data_dir=Path(args.data_dir),
-            output_dir=Path(args.out_root) / f"s{sz}",
+            output_dir=Path(args.out_root) / f"s{sz}{tag}",
             image_size=sz,
             batch_size=args.batch_size,
             epochs=args.epochs,
-            model_name=f"sky_classifier_s{sz}",
+            model_name=f"sky_classifier_s{sz}{tag}",
+            use_pool=args.pool,
         )
         if m:
             results.append(m)

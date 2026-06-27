@@ -85,11 +85,12 @@ if TORCH_AVAILABLE:
     class SkyClassifierCNN(nn.Module):
         """CNN architecture - must match training."""
         
-        def __init__(self, image_size: int = 256, metadata_features: int = 6):
+        def __init__(self, image_size: int = 256, metadata_features: int = 6, use_pool: bool = False):
             super().__init__()
-            
+
             self.image_size = image_size
-            
+            self.use_pool = use_pool
+
             self.conv1 = nn.Conv2d(1, 32, 3, padding=1)
             self.bn1 = nn.BatchNorm2d(32)
             self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
@@ -103,9 +104,11 @@ if TORCH_AVAILABLE:
             
             self.pool = nn.MaxPool2d(2, 2)
             self.dropout = nn.Dropout(0.3)
-            
-            conv_output_size = (image_size // 32) ** 2 * 256
-            
+
+            # Global-avg-pool decouples the FC from input size (fixed 256 features)
+            self.gap = nn.AdaptiveAvgPool2d(1) if use_pool else None
+            conv_output_size = 256 if use_pool else (image_size // 32) ** 2 * 256
+
             self.fc_image = nn.Linear(conv_output_size, 256)
             self.fc_meta = nn.Linear(metadata_features, 32)
             self.fc_fusion = nn.Linear(256 + 32, 128)
@@ -121,7 +124,9 @@ if TORCH_AVAILABLE:
             x = self.pool(F.relu(self.bn3(self.conv3(x))))
             x = self.pool(F.relu(self.bn4(self.conv4(x))))
             x = self.pool(F.relu(self.bn5(self.conv5(x))))
-            
+
+            if self.gap is not None:
+                x = self.gap(x)
             x = x.view(x.size(0), -1)
             x = self.dropout(F.relu(self.fc_image(x)))
             
@@ -195,11 +200,12 @@ class SkyClassifier:
             # Get model parameters
             self.image_size = checkpoint.get('image_size', 256)
             metadata_features = checkpoint.get('metadata_features', 6)
-            
+
             # Create and load model
             self.model = SkyClassifierCNN(
                 image_size=self.image_size,
-                metadata_features=metadata_features
+                metadata_features=metadata_features,
+                use_pool=checkpoint.get('use_pool', False),
             )
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.model.to(self.device)

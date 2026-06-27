@@ -62,11 +62,12 @@ class SkyClassifierCNN(nn.Module):
     Larger architecture than roof model for better detail detection.
     """
     
-    def __init__(self, image_size: int = 256, metadata_features: int = 6):
+    def __init__(self, image_size: int = 256, metadata_features: int = 6, use_pool: bool = False):
         super().__init__()
-        
+
         self.image_size = image_size
-        
+        self.use_pool = use_pool
+
         # Deeper CNN backbone for larger images
         self.conv1 = nn.Conv2d(1, 32, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(32)
@@ -81,11 +82,13 @@ class SkyClassifierCNN(nn.Module):
         
         self.pool = nn.MaxPool2d(2, 2)
         self.dropout = nn.Dropout(0.3)
-        
-        # Calculate flattened size after conv layers
-        # 256 -> 128 -> 64 -> 32 -> 16 -> 8 (5 pooling layers)
-        conv_output_size = (image_size // 32) ** 2 * 256
-        
+
+        # Global-avg-pool decouples the FC from input size: a fixed 256 features
+        # instead of (image_size//32)^2 * 256, so far fewer params / less overfit
+        # and resolution can scale freely. Otherwise: flatten the conv output.
+        self.gap = nn.AdaptiveAvgPool2d(1) if use_pool else None
+        conv_output_size = 256 if use_pool else (image_size // 32) ** 2 * 256
+
         # Image feature extraction
         self.fc_image = nn.Linear(conv_output_size, 256)
         
@@ -108,8 +111,10 @@ class SkyClassifierCNN(nn.Module):
         x = self.pool(F.relu(self.bn3(self.conv3(x))))
         x = self.pool(F.relu(self.bn4(self.conv4(x))))
         x = self.pool(F.relu(self.bn5(self.conv5(x))))
-        
-        # Flatten
+
+        # Flatten (global-avg-pool first if enabled)
+        if self.gap is not None:
+            x = self.gap(x)
         x = x.view(x.size(0), -1)
         x = self.dropout(F.relu(self.fc_image(x)))
         
@@ -268,6 +273,7 @@ def train_model(
     learning_rate: float = 0.001,
     val_split: float = 0.15,
     model_name: str = 'sky_classifier_v1',
+    use_pool: bool = False,
 ):
     """
     Train the sky/celestial classifier with GPU optimization.
@@ -344,10 +350,10 @@ def train_model(
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     
-    model = SkyClassifierCNN(image_size=image_size, metadata_features=6)
+    model = SkyClassifierCNN(image_size=image_size, metadata_features=6, use_pool=use_pool)
     model = model.to(device)
     print(f"\nModel created with {sum(p.numel() for p in model.parameters()):,} parameters "
-          f"(image_size={image_size})")
+          f"(image_size={image_size}, global_avg_pool={use_pool})")
     
     # Note: torch.compile() requires Triton which is not available on Windows
     # Skipping compilation - still get good speedup from mixed precision and large batches
@@ -511,6 +517,7 @@ def train_model(
         'test_samples': len(test_samples),
         'epochs': epochs,
         'best_epoch': best_epoch,
+        'use_pool': use_pool,
     }, model_path)
     
     print(f"\n✓ Model saved to: {model_path}")
@@ -626,9 +633,12 @@ def main():
                         help="Number of epochs")
     parser.add_argument("--lr", type=float, default=0.001,
                         help="Learning rate")
-    
+    parser.add_argument("--pool", action="store_true",
+                        help="Use global-average-pool before the FC (fewer params, "
+                             "input-size independent).")
+
     args = parser.parse_args()
-    
+
     train_model(
         data_dir=Path(args.data_dir),
         output_dir=Path(args.output_dir),
@@ -636,6 +646,7 @@ def main():
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.lr,
+        use_pool=args.pool,
     )
 
 
