@@ -1,5 +1,6 @@
 import io
 import os
+import queue
 import random
 import threading
 import traceback
@@ -199,6 +200,8 @@ class _MainWindowOutputMixin:
             # preview_image may carry the all-sky overlay (GUI only).
             # output_image is always clean — sent to file sinks and servers.
             self.live_panel.update_preview(preview_image, metadata)
+            self.status_strip.update_from_metadata(metadata)
+            self.telemetry_bar.update_from_metadata(metadata)
 
             output_config = self.config.get('output', {})
             discord_config = self.config.get('discord', {})
@@ -207,10 +210,16 @@ class _MainWindowOutputMixin:
                 discord_config.get('enabled', False)
             )
 
+            # Hand the heavy output work to a background thread. The library
+            # archive (a full-res PIL copy), the web push (a full-res PNG encode
+            # then decode + LANCZOS downsize), and Discord all used to run here,
+            # synchronously, on the GUI thread — a multi-hundred-ms freeze every
+            # frame. output_image is never mutated after the processor emits it,
+            # so the worker can own it without a defensive copy on this thread.
+            self._dispatch_outputs(output_path, output_image, metadata, has_outputs)
+
             if has_outputs:
                 self.app_bar.set_status('sending')
-                self._push_to_output_servers(output_path, output_image)
-
                 if self.is_capturing:
                     QTimer.singleShot(300, lambda: self.app_bar.set_status('waiting'))
                 else:
@@ -260,12 +269,21 @@ class _MainWindowOutputMixin:
     # OUTPUT SERVER MANAGEMENT
     # =========================================================================
 
+    # Re-attempt cadence for a web server that failed to bind. At logon
+    # autostart the configured bind address (a Tailscale/LAN IP) may not be up
+    # on any interface yet, so the one-shot start fails; without a retry the
+    # web output stays off for the whole session even though Discord — which
+    # binds nothing — keeps working.
+    _WEB_SERVER_RETRY_MS = 15000
+
     def _ensure_output_servers_started(self):
         output_config = self.config.get('output', {})
 
         if output_config.get('webserver_enabled', False):
             if not self.web_server or not self.web_server.running:
                 self._start_web_server()
+        else:
+            self._cancel_web_server_retry()
 
     def _start_web_server(self):
         output_config = self.config.get('output', {})
@@ -275,8 +293,12 @@ class _MainWindowOutputMixin:
         image_path = output_config.get('webserver_path', '/latest')
         status_path = output_config.get('webserver_status_path', '/status')
         docs_path = output_config.get('webserver_docs_path', '/docs')
+        library_path = output_config.get('webserver_library_path', '/library')
 
-        self.web_server = WebOutputServer(host, port, image_path, status_path, docs_path)
+        self.web_server = WebOutputServer(
+            host, port, image_path, status_path, docs_path,
+            library_path=library_path, image_library=self.image_library,
+        )
         if self.web_server.start():
             url = self.web_server.get_url()
             status_url = self.web_server.get_status_url()
@@ -284,6 +306,7 @@ class _MainWindowOutputMixin:
             app_logger.info(f"Status endpoint: {status_url}")
             self._notify(f"Web server started: {url}")
             self.app_bar.set_web_status(True, True)
+            self._cancel_web_server_retry()
             self._start_capture_status_timer()
             self.push_capture_status()
         else:
@@ -291,8 +314,38 @@ class _MainWindowOutputMixin:
             self._notify("Web server failed to start", "error")
             self.web_server = None
             self.app_bar.set_web_status(True, False)
+            self._schedule_web_server_retry()
+
+    def _schedule_web_server_retry(self):
+        """Queue another web-server start attempt. The bind may fail at logon
+        autostart because the bind address (Tailscale/LAN IP) isn't up yet;
+        keep retrying until it binds rather than giving up for the session."""
+        if self._web_server_retry_timer is None:
+            self._web_server_retry_timer = QTimer(self)
+            self._web_server_retry_timer.setSingleShot(True)
+            self._web_server_retry_timer.timeout.connect(self._retry_web_server)
+        if not self._web_server_retry_timer.isActive():
+            app_logger.info(
+                f"Web server start failed — retrying in "
+                f"{self._WEB_SERVER_RETRY_MS // 1000}s"
+            )
+            self._web_server_retry_timer.start(self._WEB_SERVER_RETRY_MS)
+
+    def _cancel_web_server_retry(self):
+        if self._web_server_retry_timer is not None and self._web_server_retry_timer.isActive():
+            self._web_server_retry_timer.stop()
+
+    def _retry_web_server(self):
+        output_config = self.config.get('output', {})
+        if not output_config.get('webserver_enabled', False):
+            return
+        if self.web_server and self.web_server.running:
+            return
+        app_logger.info("Retrying web server start...")
+        self._start_web_server()
 
     def _stop_web_server(self):
+        self._cancel_web_server_retry()
         self._stop_capture_status_timer()
         if self.web_server:
             try:
@@ -413,6 +466,66 @@ class _MainWindowOutputMixin:
             last_capture_epoch=(cc.last_successful_frame_epoch() if cc else None),
             last_error=self._last_capture_error, recovery=recovery,
         )
+
+    # =========================================================================
+    # OUTPUT DISPATCH (off the GUI thread)
+    # =========================================================================
+
+    # Small bound — the processor emits one frame at a time, so the dispatcher
+    # is normally idle; this is burst headroom for fast (daytime) cadence. If it
+    # ever fills, the oldest pending frame is dropped (newest /latest wins).
+    _OUTPUT_QUEUE_MAXSIZE = 4
+    _OUTPUT_STOP = object()
+
+    def _start_output_dispatcher(self):
+        """Create the dispatch queue and start its worker. Called once at init."""
+        self._output_dispatch_queue = queue.Queue(maxsize=self._OUTPUT_QUEUE_MAXSIZE)
+        self._output_dispatch_thread = threading.Thread(
+            target=self._output_dispatch_loop, name="OutputDispatch", daemon=True
+        )
+        self._output_dispatch_thread.start()
+
+    def _dispatch_outputs(self, output_path, output_image, metadata, has_outputs):
+        """Queue the library archive + server push for the background worker.
+
+        Non-blocking. Drops the oldest pending job if the worker has fallen
+        behind, so a slow encode never stalls the capture/GUI thread.
+        """
+        self._put_dispatch_job((output_path, output_image, metadata, has_outputs))
+
+    def _put_dispatch_job(self, job):
+        """Put a job on the dispatch queue, dropping the oldest if it is full."""
+        try:
+            self._output_dispatch_queue.put_nowait(job)
+        except queue.Full:
+            try:
+                self._output_dispatch_queue.get_nowait()  # drop oldest
+                self._output_dispatch_queue.put_nowait(job)
+            except (queue.Empty, queue.Full):
+                pass
+
+    def _output_dispatch_loop(self):
+        while True:
+            job = self._output_dispatch_queue.get()
+            if job is self._OUTPUT_STOP:
+                break
+            output_path, output_image, metadata, has_outputs = job
+            try:
+                if self.image_library:
+                    self.image_library.enqueue(output_image, metadata)
+                if has_outputs:
+                    self._push_to_output_servers(output_path, output_image)
+            except Exception as e:
+                app_logger.error(f"Output dispatch failed: {e}")
+                app_logger.error(traceback.format_exc())
+
+    def _stop_output_dispatcher(self):
+        """Stop the dispatch worker, letting an in-flight push finish."""
+        thread = getattr(self, '_output_dispatch_thread', None)
+        if not thread or not thread.is_alive():
+            return
+        self._put_dispatch_job(self._OUTPUT_STOP)  # drop-oldest guarantees it lands
+        thread.join(timeout=5.0)
 
     def _push_to_output_servers(self, image_path: str, processed_img):
         try:

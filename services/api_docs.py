@@ -30,10 +30,104 @@ def _capture_schema_properties() -> dict:
     return props
 
 
-def build_openapi_spec(*, image_path: str = "/latest", status_path: str = "/status",
-                       docs_path: str = "/docs", openapi_path: str = "/openapi.json") -> dict:
-    """Build the OpenAPI 3.0 spec describing the live server's actual routes."""
+def _library_paths(library_path: str) -> dict:
+    """OpenAPI ``paths`` entries for the image library endpoints."""
     return {
+        library_path: {
+            "get": {
+                "summary": "List archived library images (paginated, newest first)",
+                "description": (
+                    "Returns a paginated manifest of the rolling image library — "
+                    "downscaled frames retained for a bounded window. Filter with "
+                    "'since'/'until' (epoch seconds or ISO 8601) and page with "
+                    "'limit'/'offset'."
+                ),
+                "parameters": [
+                    {"name": "since", "in": "query", "required": False,
+                     "schema": {"type": "string"},
+                     "description": "Lower bound on capture time (epoch seconds or ISO 8601)."},
+                    {"name": "until", "in": "query", "required": False,
+                     "schema": {"type": "string"},
+                     "description": "Upper bound on capture time (epoch seconds or ISO 8601)."},
+                    {"name": "limit", "in": "query", "required": False,
+                     "schema": {"type": "integer", "default": 100, "maximum": 500}},
+                    {"name": "offset", "in": "query", "required": False,
+                     "schema": {"type": "integer", "default": 0}},
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Library manifest",
+                        "content": {"application/json": {
+                            "schema": {"$ref": "#/components/schemas/LibraryManifest"}}},
+                    }
+                },
+            }
+        },
+        library_path + "/image": {
+            "get": {
+                "summary": "Fetch one archived library image by id",
+                "description": (
+                    "Returns the JPEG for a single library entry. Supports "
+                    "ETag/If-None-Match; archived frames are immutable so the "
+                    "response is long-cacheable."
+                ),
+                "parameters": [
+                    {"name": "id", "in": "query", "required": True,
+                     "schema": {"type": "integer"},
+                     "description": "Library image id (from the manifest)."},
+                ],
+                "responses": {
+                    "200": {"description": "Image bytes", "content": {"image/jpeg": {}}},
+                    "304": {"description": "Not Modified (ETag matched)"},
+                    "400": {"description": "Missing or invalid 'id'"},
+                    "404": {"description": "No image with that id"},
+                },
+            }
+        },
+    }
+
+
+def _library_schemas() -> dict:
+    """OpenAPI component schemas for the library manifest payload."""
+    return {
+        "LibraryImage": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer"},
+                "captured_at": {"type": "integer", "description": "Capture time, epoch seconds (PC local)."},
+                "url": {"type": "string", "description": "Relative URL to fetch this image."},
+                "width": {"type": "integer", "nullable": True},
+                "height": {"type": "integer", "nullable": True},
+                "bytes": {"type": "integer"},
+                "session": {"type": "string", "nullable": True},
+                "exposure": {"type": "string", "nullable": True},
+                "gain": {"type": "string", "nullable": True},
+                "temp": {"type": "string", "nullable": True},
+                "camera": {"type": "string", "nullable": True},
+                "weather": {"type": "string", "nullable": True},
+            },
+        },
+        "LibraryManifest": {
+            "type": "object",
+            "properties": {
+                "total": {"type": "integer", "description": "Total matching entries (ignores paging)."},
+                "limit": {"type": "integer"},
+                "offset": {"type": "integer"},
+                "images": {"type": "array", "items": {"$ref": "#/components/schemas/LibraryImage"}},
+            },
+        },
+    }
+
+
+def build_openapi_spec(*, image_path: str = "/latest", status_path: str = "/status",
+                       docs_path: str = "/docs", openapi_path: str = "/openapi.json",
+                       library_path: str | None = None) -> dict:
+    """Build the OpenAPI 3.0 spec describing the live server's actual routes.
+
+    ``library_path`` is included only when the image library API is enabled;
+    pass None to omit those routes so the docs never describe a 404.
+    """
+    spec = {
         "openapi": "3.0.3",
         "info": {
             "title": "PFR Sentinel HTTP API",
@@ -120,6 +214,12 @@ def build_openapi_spec(*, image_path: str = "/latest", status_path: str = "/stat
         },
     }
 
+    if library_path:
+        spec["paths"].update(_library_paths(library_path))
+        spec["components"]["schemas"].update(_library_schemas())
+
+    return spec
+
 
 # --- HTML rendering -------------------------------------------------------
 
@@ -174,6 +274,51 @@ def _esc(text: str) -> str:
     return _html.escape(str(text))
 
 
+def _html_table(headers: list, rows: list, label: str = None) -> str:
+    """Wrap pre-built <tr> ``rows`` in a table with the given column ``headers``.
+
+    An optional ``label`` renders a small caption tag above the table.
+    """
+    tag = f"<div class='tag'>{_esc(label)}</div>" if label else ""
+    head = "".join(f"<th>{_esc(h)}</th>" for h in headers)
+    return f"{tag}<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+
+
+def _render_params(op: dict) -> str:
+    """Render an operation's query/path parameters as a small table, if any."""
+    params = op.get("parameters") or []
+    if not params:
+        return ""
+    rows = []
+    for p in params:
+        schema = p.get("schema", {})
+        default = schema.get("default")
+        extra = f" (default {_esc(default)})" if default is not None else ""
+        req = "yes" if p.get("required") else "no"
+        rows.append(
+            f"<tr><td class='path'>{_esc(p.get('name', ''))}</td>"
+            f"<td class='type'>{_esc(schema.get('type', ''))}{extra}</td>"
+            f"<td>{_esc(p.get('in', ''))}</td>"
+            f"<td>{_esc(req)}</td>"
+            f"<td>{_esc(p.get('description', ''))}</td></tr>"
+        )
+    return _html_table(["Name", "Type", "In", "Required", "Description"], rows,
+                       label="Query parameters")
+
+
+def _render_responses(op: dict) -> str:
+    """Render an operation's response status codes + descriptions, if any."""
+    responses = op.get("responses") or {}
+    if not responses:
+        return ""
+    rows = [
+        f"<tr><td class='path'>{_esc(code)}</td>"
+        f"<td>{_esc(meta.get('description', ''))}</td></tr>"
+        for code, meta in responses.items()
+    ]
+    return _html_table(["Status", "Description"], rows, label="Responses")
+
+
 def render_docs_html(spec: dict) -> str:
     """Render the OpenAPI spec to a self-contained HTML reference page."""
     info = spec.get("info", {})
@@ -191,26 +336,25 @@ def render_docs_html(spec: dict) -> str:
                 f'<div class="endpoint">'
                 f'<span class="method">{_esc(method.upper())}</span>'
                 f'<span class="path">{_esc(path)}</span>'
-                f'<div><strong>{summary}</strong></div>{desc_html}</div>'
+                f'<div><strong>{summary}</strong></div>{desc_html}'
+                f'{_render_params(op)}{_render_responses(op)}</div>'
             )
 
-    # Capture fields table from the shared catalog (via the spec's schema).
+    # Bespoke table for the nested /status `capture` schema fields — this
+    # introspects a response schema's sub-object, not endpoint params/responses,
+    # so it stays separate from the generic _render_* helpers.
     capture_props = (
         spec.get("components", {}).get("schemas", {})
         .get("Status", {}).get("properties", {})
         .get("capture", {}).get("properties", {})
     )
-    rows = []
-    for name, meta in capture_props.items():
-        rows.append(
-            f"<tr><td class='path'>{_esc(name)}</td>"
-            f"<td class='type'>{_esc(meta.get('type', ''))}</td>"
-            f"<td>{_esc(meta.get('description', ''))}</td></tr>"
-        )
-    capture_table = (
-        "<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
-    )
+    rows = [
+        f"<tr><td class='path'>{_esc(name)}</td>"
+        f"<td class='type'>{_esc(meta.get('type', ''))}</td>"
+        f"<td>{_esc(meta.get('description', ''))}</td></tr>"
+        for name, meta in capture_props.items()
+    ]
+    capture_table = _html_table(["Field", "Type", "Description"], rows)
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">

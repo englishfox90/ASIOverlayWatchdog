@@ -41,8 +41,8 @@ DEFAULT_CONFIG = {
     "output_directory": os.path.join(get_app_data_dir(), DEFAULT_OUTPUT_SUBFOLDER),
     "filename_pattern": "latestImage",
     "output_format": "jpg",
-    "jpg_quality": 85,
-    "resize_percent": 85,
+    "jpg_quality": 100,
+    "resize_percent": 74,
     "timestamp_corner": False,
     
     # Output mode settings
@@ -55,14 +55,19 @@ DEFAULT_CONFIG = {
         "webserver_port": 8080,
         "webserver_path": "/latest",
         "webserver_status_path": "/status",
-        "webserver_docs_path": "/docs"
+        "webserver_docs_path": "/docs",
+        "webserver_library_path": "/library"
     },
     
     # ZWO Camera settings
     "zwo_sdk_path": resource_path("ASICamera2.dll"),
     "zwo_camera_index": 0,
     "zwo_camera_name": "",  # Last selected camera name
-    "zwo_selected_camera": 0,  # Last selected camera index
+    "zwo_selected_camera": 0,  # Last selected camera index (transient — shifts on hot-plug)
+    # Stable hardware serial (ASIGetSerialNumber, 16-hex). The authoritative
+    # identity: index and model name are non-unique/unstable. Learned on the
+    # first clean connect for configs that predate this key.
+    "zwo_selected_camera_serial": "",
     
     # Per-camera profiles (NEW: stores settings per camera to prevent cross-contamination)
     # NOTE: auto_exposure is NOT stored here - it's a global algorithm setting, not camera-specific
@@ -82,8 +87,8 @@ DEFAULT_CONFIG = {
     },
     
     # Global camera settings (NOT per-camera — apply to the whole capture loop)
-    "zwo_interval": 5.0,          # seconds between captures
-    "zwo_auto_exposure": False,   # auto-exposure algorithm enabled (global toggle)
+    "zwo_interval": 300.0,        # seconds between captures
+    "zwo_auto_exposure": True,    # auto-exposure algorithm enabled (global toggle)
     
     # Scheduled capture settings
     # mode:
@@ -91,19 +96,19 @@ DEFAULT_CONFIG = {
     #   "gated"    — only capture inside the time window; disconnect camera outside
     #   "variable" — always capture, but use scheduled_window_interval inside the
     #                window and zwo_interval outside (e.g. fast at night, slow by day)
-    "scheduled_capture_mode": "always",
-    "scheduled_capture_enabled": False,     # legacy flag — kept in sync with mode for back-compat
-    "scheduled_start_time": "17:00",        # 5:00 PM — window start (24hr)
+    "scheduled_capture_mode": "variable",
+    "scheduled_capture_enabled": True,      # legacy flag — kept in sync with mode for back-compat
+    "scheduled_start_time": "16:00",        # 4:00 PM — window start (24hr)
     "scheduled_end_time": "09:00",          # 9:00 AM — window end (next day for overnight)
-    "scheduled_window_interval": 5.0,       # seconds between captures when inside the window (variable mode only)
+    "scheduled_window_interval": 30.0,      # seconds between captures when inside the window (variable mode only)
     
     # White Balance configuration
     "white_balance": {
-        "mode": "asi_auto",  # "asi_auto" | "manual" | "gray_world"
+        "mode": "gray_world",  # "asi_auto" | "manual" | "gray_world"
         "manual_red_gain": 1.0,
         "manual_blue_gain": 1.0,
         "gray_world_low_pct": 5,
-        "gray_world_high_pct": 95
+        "gray_world_high_pct": 100
     },
     
     # Analytics (PostHog)
@@ -115,19 +120,20 @@ DEFAULT_CONFIG = {
 
     "auto_brightness": False,  # Automatically adjust brightness
     "brightness_factor": 1.0,  # Brightness multiplier (0.5 to 2.0, 1.0 = neutral)
-    "saturation_factor": 1.0,  # Saturation multiplier (0.0 to 2.0, 1.0 = neutral)
+    "saturation_factor": 0.98,  # Saturation multiplier (0.0 to 2.0, 1.0 = neutral)
     
     # Auto Stretch settings (MTF - Midtone Transfer Function)
     "auto_stretch": {
-        "enabled": False,
-        "target_median": 0.25,  # Target median value (0.0-1.0, default 0.25 = quarter brightness)
-        "linked_stretch": True,  # Apply same stretch to all RGB channels (False = per-channel MAD clipping)
+        "enabled": True,
+        "target_median": 0.15,  # Target median value (0.0-1.0, default 0.25 = quarter brightness)
+        "linked_stretch": False,  # Apply same stretch to all RGB channels (False = per-channel MAD clipping)
         "preserve_blacks": True,  # Keep true blacks dark instead of lifting to grey
         "black_point": 0.0,  # Manual black point (0.0-0.1) - pixels below this stay black
-        "shadow_aggressiveness": 2.8,  # MAD multiplier for shadow clipping (1.5=aggressive, 2.8=standard, 4.0=gentle)
+        "shadow_aggressiveness": 1.8,  # MAD multiplier for shadow clipping (1.5=aggressive, 2.8=standard, 4.0=gentle)
         "saturation_boost": 1.5,  # Post-stretch saturation boost (1.0=none, 1.5=moderate, 2.0=strong)
         "normalize_channels": True,  # Equalize R/G/B medians before stretch (fixes color cast in dark scenes)
-        "dark_scene_threshold": 0.05  # Median below this triggers dark scene mode (0.0-0.2)
+        "dark_scene_threshold": 0.12,  # Median below this triggers dark scene mode (0.0-0.2)
+        "scnr_amount": 0.46  # Subtractive chromatic noise reduction strength (0.0=off, 1.0=max green removal)
     },
 
     # Star sharpening — cosmetic unsharp mask applied before overlay rendering
@@ -188,7 +194,19 @@ DEFAULT_CONFIG = {
     "cleanup_enabled": False,
     "cleanup_max_size_gb": 10.0,
     "cleanup_strategy": "oldest",
-    
+
+    # Image library — rolling store of downscaled (Discord-size) frames,
+    # retained by age AND size, browsable in-app and over the web API.
+    "library": {
+        "enabled": True,
+        "retention_days": 7,
+        "max_size_gb": 2.0,
+        "max_dimension": 750,   # longest-edge px; matches the Discord image size
+        "jpeg_quality": 85,
+        "api_enabled": True,    # expose the /library web endpoints
+        "prune_interval_minutes": 15,
+    },
+
     # Weather settings (OpenWeatherMap)
     "weather": {
         "enabled": False,  # Set to True when API key and location configured
@@ -527,6 +545,11 @@ class Config:
                         from .config_migrate import migrate_legacy_camera_keys
                         loaded = migrate_legacy_camera_keys(loaded)
 
+                        # Drop profile keys that are pre-serial name-bug
+                        # artefacts ("Camera 0", "... (Index: 2)").
+                        from .camera_profiles import prune_bogus_profiles
+                        loaded = prune_bogus_profiles(loaded)
+
                         # Merge with defaults to ensure new keys exist
                         config = copy.deepcopy(DEFAULT_CONFIG)
 
@@ -646,84 +669,28 @@ class Config:
         with self._lock:
             self.data["overlays"] = overlays
     
-    def get_camera_profile(self, camera_name):
-        """Get settings profile for a specific camera (by name).
-        
-        Returns a dict with camera-specific settings. If no profile exists,
-        creates one from current global settings (for backward compatibility).
-        
-        Args:
-            camera_name: Full camera name (e.g., "ZWO ASI676MC")
-        
-        Returns:
-            dict: Camera profile with keys: exposure_ms, gain, auto_exposure, etc.
-        """
-        if not camera_name:
-            return None
-        
-        # Get or create camera profiles dict
-        profiles = self.data.get('camera_profiles', {})
-        
-        if camera_name not in profiles:
-            # Seed a new profile with safe hardcoded defaults.
-            # NOTE: auto_exposure is NOT in profiles — it's a global algorithm setting.
-            # NOTE: white-balance *mode* is stored in global `white_balance` config; only
-            #       the manual wb_r/wb_b calibration values are per-camera.
-            profiles[camera_name] = dict(DEFAULT_CAMERA_PROFILE)
-            self.data['camera_profiles'] = profiles
-            self.save()
-            from .logger import app_logger
-            app_logger.info(f"Created new camera profile for: {camera_name}")
-        
-        return profiles[camera_name]
-    
-    def save_camera_profile(self, camera_name, profile_data):
-        """Save settings profile for a specific camera.
-        
-        Args:
-            camera_name: Full camera name (e.g., "ZWO ASI676MC")
-            profile_data: dict with camera settings to save
-        """
-        if not camera_name:
-            return
-        
-        profiles = self.data.get('camera_profiles', {})
-        profiles[camera_name] = profile_data
-        self.data['camera_profiles'] = profiles
-        self.save()
-        from .logger import app_logger
-        app_logger.debug(f"Saved camera profile for: {camera_name}")
-    
-    def update_camera_profile(self, camera_name, **kwargs):
-        """Update specific settings in a camera profile.
-        
-        Args:
-            camera_name: Full camera name
-            **kwargs: Settings to update (e.g., gain=150, exposure_ms=500)
-        """
-        profile = self.get_camera_profile(camera_name)
-        if profile:
-            profile.update(kwargs)
-            self.save_camera_profile(camera_name, profile)
-    
+    def get_camera_profile(self, camera_name, serial=None):
+        """Get a camera's settings profile, keyed by hardware serial when known
+        (falls back to model name). See services/camera_profiles.py."""
+        from .camera_profiles import get_camera_profile
+        return get_camera_profile(self, camera_name, serial)
+
+    def save_camera_profile(self, camera_name, profile_data, serial=None):
+        """Persist a full profile dict for a camera (serial-keyed when known)."""
+        from .camera_profiles import save_camera_profile
+        save_camera_profile(self, camera_name, profile_data, serial)
+
+    def update_camera_profile(self, camera_name, serial=None, **kwargs):
+        """Update individual keys in a camera's profile (e.g. gain=150)."""
+        from .camera_profiles import update_camera_profile
+        update_camera_profile(self, camera_name, serial=serial, **kwargs)
+
     def list_camera_profiles(self):
-        """Get list of all camera names with saved profiles.
-        
-        Returns:
-            list: Camera names that have profiles
-        """
-        return list(self.data.get('camera_profiles', {}).keys())
-    
-    def delete_camera_profile(self, camera_name):
-        """Delete a camera profile.
-        
-        Args:
-            camera_name: Full camera name
-        """
-        profiles = self.data.get('camera_profiles', {})
-        if camera_name in profiles:
-            del profiles[camera_name]
-            self.data['camera_profiles'] = profiles
-            self.save()
-            from .logger import app_logger
-            app_logger.info(f"Deleted camera profile for: {camera_name}")
+        """All profile keys (serials and/or legacy names)."""
+        from .camera_profiles import list_camera_profiles
+        return list_camera_profiles(self)
+
+    def delete_camera_profile(self, camera_name, serial=None):
+        """Delete a camera profile by serial (preferred) or name key."""
+        from .camera_profiles import delete_camera_profile
+        delete_camera_profile(self, camera_name, serial)

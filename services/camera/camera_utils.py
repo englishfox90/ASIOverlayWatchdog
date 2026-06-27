@@ -60,6 +60,19 @@ def clean_camera_name(name: str) -> str:
     return name.strip()
 
 
+def get_selected_camera_name(config) -> str:
+    """Name of the currently-selected camera, with legacy-key fallback.
+
+    'zwo_selected_camera_name' is the live key every write path sets;
+    'zwo_camera_name' is a legacy default no current path writes, kept only as a
+    migration fallback. Centralised so readers don't each re-encode the
+    precedence — a missed site silently reads '' and picks the wrong (or a
+    zeroed) profile.
+    """
+    return (config.get('zwo_selected_camera_name', '')
+            or config.get('zwo_camera_name', '') or '')
+
+
 def simple_debayer_rggb(raw_data, width, height):
     """
     Simple Bayer RGGB to RGB conversion using nearest neighbor interpolation

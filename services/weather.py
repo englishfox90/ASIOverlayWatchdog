@@ -108,10 +108,18 @@ class WeatherService:
         """Check if cached data is still valid"""
         if not self.cache or not self.cache_time:
             return False
-        
+
         elapsed = time.time() - self.cache_time
         return elapsed < self.cache_duration
-    
+
+    def is_display_stale(self, max_age=1800):
+        """True if the cache is too old to present as live (default 30 min, ~3
+        missed 10-min refreshes). Distinct from is_cache_valid()'s API TTL: this
+        is the UI policy for dimming a stale reading vs. showing it as current."""
+        if not self.cache_time:
+            return True
+        return (time.time() - self.cache_time) > max_age
+
     def fetch_weather(self):
         """
         Fetch current weather data from OpenWeatherMap

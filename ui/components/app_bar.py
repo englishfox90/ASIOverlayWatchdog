@@ -1,332 +1,284 @@
 """
 App Bar Component
-Top application bar with status chips and primary action
+
+Slim top bar: app branding on the left, then the pipeline status sprite, the
+notification bell, and a single state-driven primary action button (Stop /
+Start Capture / Connect Camera).
+
+Live telemetry (Web/Discord/Camera/capture state) lives in the StatusStrip
+band directly below; this bar delegates those updates to it so existing callers
+keep working.
 """
-from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QFrame,
-    QSizePolicy, QSpacerItem
-)
-from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtGui import QFont, QPixmap, QIcon
-from qfluentwidgets import (
-    PushButton, ToolButton, PrimaryPushButton,
-    InfoBadge, Flyout
-)
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QSpacerItem
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap
+from qfluentwidgets import PushButton, PrimaryPushButton, ToolButton, Flyout, setCustomStyleSheet
+
 from .status_sprite import StatusSpriteWidget
 
 import os
-from datetime import datetime
 
 from ..theme.tokens import Colors, Typography, Spacing, Layout
-from ..theme.styles import get_status_chip_style
 from ..theme.icons import mdi
-
-
-class StatusChip(QFrame):
-    """Small status indicator chip"""
-    
-    def __init__(self, label: str, status: str = 'idle', parent=None):
-        super().__init__(parent)
-        self._label = label
-        self._status = status
-        self._setup_ui()
-        self._apply_style()
-    
-    def _setup_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 12, 0)  # Horizontal padding only
-        layout.setSpacing(0)
-        
-        self.label = QLabel(self._label)
-        self.label.setAlignment(Qt.AlignCenter)
-        self.label.setStyleSheet("padding: 0px; margin: 0px;")  # Ensure no extra padding
-        layout.addWidget(self.label)
-        
-        self.setFixedHeight(Layout.status_chip_height)
-    
-    def _apply_style(self):
-        self.setStyleSheet(get_status_chip_style(self._status))
-    
-    def set_status(self, status: str):
-        """Update chip status (changes color)"""
-        self._status = status
-        self._apply_style()
-    
-    def set_label(self, label: str):
-        """Update chip label text"""
-        self._label = label
-        self.label.setText(label)
+from ..theme.styles import paint_border_lines
 
 
 class AppBar(QFrame):
-    """
-    Top application bar with:
-    - Left: App name + icon
-    - Center: Status chips (Camera, Web, Discord, Device)
-    - Right: Session info, image count, Start/Stop button
-    """
-    
+    """Slim application bar: brand · sprite · bell · primary action."""
+
     start_clicked = Signal()
     stop_clicked = Signal()
-    
+    connect_clicked = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._is_capturing = False
+        self._camera_connected = False
+        self._action_mode = 'start'   # 'start' | 'stop' | 'connect'
+        self._action_key = None       # skips redundant button rebuilds on the 1 Hz refresh
+        self._start_enabled = True
+        self._start_tooltip = ""
         self._status_generation = 0  # guards against stale delayed set_status calls
+        self._status_strip = None    # set by the main window after construction
         self._setup_ui()
-    
+
+    def set_status_strip(self, strip):
+        """Wire the telemetry strip this bar delegates Web/Discord/camera updates to."""
+        self._status_strip = strip
+
     def _setup_ui(self):
         self.setFixedHeight(Layout.app_bar_height)
-        self.setStyleSheet(f"""
-            QFrame {{
-                background-color: {Colors.bg_surface};
-                border-bottom: 1px solid {Colors.border_subtle};
-            }}
-        """)
-        
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"AppBar {{ background-color: {Colors.bg_surface}; }}")
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(Spacing.base, 0, Spacing.base, 0)
-        layout.setSpacing(Spacing.lg)
-        
+        layout.setSpacing(Spacing.md)
+
         # === LEFT: App branding ===
-        brand_layout = QHBoxLayout()
-        brand_layout.setSpacing(Spacing.sm)
-        
-        # App icon (small)
         self.app_icon = QLabel()
         self.app_icon.setFixedSize(28, 28)
-        self.app_icon.setScaledContents(False)  # Don't stretch to fill
+        self.app_icon.setScaledContents(False)
         try:
             from services.utils_paths import resource_path
             icon_path = resource_path('assets/app_icon.png')
             if os.path.exists(icon_path):
                 pixmap = QPixmap(icon_path).scaled(
-                    28, 28, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                    28, 28, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
                 )
                 self.app_icon.setPixmap(pixmap)
                 self.app_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         except (ImportError, FileNotFoundError, OSError):
             pass
-        brand_layout.addWidget(self.app_icon)
-        
-        # App name
+        layout.addWidget(self.app_icon)
+
         self.app_name = QLabel("PFR Sentinel")
         self.app_name.setStyleSheet(f"""
             font-size: {Typography.size_subtitle}px;
-            font-weight: {Typography.weight_semibold};
+            font-weight: {Typography.weight_bold};
             color: {Colors.text_primary};
+            border: none;
         """)
-        brand_layout.addWidget(self.app_name)
-        
-        layout.addLayout(brand_layout)
-        
-        # === CENTER: Status chips ===
-        chips_layout = QHBoxLayout()
-        chips_layout.setSpacing(Spacing.sm)
-        
-        self.camera_chip = StatusChip("Camera", "idle")
-        self.web_chip = StatusChip("Web", "disabled")
-        self.discord_chip = StatusChip("Discord", "disabled")
-        
-        chips_layout.addWidget(self.camera_chip)
-        chips_layout.addWidget(self.web_chip)
-        chips_layout.addWidget(self.discord_chip)
-        
-        layout.addLayout(chips_layout)
-        
+        layout.addWidget(self.app_name)
+
         # Spacer
         layout.addItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        
-        # === RIGHT: Session info + Actions ===
-        right_layout = QHBoxLayout()
-        right_layout.setSpacing(Spacing.md)
-        
-        # Session date
-        self.session_label = QLabel("Session")
-        self.session_label.setStyleSheet(f"color: {Colors.text_muted}; font-size: {Typography.size_caption}px;")
-        self.session_value = QLabel(datetime.now().strftime('%Y-%m-%d'))
-        self.session_value.setStyleSheet(f"color: {Colors.text_secondary}; font-size: {Typography.size_body}px;")
-        
-        session_vbox = QVBoxLayout()
-        session_vbox.setSpacing(0)
-        session_vbox.addWidget(self.session_label)
-        session_vbox.addWidget(self.session_value)
-        right_layout.addLayout(session_vbox)
-        
-        # Image count
-        self.count_label = QLabel("Images")
-        self.count_label.setStyleSheet(f"color: {Colors.text_muted}; font-size: {Typography.size_caption}px;")
-        self.count_value = QLabel("0")
-        self.count_value.setStyleSheet(f"""
-            color: {Colors.success_text}; 
-            font-size: {Typography.size_subtitle}px;
-            font-weight: {Typography.weight_bold};
-        """)
-        
-        count_vbox = QVBoxLayout()
-        count_vbox.setSpacing(0)
-        count_vbox.addWidget(self.count_label)
-        count_vbox.addWidget(self.count_value)
-        right_layout.addLayout(count_vbox)
-        
-        # Animated status sprite — visible during capture pipeline stages
+
+        # Animated status sprite — visible during capture pipeline stages.
+        # Fixed size: its policy is Expanding, which otherwise stretches it across
+        # the whole bar so the centered animation gets lost in dead space.
         self.status_sprite = StatusSpriteWidget()
+        self.status_sprite.setFixedSize(44, 44)
         self.status_sprite.hide()
-        right_layout.addWidget(self.status_sprite, 1, Qt.AlignmentFlag.AlignVCenter)
-        
+        layout.addWidget(self.status_sprite, 0, Qt.AlignmentFlag.AlignVCenter)
+
         # Notification bell
         self.notification_btn = ToolButton(mdi('bell-outline'))
         self.notification_btn.setFixedSize(36, 36)
         self.notification_btn.setToolTip("Notifications")
         self.notification_btn.setCursor(Qt.PointingHandCursor)
         self.notification_btn.clicked.connect(self._show_notifications)
-        right_layout.addWidget(self.notification_btn)
+        layout.addWidget(self.notification_btn)
 
-        # Badge overlay — parented to AppBar (not button) so it can
-        # overflow the button bounds without being clipped.
-        # Positioned absolutely over the button's top-right corner.
+        # Badge overlay — parented to AppBar (not the button) so it can overflow
+        # the button bounds without being clipped.
+        from qfluentwidgets import InfoBadge
         self._notification_badge = InfoBadge.attension(0, self)
         self._notification_badge.hide()
 
-        # Start/Stop buttons
-        self.start_btn = PrimaryPushButton("Start Capture")
-        self.start_btn.setIcon(mdi('play'))
-        self.start_btn.setFixedWidth(140)
-        self.start_btn.clicked.connect(self._on_start_clicked)
-        
+        # Primary action: a native PrimaryPushButton reused for Start/Connect
+        # (correct icon layout + standard radius), plus a red Stop button.
+        # They toggle by visibility rather than re-skinning one button.
+        self.primary_btn = PrimaryPushButton("Start Capture")
+        self.primary_btn.setFixedHeight(34)
+        self.primary_btn.setMinimumWidth(150)
+        self.primary_btn.setCursor(Qt.PointingHandCursor)
+        self.primary_btn.clicked.connect(self._on_primary_clicked)
+        # Force white label so it matches the white icon (the iris accent is light
+        # enough that qfluent would otherwise pick a darker text colour).
+        # setCustomStyleSheet merges with the theme sheet, so icon padding + radius
+        # are preserved and it survives accent/theme changes.
+        _white = "PrimaryPushButton { color: white; font-weight: bold; }"
+        setCustomStyleSheet(self.primary_btn, _white, _white)
+        layout.addWidget(self.primary_btn)
+
         self.stop_btn = PushButton("Stop")
-        self.stop_btn.setIcon(mdi('pause'))
-        self.stop_btn.setFixedWidth(100)
-        self.stop_btn.clicked.connect(self._on_stop_clicked)
-        self.stop_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.error_default};
-                color: white;
-                border: none;
-                border-radius: {Layout.radius_md}px;
-                padding: 8px 16px 8px 32px;
-            }}
-            QPushButton:hover {{
-                background-color: {Colors.error_hover};
-            }}
-            QPushButton::icon {{
-                padding-right: 8px;
-            }}
-        """)
+        self.stop_btn.setIcon(mdi('pause', 'white'))
+        self.stop_btn.setFixedHeight(34)
+        self.stop_btn.setMinimumWidth(110)
+        self.stop_btn.setCursor(Qt.PointingHandCursor)
+        _stop = (
+            f"PushButton {{ background-color: {Colors.error_default}; color: white; "
+            f"border: none; font-weight: bold; }}"
+            f"PushButton:hover {{ background-color: {Colors.error_hover}; }}"
+        )
+        setCustomStyleSheet(self.stop_btn, _stop, _stop)
+        self.stop_btn.clicked.connect(self.stop_clicked.emit)
         self.stop_btn.hide()
-        
-        right_layout.addWidget(self.start_btn)
-        right_layout.addWidget(self.stop_btn)
-        
-        layout.addLayout(right_layout)
-    
-    def _on_start_clicked(self):
-        self.start_clicked.emit()
-    
-    def _on_stop_clicked(self):
-        self.stop_clicked.emit()
-    
+        layout.addWidget(self.stop_btn)
+
+        self.update_primary_action(False, False)
+
+    # =========================================================================
+    # PRIMARY ACTION
+    # =========================================================================
+
+    def update_primary_action(self, is_capturing: bool, camera_connected: bool):
+        """Toggle/relabel the primary + stop buttons for the current app state."""
+        self._is_capturing = is_capturing
+        self._camera_connected = camera_connected
+
+        # The 1 Hz status timer calls this every tick; only rebuild the buttons
+        # (and re-rasterize the icon) when the state actually changes.
+        key = (is_capturing, camera_connected, self._start_enabled, self._start_tooltip)
+        if key == self._action_key:
+            return
+        self._action_key = key
+
+        if is_capturing:
+            self._action_mode = 'stop'
+            self.primary_btn.hide()
+            self.stop_btn.show()
+            return
+
+        self.stop_btn.hide()
+        self.primary_btn.show()
+        if camera_connected:
+            self._action_mode = 'start'
+            self.primary_btn.setText("Start Capture")
+            self.primary_btn.setIcon(mdi('play', 'white'))
+            self.primary_btn.setEnabled(self._start_enabled)
+            self.primary_btn.setToolTip(self._start_tooltip)
+        else:
+            self._action_mode = 'connect'
+            self.primary_btn.setText("Connect Camera")
+            self.primary_btn.setIcon(mdi('camera-plus-outline', 'white'))
+            self.primary_btn.setEnabled(True)
+            self.primary_btn.setToolTip("")
+
+    def _on_primary_clicked(self):
+        if self._action_mode == 'connect':
+            self.connect_clicked.emit()
+        else:
+            self.start_clicked.emit()
+
     def set_start_enabled(self, enabled: bool, tooltip: str = ""):
-        """Enable or disable the Start Capture button with an optional tooltip."""
-        self.start_btn.setEnabled(enabled)
-        self.start_btn.setToolTip(tooltip)
+        """Enable/disable the Start action (only meaningful in the 'start' state)."""
+        self._start_enabled = enabled
+        self._start_tooltip = tooltip
+        if self._action_mode == 'start':
+            self.primary_btn.setEnabled(enabled)
+            self.primary_btn.setToolTip(tooltip)
+
+    def _push_pill_state(self):
+        """Drive the strip's capture/camera pill from current capture state."""
+        if not self._status_strip:
+            return
+        if self._is_capturing:
+            self._status_strip.set_capture_state('capturing')
+        elif self._camera_connected:
+            self._status_strip.set_capture_state('idle', "Connected · idle")
+        else:
+            self._status_strip.set_capture_state('disconnected', "Disconnected")
 
     def set_capturing(self, capturing: bool):
-        """Update button states for capturing mode"""
-        self._is_capturing = capturing
-        
-        if capturing:
-            self.start_btn.hide()
-            self.stop_btn.show()
+        """Update button + pill for capturing mode."""
+        self.update_primary_action(capturing, self._camera_connected)
+        self._push_pill_state()
+        if not capturing:
             self.status_sprite.hide()
             self.status_sprite.set_state(None)
-            self.camera_chip.set_status('capturing')
-            self.camera_chip.set_label('Capturing')
-        else:
-            self.start_btn.show()
-            self.stop_btn.hide()
-            self.status_sprite.hide()
-            self.status_sprite.set_state(None)
-            self.camera_chip.set_status('idle')
-            self.camera_chip.set_label('Camera')
-    
+
+    # =========================================================================
+    # TELEMETRY DELEGATION (kept for existing callers)
+    # =========================================================================
+
     def update_image_count(self, count: int):
-        """Update image counter display"""
-        self.count_value.setText(str(count))
-    
-    def update_status(self, is_capturing: bool, image_count: int, camera_controller=None, live_panel=None):
-        """Update all status displays
-        
-        Args:
-            is_capturing: Whether capture is active
-            image_count: Number of images captured
-            camera_controller: Camera controller instance
-            live_panel: Live monitoring panel to update exposure progress
-        """
+        if self._status_strip:
+            self._status_strip.set_frame_count(count)
+
+    def set_camera_connected(self, connected: bool):
+        """Window-supplied readiness flag (covers camera-available + watch mode)."""
+        self._camera_connected = connected
+
+    def update_status(self, is_capturing: bool, image_count: int,
+                      camera_controller=None, live_panel=None):
+        """Drive the action button, pill, and live-panel exposure progress."""
         self.update_image_count(image_count)
-        
-        # Update camera status
+
+        self.update_primary_action(is_capturing, self._camera_connected)
+
         if is_capturing:
-            self.camera_chip.set_status('capturing')
             if camera_controller and hasattr(camera_controller, 'zwo_camera'):
                 zwo = camera_controller.zwo_camera
-                if zwo and hasattr(zwo, 'exposure_seconds'):
-                    # Forward to live panel for preview overlay
-                    if live_panel:
-                        live_panel.update_exposure_progress(
-                            zwo.exposure_seconds,
-                            getattr(zwo, 'exposure_remaining', 0)
-                        )
+                if zwo and hasattr(zwo, 'exposure_seconds') and live_panel:
+                    live_panel.update_exposure_progress(
+                        zwo.exposure_seconds, getattr(zwo, 'exposure_remaining', 0)
+                    )
+        elif live_panel:
+            live_panel.hide_progress()
+
+        self._push_pill_state()
+
+    def set_camera_status(self, state: str, label: str = ""):
+        """Immediate camera-state feedback from the capture controller.
+
+        state in {'connected', 'idle', 'error'}; maps onto the strip's pill.
+        """
+        if not self._status_strip:
+            return
+        if self._is_capturing:
+            return  # don't clobber the live capture pill
+        if state == 'connected':
+            self._status_strip.set_capture_state('idle', "Connected · idle")
+        elif state == 'error':
+            self._status_strip.set_capture_state('disconnected', label or "Camera error")
         else:
-            # Hide progress when not capturing
-            if live_panel:
-                live_panel.hide_progress()
-        
-        if camera_controller and hasattr(camera_controller, 'is_connected'):
-            if camera_controller.is_connected:
-                self.camera_chip.set_status('connected')
-                self.camera_chip.set_label('Connected')
-            else:
-                self.camera_chip.set_status('idle')
-                self.camera_chip.set_label('Camera')
-    
+            self._status_strip.set_capture_state('disconnected', "Disconnected")
+
     def set_web_status(self, enabled: bool, running: bool = False):
-        """Update web server status chip"""
-        if running:
-            self.web_chip.set_status('enabled')
-            self.web_chip.set_label('Web On')
-        elif enabled:
-            self.web_chip.set_status('idle')
-            self.web_chip.set_label('Web')
-        else:
-            self.web_chip.set_status('disabled')
-            self.web_chip.set_label('Web')
-    
+        if self._status_strip:
+            self._status_strip.set_web(enabled, running)
+
     def set_discord_status(self, enabled: bool):
-        """Update Discord status chip"""
-        if enabled:
-            self.discord_chip.set_status('enabled')
-            self.discord_chip.set_label('Discord On')
-        else:
-            self.discord_chip.set_status('disabled')
-            self.discord_chip.set_label('Discord')
-    
+        if self._status_strip:
+            self._status_strip.set_discord(enabled)
+
+    # =========================================================================
+    # PIPELINE STATUS SPRITE
+    # =========================================================================
+
     def set_status(self, status: str = None):
-        """Update status indicator with specific states.
+        """Update the pipeline sprite with a specific stage (or None to hide).
 
-        Transitions away from 'stretching' or 'processing' are held for a minimum
-        of 500 ms so the animation is always visible even when processing is fast.
-
-        Args:
-            status: One of 'idle', 'waiting', 'capturing', 'calibrating', 'stretching',
-                    'processing', 'sending' — or None to hide the sprite.
+        Transitions away from 'stretching'/'processing' are held ~250 ms so the
+        animation is always visible even when processing is fast.
         """
         self._status_generation += 1
         gen = self._status_generation
 
         current = self.status_sprite._state
-        # Hold stretching/processing animations for at least 250 ms so they're visible
-        # Only delay "end-of-pipeline" transitions; urgent state changes apply immediately
         if current in ('stretching', 'processing') and status in ('sending', 'waiting', None):
             from PySide6.QtCore import QTimer as _QTimer
             _QTimer.singleShot(250, lambda: self._apply_status(status, gen))
@@ -334,7 +286,6 @@ class AppBar(QFrame):
             self._apply_status(status, gen)
 
     def _apply_status(self, status: str, generation: int):
-        """Internal: apply status change, ignoring if superseded by a newer call."""
         if generation != self._status_generation:
             return
         if status:
@@ -343,27 +294,32 @@ class AppBar(QFrame):
         else:
             self.status_sprite.set_state(None)
             self.status_sprite.hide()
-    
+
     def set_processing(self, is_processing: bool):
         """Legacy method for backward compatibility"""
-        if is_processing:
-            self.set_status('processing')
-        else:
-            self.set_status(None)
+        self.set_status('processing' if is_processing else None)
+
+    # =========================================================================
+    # NOTIFICATIONS
+    # =========================================================================
 
     def _position_badge(self):
         """Place the badge at the top-right corner of the notification button."""
         btn_rect = self.notification_btn.geometry()
         badge_w = self._notification_badge.width()
         badge_h = self._notification_badge.height()
-        # Center the badge on the button's top-right corner
+        # Center the badge on the button's top-right corner (offset outward).
         x = btn_rect.right() - badge_w // 2
         y = btn_rect.top() - badge_h // 2
-        # Clamp so it doesn't go off the AppBar edges
         x = min(x, self.width() - badge_w)
         y = max(y, 0)
         self._notification_badge.move(x, y)
         self._notification_badge.raise_()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        h = self.height()
+        paint_border_lines(self, [(0, h - 1, self.width(), h - 1)])
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

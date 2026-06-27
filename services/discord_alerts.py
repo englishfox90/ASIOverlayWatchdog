@@ -185,24 +185,21 @@ class DiscordAlerts:
             _discord_image_stats = None
 
             if valid_image_path:
-                # Resize image to limit bandwidth — keep aspect ratio, cap height
+                # Resize image to limit bandwidth — keep aspect ratio, cap height.
+                # Shared helper (mode="height") so the library/Discord/web paths
+                # share one resize implementation, not three copies.
+                from .image_resize import downscale_to_jpeg
                 img_buf = io.BytesIO()
                 _was_resized = False
                 _original_w, _original_h = 0, 0
                 try:
                     with Image.open(image_path) as img:
                         _original_w, _original_h = img.width, img.height
-                        if img.height > DISCORD_IMAGE_MAX_HEIGHT:
-                            ratio = DISCORD_IMAGE_MAX_HEIGHT / img.height
-                            new_w = int(img.width * ratio)
-                            img_resized = img.resize(
-                                (new_w, DISCORD_IMAGE_MAX_HEIGHT), Image.LANCZOS
-                            )
-                            _was_resized = True
-                        else:
-                            img_resized = img.copy()
-                        img_resized.save(img_buf, format="JPEG", quality=85)
-                        _sent_w, _sent_h = img_resized.width, img_resized.height
+                        jpeg_bytes, _sent_w, _sent_h = downscale_to_jpeg(
+                            img, DISCORD_IMAGE_MAX_HEIGHT, 85, mode="height"
+                        )
+                        img_buf = io.BytesIO(jpeg_bytes)
+                        _was_resized = _original_h > DISCORD_IMAGE_MAX_HEIGHT
                 except Exception as resize_err:
                     app_logger.warning(f"Discord image resize failed, sending original: {resize_err}")
                     img_buf = open(image_path, "rb")

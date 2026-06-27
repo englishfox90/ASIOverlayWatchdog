@@ -126,3 +126,58 @@ class TestCameraProfileUpdate:
         config2 = Config(temp_config)
         profile = config2.get_camera_profile('ZWO ASI676MC')
         assert profile['gain'] == 300
+
+
+class TestSerialKeyedProfiles:
+    """Profiles key off the hardware serial when known, so two same-model
+    bodies don't collide and settings follow the physical camera."""
+
+    def test_profile_keyed_by_serial_with_name_embedded(self, temp_config):
+        config = Config(temp_config)
+        prof = config.get_camera_profile('ZWO ASI676MC', '340b43071a020900')
+        prof['gain'] = 300
+        config.save_camera_profile('ZWO ASI676MC', prof, '340b43071a020900')
+
+        assert '340b43071a020900' in config.list_camera_profiles()
+        stored = config.data['camera_profiles']['340b43071a020900']
+        assert stored['gain'] == 300
+        assert stored['name'] == 'ZWO ASI676MC'  # name kept for readability
+
+    def test_same_model_bodies_get_separate_profiles(self, temp_config):
+        config = Config(temp_config)
+        config.update_camera_profile('ZWO ASI676MC', serial='aaaa', gain=300)
+        config.update_camera_profile('ZWO ASI676MC', serial='bbbb', gain=120)
+
+        assert config.get_camera_profile('ZWO ASI676MC', 'aaaa')['gain'] == 300
+        assert config.get_camera_profile('ZWO ASI676MC', 'bbbb')['gain'] == 120
+
+    def test_legacy_name_profile_migrates_to_serial(self, temp_config):
+        config = Config(temp_config)
+        # Pre-existing name-keyed profile (as on disk before this change).
+        config.data['camera_profiles'] = {'ZWO ASI676MC': {'gain': 300, 'exposure_ms': 100.0}}
+        config.save()
+
+        prof = config.get_camera_profile('ZWO ASI676MC', '340b43071a020900')
+        assert prof['gain'] == 300  # tuned settings carried over
+        assert '340b43071a020900' in config.list_camera_profiles()
+        assert 'ZWO ASI676MC' in config.list_camera_profiles()  # template kept
+
+    def test_no_serial_falls_back_to_name(self, temp_config):
+        config = Config(temp_config)
+        config.update_camera_profile('ZWO ASI676MC', gain=300)
+        # Pre-serial selection: name key is used, not a serial key.
+        assert config.get_camera_profile('ZWO ASI676MC')['gain'] == 300
+        assert config.list_camera_profiles() == ['ZWO ASI676MC']
+
+    def test_prune_drops_name_bug_artefacts(self, temp_config):
+        from services.camera_profiles import prune_bogus_profiles
+        data = {'camera_profiles': {
+            'ZWO ASI676MC': {'gain': 300},
+            'Camera 0': {'gain': 100},
+            'Camera 2': {'gain': 100},
+            'ZWO ASI676MC (Index: 2)': {'gain': 120},
+            '340b43071a020900': {'gain': 300, 'name': 'ZWO ASI676MC'},
+        }}
+        prune_bogus_profiles(data)
+        keys = set(data['camera_profiles'])
+        assert keys == {'ZWO ASI676MC', '340b43071a020900'}

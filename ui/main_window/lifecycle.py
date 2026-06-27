@@ -104,6 +104,8 @@ class _MainWindowLifecycleMixin:
             self.log_timer.stop()
         if hasattr(self, 'watchdog_timer') and self.watchdog_timer:
             self.watchdog_timer.stop()
+        if getattr(self, '_web_server_retry_timer', None):
+            self._web_server_retry_timer.stop()
 
         if hasattr(self, 'update_checker') and self.update_checker:
             self.update_checker.stop()
@@ -125,9 +127,27 @@ class _MainWindowLifecycleMixin:
         if self.image_processor:
             self.image_processor.stop()
 
+        # Drain the output dispatcher before the web server / library it feeds.
+        try:
+            self._stop_output_dispatcher()
+        except Exception:
+            pass
+
         if self.web_server:
             try:
                 self.web_server.stop()
+            except Exception:
+                pass
+
+        if self.image_library:
+            try:
+                self.image_library.stop()
+            except Exception:
+                pass
+
+        if self.library_controller:
+            try:
+                self.library_controller.shutdown()
             except Exception:
                 pass
 

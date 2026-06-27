@@ -12,9 +12,25 @@ def apply_camera_settings(zwo_camera, config):
     camera_name = config.get('zwo_selected_camera_name', '')
     if '(Index:' in camera_name:
         camera_name = camera_name.split('(Index:')[0].strip()
+    serial = config.get('zwo_selected_camera_serial', '')
+
+    # Identity guard: this pushes the *selected* camera's profile onto the
+    # *running* camera. If the user changed the dropdown to a different body
+    # mid-capture, the selection and the live camera have decoupled — pushing
+    # here would drive the running camera with another camera's gain/exposure/
+    # target-brightness (and never actually switch hardware). Switching cameras
+    # requires Stop → select → Start; refuse the cross-camera push instead.
+    running_name = (getattr(zwo_camera, 'camera_name', '') or '').strip()
+    if camera_name and running_name and camera_name != running_name:
+        app_logger.warning(
+            f"Skipping live settings push: selected camera '{camera_name}' differs "
+            f"from the running camera '{running_name}'. Stop capture and Start again "
+            "to switch cameras."
+        )
+        return
 
     profile = (
-        config.get_camera_profile(camera_name) if camera_name
+        config.get_camera_profile(camera_name, serial) if camera_name
         else dict(DEFAULT_CAMERA_PROFILE)
     )
 

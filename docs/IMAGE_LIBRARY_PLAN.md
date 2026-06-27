@@ -1,0 +1,476 @@
+# Image Library — Feature Design / Project Plan
+
+> **Status (2026-06-24): Phases 1–5 implemented; Phase 4 complete.** This document scopes a new "Image
+> Library" feature: a rolling, on-disk store of downscaled (Discord-size) capture
+> frames, retained for ~7 days, browsable in-app via a new Library panel and retrievable
+> over the existing web/HTTP API.
+>
+> **Phase 1 (core store) is done and unit-tested:** `services/image_resize.py` (shared
+> downscaler), `services/library/` package (`store` + `index` + `retention` + the
+> `ImageLibrary` facade with a non-blocking background save queue), the `library.*`
+> config block, the save hook in `_on_image_processed()`, and lifecycle start/stop wiring.
+>
+> **Phase 2 (web API) is done and tested:** `ImageLibrary.list_images()` / `read_image()`
+> / `api_enabled()` read methods; `GET /library` (paginated JSON manifest, `since`/`until`/
+> `limit`/`offset`) and `GET /library/image?id=` (JPEG with ETag) served by
+> `services/web_library.py` and routed from `web_output.py`; OpenAPI/`/docs` updated in
+> `api_docs.py` (library routes shown only when the API is enabled); `webserver_library_path`
+> config key; wired through `_start_web_server()`. Endpoints are gated on
+> `library.enabled && library.api_enabled`. Tests in `tests/test_image_library.py` and
+> `tests/test_webserver.py`.
+>
+> **Phase 3 (in-app panel) is done:** a new "Library" nav entry + `ui/panels/library_panel.py`
+> (full-width gallery: range filter dropdown, refresh, responsive thumbnail grid, click-to-
+> enlarge viewer dialog) backed by `ui/controllers/library_controller.py` (loads pages off the
+> UI thread, emits `page_ready`/`load_failed`). Registered in `window.py` (stack index 9,
+> nav map, full-width branch), shut down in `lifecycle.py`. Controller logic tested in
+> `tests/test_library_controller.py` (GUI not runnable in CI; widget names verified against
+> existing panels). **Phase 4 (headless support + resize de-duplication) remains — optional.**
+>
+> **Phase 5 (session-scrubber redesign) is done:** the flat thumbnail grid is replaced by a
+> two-screen flow imported from the "Pier camera gallery navigation" Claude Design project —
+> **session list → night scrubber** (the design's third single-image popup was built then removed as
+> redundant; the night view's hero + metadata panel is the detail view). The scrubber is laid out in
+> frame-index space so the filmstrip, playhead, condition band, and ticks stay aligned under uneven
+> capture cadence; gaps show as event pins. Frames are grouped into observing *nights*
+> (local-noon cutoff, so an evening-to-morning run isn't split at midnight) via
+> `services/library/sessions.py`. Each night shows a **condition band**: green = roof open + clear,
+> amber = roof open + not clear, red = roof closed, dark = capture gap, grey = unknown. The band is
+> driven by **real per-frame data now persisted in the index** — `roof` + `condition` (from
+> `services/ml_service.py`'s `_ML_RESULTS`, available in production when `ml_models.enabled`) and
+> `clouds` (weather `WEATHER_CLOUDS`, the fallback for "clear"). New columns are migrated into
+> existing DBs (`LibraryIndex._migrate`); historical frames predate the data and render grey (no
+> backfill). The night view has a draggable filmstrip/playhead with transport + speed and a live
+> metadata panel; capture gaps surface as clickable "events". New panel files:
+> `library_panel.py` (stacked container), `library_session_list.py`, `library_night_view.py`,
+> `library_scrubber.py`, `library_image_viewer.py`, `library_band.py`, `library_format.py`.
+> Controller gains `load_sessions` / `load_session_frames` / coalescing `request_frame`. Tests in
+> `tests/test_library_sessions.py`.
+>
+> **Phase 4 is done:** the remaining functional work has landed.
+> - **Headless support** — `services/headless_runner.py` now creates and starts its
+>   own `ImageLibrary`, enqueues each processed frame, hands it to
+>   `WebOutputServer(image_library=…)`, and stops it on cleanup, so unattended
+>   installs archive frames and serve `/library` like the GUI.
+> - **Resize de-duplication** — `downscale_to_jpeg` gained a `mode` arg
+>   (`longest`/`height`/`width`); `discord_alerts.py` now calls it with
+>   `mode="height"`, removing its inline LANCZOS+JPEG copy while preserving the
+>   exact height-cap behaviour.
+> - **Live Library updates** — the library worker fires an `on_frame_saved`
+>   callback after each insert; `LibraryController` re-emits it as the thread-safe
+>   `frame_archived` Qt signal; `LibraryPanel` appends the frame to the open night
+>   (live-following the playhead only when it's parked at the live edge) and
+>   coalesces a session-list reload — no manual refresh / re-drill. `load_sessions`
+>   is now coalescing, which also fixes the old range-change-while-loading drop.
+> - **Not built (deliberately):** the "live theme refresh for the gallery" item is
+>   obsolete — the flat thumbnail gallery it referenced was replaced by the Phase 5
+>   session-scrubber UI. "Pre-computed thumbnails" remains deferred (only-if-needed).
+>
+> **Note on ML gating:** `ml_service.py` is the *production* inference path (gated only by model
+> files + `ml_models.enabled`); the `is_dev_mode_available()` gate in
+> `ui/controllers/ml_prediction.py` only guards the dev *calibration-JSON data-collection* path, not
+> live roof/sky inference.
+
+---
+
+## The Idea
+
+Today PFR Sentinel can save **full-resolution** output images to a folder, but there
+is no lightweight, queryable history inside the app. The live monitoring panel only
+ever shows the *latest* frame, and the web server only exposes `/latest`. If you want
+to look back over the last night's sky you have to dig through the output directory by
+hand at full res.
+
+This feature adds a **rolling image library**: every processed frame is also saved as a
+small Discord-post-sized JPEG into a dedicated, indexed store. The store keeps roughly
+the last 7 days (configurable), prunes itself automatically, and is exposed two ways:
+
+1. **In-app** — a new "Library" navigation panel with a scrollable thumbnail gallery,
+   date filtering, and click-to-enlarge.
+2. **Web/HTTP API** — new endpoints alongside `/latest` and `/status` that list the
+   library and fetch individual images, so external dashboards can build a timeline.
+
+### Goals
+
+- Cheap to store: one downscaled JPEG per frame (~50–100 KB), not full-res.
+- Self-managing: automatic time- **and** size-bounded retention, no manual cleanup.
+- Queryable: filter by time range, paginate, read per-frame metadata.
+- Available both in the UI and over the API from the same backing store.
+
+### Non-goals (this phase)
+
+- Multiple thumbnail tiers (a single Discord-size tier serves both gallery and API).
+- Full-resolution archival (that remains the job of the existing file output + cleanup).
+- Editing, tagging, favouriting, or exporting timelapses from the library.
+- Cloud sync / off-box upload.
+
+---
+
+## Decisions (locked)
+
+These were settled during scoping and drive the design below:
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| **Image tier** | **Discord size only** — single downscaled JPEG per frame (max long-edge ~750 px, JPEG q85) | Reuse the proven Discord resize path; one image serves both gallery and API. |
+| **Retention** | **Time + size cap** — keep N days (default 7) *and* a max library size (default 2 GB), whichever triggers first | Time gives the "last week" UX; size cap is the disk safety-net for high frame-rate nights. |
+| **Access** | **In-app Library panel + Web/HTTP API** | Both surfaces read the same SQLite-backed store. |
+| **Index/storage** | **SQLite index + JPEG files on disk** | Fast time-range queries, pagination, and metadata filtering without rewriting a manifest on every frame. `sqlite3` is stdlib. |
+
+---
+
+## Grounding: how the current pipeline works
+
+(Verified in code, June 2026. Cited so the implementer knows exactly where to hook in.)
+
+### Output dispatch — the hook point
+The final processed PIL image is produced in `ui/controllers/image_processor.py`,
+saved to disk (`output_img.save(...)` ~L399), then emitted via
+`processing_complete`. `ui/main_window/output.py` `_on_image_processed()` (~L186)
+routes it to the output sinks through **`_push_to_output_servers()` (~L417–481)**,
+which already:
+
+- re-encodes the image to bytes and calls `web_server.update_image(...)`, and
+- periodically calls the Discord sender.
+
+**The library "save" step hooks in here**, right alongside the web/Discord dispatch,
+using the already-processed `output_image` PIL object. No new capture path is needed —
+both watch mode and camera mode converge on this function.
+
+### Discord resize — the logic to reuse
+`services/discord_alerts.py` (L14–18, L188–204) already downscales for posting:
+
+```python
+DISCORD_IMAGE_MAX_HEIGHT = 750
+# resize preserving aspect ratio with Image.LANCZOS, then
+img_resized.save(buf, format="JPEG", quality=85)   # ~50–100 KB typical
+```
+
+This resize logic should be **extracted into a shared helper** so the library and
+Discord use one definition (see "Shared resize util" below) rather than copy-pasting
+the LANCZOS + JPEG dance a third time (the web server has its own variant too).
+
+### Web server — how to add endpoints
+`services/web_output.py` is a stdlib `http.server.HTTPServer` +
+`BaseHTTPRequestHandler`. Endpoints are dispatched in `do_GET()` (~L87+):
+`/latest`, `/status`, `/docs`, `/openapi.json`. The handler stores the latest image
+in **class-level variables** updated via `ImageHTTPHandler.update_image()` (cross-thread
+safe). New library endpoints are added by extending `do_GET()` and registering them in
+the OpenAPI spec in `services/api_docs.py`.
+
+> ⚠️ **Threading note:** the web server runs on a background thread. The library's
+> SQLite connection used by the web endpoints must be opened per-handler-thread (or
+> with `check_same_thread=False` + a lock). Do **not** share one connection across the
+> processor thread and the HTTP thread. See "Concurrency" below.
+
+### Config & cleanup — patterns to follow
+- `services/config.py` `DEFAULT_CONFIG` is merged against on load, so new nested keys
+  land safely on existing user configs. Output keys live under `output.*` and top-level
+  (`output_directory`, `output_format`, `jpg_quality`). Add a new **`library.*`** block.
+- `app_config.get_app_data_dir()` → `%LOCALAPPDATA%\PFRSentinel`. The library lives in a
+  sibling of the existing `Images` output subfolder.
+- `services/cleanup.py` is **size-based only** today (delete oldest files/sessions to get
+  under a GB cap). It has no time-based logic. The library brings its **own** retention
+  (time + size) rather than overloading `cleanup.py`, because the library's pruning must
+  also delete the matching SQLite rows — it is not a pure filesystem sweep.
+
+### UI — how a panel is registered
+Panels are layout-only (`ui/panels/`); business logic lives in controllers
+(`ui/controllers/`); they talk via Qt signals/slots. Registration touches:
+1. `ui/components/nav_rail.py` (~L193) — add a nav button + section key.
+2. `ui/main_window/window.py` (~L220) — instantiate the panel, `addWidget` to
+   `inspector_stack` (next free index, currently 9).
+3. `_on_nav_changed()` (~L441) — add the section→index mapping.
+
+There is **no existing gallery/thumbnail viewer** — this would be the first persistent
+gallery in the app.
+
+---
+
+## Proposed architecture
+
+### New module layout
+
+Following the project's module-discipline rule (new responsibility → new file; name it
+after what it *does*; keep files under the ~600-line cap), the core lives in a small
+`services/library/` package:
+
+```
+services/
+├── image_resize.py            # NEW — shared "downscale to max edge + JPEG" helper
+│                              #       (reused by Discord, library, and ideally web)
+└── library/
+    ├── __init__.py            # NEW — public facade: ImageLibrary (add/query/prune)
+    ├── store.py               # NEW — file storage: dated folder layout, write/read JPEG
+    ├── index.py               # NEW — SQLite schema + CRUD + time-range/paginated queries
+    └── retention.py           # NEW — time + size pruning policy (DB rows + files together)
+
+ui/
+├── panels/
+│   └── library_panel.py       # NEW — layout only: gallery grid, date filter, viewer dialog
+└── controllers/
+    └── library_controller.py  # NEW — query the library, lazy-load thumbnails, signals
+```
+
+Touched (not new):
+- `services/discord_alerts.py` — call the shared resize helper instead of its inline copy.
+- `ui/main_window/output.py` — add the library-save call in `_push_to_output_servers()`.
+- `services/web_output.py` + `services/api_docs.py` — new endpoints + OpenAPI entries.
+- `services/config.py` — new `library.*` config block.
+- `ui/components/nav_rail.py`, `ui/main_window/window.py` — register the Library panel.
+
+### Storage layout on disk
+
+```
+%LOCALAPPDATA%\PFRSentinel\Library\
+├── library.db                 # SQLite index
+└── 2026-06-24\                # one folder per local capture date (keeps dirs small)
+    ├── 20260624_223015_a1b2.jpg
+    ├── 20260624_223115_c3d4.jpg
+    └── ...
+```
+
+- Dated subfolders keep any single directory from growing unbounded and make manual
+  inspection / whole-day deletion trivial.
+- Filenames are timestamp + short random/hash suffix to avoid collisions; the canonical
+  record is the DB row, not the filename.
+
+### SQLite schema (draft)
+
+```sql
+CREATE TABLE images (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at  INTEGER NOT NULL,   -- unix epoch in the PC's LOCAL time, the frame's capture time
+    path         TEXT    NOT NULL,   -- relative to Library root
+    width        INTEGER,
+    height       INTEGER,
+    bytes        INTEGER NOT NULL,   -- file size, for the size-cap accounting
+    -- denormalised metadata for filtering / display without opening the JPEG:
+    session      TEXT,
+    exposure     TEXT,
+    gain         TEXT,
+    temp         TEXT,
+    camera       TEXT,
+    weather      TEXT,               -- short summary string if available
+    created_at   INTEGER NOT NULL    -- when the row was inserted
+);
+CREATE INDEX idx_images_captured_at ON images(captured_at);
+```
+
+Pulling metadata from the same `metadata` dict the overlay/Discord paths already
+receive means no new extraction work. `bytes` is summed for the size-cap policy so
+retention never has to stat the whole tree.
+
+### Data flow
+
+The capture pipeline **never blocks on the library**. `_push_to_output_servers()` does
+one cheap thing — enqueue the frame — and returns immediately. A dedicated background
+worker thread drains the queue and does the resize / write / insert / prune off the hot
+path. This matters because cadence varies wildly: 5–15 s long exposures at night, but as
+fast as ~1 frame/second during the day under auto-exposure. The queue absorbs those
+bursts; if it ever backs up, we drop oldest-queued frames rather than stall capture.
+
+```
+processor produces output_img + metadata
+        │
+        ▼
+_push_to_output_servers()  (ui/main_window/output.py)
+        ├── (existing) web_server.update_image(...)
+        ├── (existing) Discord periodic post
+        └── (NEW, if library.enabled)
+              library.enqueue(output_img, metadata)   # non-blocking, returns at once
+                                                       # bounded queue; drop-oldest if full
+
+        ── background library worker thread (drains the queue) ──
+              ImageLibrary._save(output_img, metadata)
+                   ├── image_resize.to_max_edge(img, 750, q=85) → jpeg bytes
+                   ├── store.write(date_folder, filename, bytes)
+                   ├── index.insert(row)
+                   └── retention.maybe_prune()   # cheap check, throttled
+```
+
+This mirrors the existing `app_logger` queue pattern, so the threading model is already
+familiar in this codebase. The worker is started/stopped with the rest of the output
+services.
+
+`maybe_prune()` runs opportunistically on the worker thread (at most once every
+`prune_interval_minutes`, tracked by a timestamp) so we are not scanning on every frame.
+Pruning deletes oldest rows + their files until **both** constraints hold:
+`captured_at >= now − retention_days` and `SUM(bytes) <= max_size_gb`. The size cap is
+the real backstop for dense daytime auto-exposure runs — at ~1 fps a day of capture is a
+lot of frames, so disk is bounded by size first and age second.
+
+### Config block (draft)
+
+```python
+"library": {
+    "enabled": True,
+    "retention_days": 7,
+    "max_size_gb": 2.0,
+    "max_dimension": 750,     # long-edge px; matches Discord default
+    "jpeg_quality": 85,
+    "api_enabled": True,      # expose the /library endpoints
+    "prune_interval_minutes": 15,
+}
+```
+
+`library.max_dimension` / `jpeg_quality` default to the Discord values so the single
+stored tier *is* "Discord size" out of the box, but remain tunable.
+
+---
+
+## Web/HTTP API
+
+New endpoints (gated behind `library.enabled && library.api_enabled`):
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/library` | JSON manifest: paginated list of entries with metadata. Query params: `since`, `until` (epoch or ISO), `limit` (default 100, capped), `offset`. Includes a `total` count. |
+| `GET` | `/library/image?id=<id>` | The JPEG bytes for one entry (with ETag, same caching pattern as `/latest`). |
+
+Example `/library` response:
+
+```json
+{
+  "total": 4213,
+  "limit": 100,
+  "offset": 0,
+  "images": [
+    {
+      "id": 4213,
+      "captured_at": 1750800615,
+      "url": "/library/image?id=4213",
+      "width": 1000, "height": 750, "bytes": 78213,
+      "exposure": "15s", "gain": "120", "temp": "-10C",
+      "camera": "ASI2600MC", "weather": "Clear, 12C"
+    }
+  ]
+}
+```
+
+- Reuse the existing ETag/`If-None-Match` machinery from `/latest` for `/library/image`.
+- Register both in `services/api_docs.py` so `/docs` and `/openapi.json` stay accurate.
+
+---
+
+## In-app Library panel
+
+- **Nav:** new "Library" section in `nav_rail.py` (e.g. a gallery/photo icon),
+  registered in `window.py` and `_on_nav_changed()` at the next stack index.
+- **`ui/panels/library_panel.py`** (layout only): a scrollable thumbnail **grid**, a
+  **date filter** (day picker / range), a small detail strip, and a **click-to-enlarge**
+  viewer dialog showing the Discord-size image plus its metadata.
+- **`ui/controllers/library_controller.py`** (logic + threading): queries the index,
+  loads JPEGs lazily off the UI thread (e.g. a `QThreadPool`/worker that emits ready
+  pixmaps), and exposes signals the panel binds to. All widget updates marshalled back
+  to the UI thread per the project's threading rule.
+- Because the stored image is already small, the grid can display the stored JPEG
+  directly (optionally letting Qt scale it for the grid cell) — no separate thumbnail
+  tier is generated, consistent with the "Discord size only" decision.
+
+---
+
+## Concurrency & safety
+
+- **SQLite across threads:** the processor thread writes; the web thread reads. Use a
+  dedicated connection per thread (open in the handler) or a single
+  `check_same_thread=False` connection guarded by a `threading.Lock`. Enable WAL mode
+  (`PRAGMA journal_mode=WAL`) for concurrent read/write without blocking the capture path.
+- **Never block the capture pipeline:** the public call (`enqueue()`) only pushes onto a
+  **bounded background queue** and returns — all resize / file write / insert / prune work
+  happens on the library worker thread (mirrors the `app_logger` queue pattern). The queue
+  absorbs daytime auto-exposure bursts (~1 fps); if it ever fills, drop the oldest queued
+  frame rather than apply backpressure to capture. Pruning on the worker is throttled and
+  batched.
+- **Crash/partial-write resilience:** write the JPEG first, then insert the row, so a
+  crash leaves at most an orphan file (cleaned on next prune sweep), never a row pointing
+  at a missing file. A lightweight startup reconciliation can drop rows whose files are
+  gone.
+- **Disk safety:** the size cap is the backstop; the retention sweep must also handle the
+  case where the user shrinks `max_size_gb` below current usage (prune down on next run).
+
+---
+
+## Testing
+
+New `tests/test_image_library.py` (pytest, no hardware/network markers needed):
+
+- `image_resize`: aspect ratio preserved, long-edge respected, output is valid JPEG,
+  size in the expected ballpark.
+- `index`: insert + time-range query + pagination correctness; `total` count.
+- `retention`: time-based prune drops only old rows/files; size-based prune drops oldest
+  first until under cap; both constraints enforced together; size shrink prunes down.
+- `store`: dated-folder pathing; orphan-file reconciliation.
+- `add()` end-to-end with a temp dir + in-memory/temp SQLite, asserting file + row land.
+
+Web endpoint tests extend `tests/test_webserver.py` (`requires_network`): `/library`
+returns paginated JSON; `/library/image` returns bytes with correct content-type + ETag;
+endpoints 404/disabled cleanly when `api_enabled` is false.
+
+Watch file sizes against the ~600-line cap; the package split exists to stay under it.
+
+---
+
+## Phasing
+
+1. **Phase 1 — core store.** `image_resize.py`, `services/library/` (store + index +
+   retention), config block, hook in `_push_to_output_servers()`. Unit tests. No UI/API
+   yet — verify the DB + files populate and prune correctly.
+2. **Phase 2 — web API.** `/library` + `/library/image`, OpenAPI registration, tests.
+3. **Phase 3 — in-app panel.** Library panel + controller, nav registration, lazy grid,
+   viewer dialog. **(Done.)**
+4. **Phase 4 — DONE.** The functional remaining work has landed on
+   `claude/image-library-storage-qzipyt`:
+
+   1. **Headless support (DONE).** `services/headless_runner.py` now creates and starts its
+      own `ImageLibrary`, enqueues each processed frame in `_process_and_save`, passes it to
+      `WebOutputServer(image_library=…)`, and stops it on cleanup. Unattended installs now
+      archive frames and serve `/library`.
+
+   2. **Resize de-duplication (DONE).** `downscale_to_jpeg` gained a `mode`
+      (`longest`/`height`/`width`); `discord_alerts.py` calls it with `mode="height"`,
+      dropping its inline LANCZOS+JPEG copy with the height-cap behaviour preserved. The web
+      `/latest` byte-budget downscaler was left alone (separate budget logic, out of scope).
+
+   3. **Live Library updates (DONE — was not in the original list).** New frames update the
+      Library live: the worker fires `ImageLibrary.set_frame_saved_callback`, the controller
+      re-emits the cross-thread `frame_archived` signal, and the panel appends to the open
+      night (live-follow at the edge) + coalesces a session-list reload.
+
+   4. **Range-change while loading (DONE).** `LibraryController.load_sessions` now coalesces —
+      a request made while a load is in flight re-runs with the latest range when it finishes,
+      so a fast range-dropdown change is never dropped.
+
+   5. **Live theme refresh for the gallery (OBSOLETE).** The flat thumbnail gallery this
+      referenced was replaced by the Phase 5 session-scrubber UI; there is no `#LibraryThumbnail`
+      grid host to restyle anymore.
+
+   6. **Pre-computed thumbnails (efficiency, only if needed — deferred).** The gallery currently reads
+      full (Discord-size, ~50–100 KB) JPEGs to build 200 px thumbnails and decodes/scales them
+      on the UI thread. Fine for a manual gallery at `GALLERY_LIMIT=120`. If galleries grow or
+      feel janky, generate a small thumbnail tier at save time (in `services/library`) and have
+      the gallery read those instead — this also shrinks the bytes shipped over `/library`.
+      Note: scaling can't move to the controller thread without pulling QtGui into it (which
+      would break the headless controller test), so a stored-thumbnail tier is the better lever.
+
+Phases 1–3 are independently shippable; the API and UI both read the same store, so
+either can land first after Phase 1.
+
+---
+
+## Open questions / risks
+
+- **Frame rate vs. retention (resolved → queue + size cap):** at fast daytime cadence
+  (~1 fps under auto-exposure) 7 days could be tens of thousands of frames. This is
+  handled by (a) the non-blocking save queue so capture is never stalled, and (b) the
+  **size cap as the primary backstop** so disk stays bounded regardless of frame count;
+  age is the secondary limit. The gallery and `/library` paginate. A per-N-seconds
+  "store at most 1 frame per interval" throttle is **deferred** — revisit only if the
+  size cap proves too blunt in practice.
+- **Time zone (resolved → local PC time):** this is a local, single-machine app, so
+  everything uses the **PC's local time** — `captured_at`, the date subfolders, and the
+  UI/API date filters. No UTC conversion anywhere. Simplest and matches how the operator
+  thinks about "last night."
+- **Interaction with full-res cleanup:** the library is fully independent of
+  `output_directory` and `services/cleanup.py`; deleting full-res output never touches the
+  library and vice-versa. Worth stating in user docs to avoid confusion.

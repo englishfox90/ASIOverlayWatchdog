@@ -142,7 +142,8 @@ def run_recovery_ladder(conn, camera_to_find: str,
 
 
 def reconnect_safe(conn, target_camera_name: Optional[str] = None,
-                   settings=None, allow_fallback: bool = False) -> bool:
+                   settings=None, allow_fallback: bool = False,
+                   target_camera_serial: Optional[str] = None) -> bool:
     """
     Safely reconnect to camera by re-detecting available cameras first.
 
@@ -154,17 +155,37 @@ def reconnect_safe(conn, target_camera_name: Optional[str] = None,
                  resolution mismatch and reshape errors during capture.
         allow_fallback: If False (default), reconnection fails if target camera not found.
                        If True, falls back to first available camera.
+        target_camera_serial: Stable hardware serial of the camera to reconnect
+                 to (defaults to last connected). When known it is the
+                 authoritative identity — resolved first by probing serials, and
+                 passed to connect() so the wrong body is rejected before any
+                 settings are written.
 
     Returns:
         True if reconnection successful, False otherwise
     """
     conn.log("=== Safe Camera Reconnection ===")
     camera_to_find = target_camera_name or conn.camera_name
+    serial_to_find = target_camera_serial or conn.camera_serial
 
     if camera_to_find:
         conn.log(f"Target camera: '{camera_to_find}'")
     else:
         conn.log("No target camera name specified - will use first available")
+
+    # Serial-first fast path: the index may have shifted, so locate the body by
+    # its stable serial before falling back to name-based detection/recovery.
+    if serial_to_find:
+        from .camera_identity import find_index_by_serial
+        serial_index = find_index_by_serial(conn, serial_to_find, camera_to_find)
+        if serial_index is not None:
+            conn.camera_index = serial_index
+            if conn.connect(serial_index, settings,
+                            expected_camera_name=camera_to_find,
+                            expected_camera_serial=serial_to_find,
+                            _skip_roi_usb_recovery=True):
+                return True
+            conn.log("⚠ Serial-resolved connect failed — falling back to full recovery ladder")
 
     # --- Detection Phase ---
     # Detect cameras, then check if our TARGET camera is present.
@@ -243,6 +264,7 @@ def reconnect_safe(conn, target_camera_name: Optional[str] = None,
     # avoid a double disable/enable on a set_roi "Invalid size".
     if conn.connect(target_index, settings,
                     expected_camera_name=camera_to_find,
+                    expected_camera_serial=serial_to_find,
                     post_recovery=post_recovery,
                     _skip_roi_usb_recovery=True):
         return True
@@ -264,6 +286,7 @@ def reconnect_safe(conn, target_camera_name: Optional[str] = None,
             conn.camera_index = target_index
             if conn.connect(target_index, settings,
                             expected_camera_name=camera_to_find,
+                            expected_camera_serial=serial_to_find,
                             post_recovery=True, _skip_roi_usb_recovery=True):
                 return True
         if conn._usb_disable_enable_func and not conn._is_running_as_admin():
@@ -286,4 +309,5 @@ def reconnect_safe(conn, target_camera_name: Optional[str] = None,
     target_index = detected[0]['index']
     conn.camera_index = target_index
     return conn.connect(target_index, settings, expected_camera_name=camera_to_find,
+                        expected_camera_serial=serial_to_find,
                         _skip_roi_usb_recovery=True)

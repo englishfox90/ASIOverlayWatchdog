@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +47,31 @@ def find_sample_sets(data_dir: Path) -> list:
             sample['lum'] = lum_path
 
     return [samples[ts] for ts in sorted(samples.keys())]
+
+
+def remove_sample_files(sample: dict, trash_dir: Path) -> list:
+    """Move a sample's files (calibration JSON + lum FITS) to trash_dir.
+
+    Recoverable by design — moves rather than deletes. Name-collisions in the
+    trash get a numeric suffix so an earlier removal is never clobbered. Returns
+    the list of destination paths actually moved.
+    """
+    trash_dir = Path(trash_dir)
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    moved = []
+    for key in ('calibration', 'lum'):
+        src = sample.get(key)
+        if not src or not Path(src).is_file():
+            continue
+        src = Path(src)
+        dest = trash_dir / src.name
+        n = 1
+        while dest.exists():
+            dest = trash_dir / f"{src.stem}_{n}{src.suffix}"
+            n += 1
+        shutil.move(str(src), str(dest))
+        moved.append(dest)
+    return moved
 
 
 def create_placeholder_pixmap(text: str, size: int) -> QPixmap:

@@ -8,7 +8,6 @@ import os
 import sys
 import time
 import threading
-import concurrent.futures
 from typing import Optional, List, Dict, Callable, Any
 from .camera_config import verify_camera_identity, configure_camera, wait_for_controls_ready
 from .camera_utils import call_with_timeout, SDKTimeoutError
@@ -26,6 +25,11 @@ _CONTROLS_READY_TIMEOUT_SEC = 12.0  # wait_for_controls_ready (polls get_control
 # block shutdown forever, we abandon the close and let higher-level recovery
 # (which joins the wedged thread first) reclaim the handle.
 _DISCONNECT_LOCK_TIMEOUT_SEC = 5.0
+# Max wait to take sdk_lock before opening a camera. The open is serialized
+# against other SDK calls on the shared DLL (an abandoned serial-probe close,
+# a disconnect). Best-effort: on contention we still open — failing a connect
+# because the lock was briefly busy would be a reliability regression.
+_OPEN_LOCK_TIMEOUT_SEC = 8.0
 
 
 class CameraConnection:
@@ -59,6 +63,9 @@ class CameraConnection:
         # Camera identification for reconnection
         self.camera_name: Optional[str] = None
         self.camera_index: int = 0
+        # Stable hardware serial of the currently-connected camera (the
+        # authoritative identity; index/name are non-unique/unstable).
+        self.camera_serial: Optional[str] = None
 
         # Camera capabilities (populated on connect)
         self.camera_info: dict = {}
@@ -212,80 +219,9 @@ class CameraConnection:
     # =========================================================================
 
     def detect_cameras(self) -> List[Dict[str, Any]]:
-        """
-        Detect connected ZWO cameras.
-
-        Returns:
-            List of camera info dicts with 'index' and 'name' keys
-        """
-        self.log("=== Starting Camera Detection ===")
-
-        if not self.asi:
-            self.log("SDK not initialized, initializing now...")
-            if not self.initialize_sdk():
-                self.log("Camera detection failed: SDK initialization failed")
-                return []
-
-        try:
-            self.log("Querying SDK for number of connected cameras...")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                try:
-                    num_cameras = ex.submit(self.asi.get_num_cameras).result(timeout=10.0)
-                except concurrent.futures.TimeoutError:
-                    self.log("⚠ get_num_cameras() timed out (10s) — SDK wedged, aborting detection")
-                    return []
-            self.cameras = []
-
-            if num_cameras == 0:
-                self.log("⚠ No ZWO cameras detected by SDK")
-                self.log("Check: 1) USB cable connected, 2) Camera powered, 3) USB drivers installed")
-                return []
-
-            self.log(f"✓ Found {num_cameras} ZWO camera(s) connected")
-            self.log("Enumerating camera details...")
-
-            # Snapshot list_cameras() once — calling it per-iteration races against
-            # the driver still binding after a hot-plug / disable-enable cycle,
-            # producing "list index out of range" on the just-appeared camera.
-            # If the list is shorter than num_cameras, retry a few times to let
-            # the SDK converge.
-            camera_list = []
-            for poll_attempt in range(3):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    try:
-                        camera_list = list(ex.submit(self.asi.list_cameras).result(timeout=10.0))
-                    except concurrent.futures.TimeoutError:
-                        self.log("⚠ list_cameras() timed out (10s) — SDK wedged, aborting detection")
-                        return []
-                if len(camera_list) >= num_cameras:
-                    break
-                self.log(
-                    f"  ⚠ Enumeration race: get_num_cameras={num_cameras} but "
-                    f"list_cameras returned {len(camera_list)} — retrying in 1s "
-                    f"({poll_attempt + 1}/3)"
-                )
-                time.sleep(1.0)
-
-            # If we still disagree after retries, trust list_cameras() — it's the
-            # one that returns actual names we can use.
-            for i, name in enumerate(camera_list):
-                self.cameras.append({'index': i, 'name': name})
-                self.log(f"  ✓ Camera {i}: {name}")
-
-            if len(camera_list) != num_cameras:
-                self.log(
-                    f"  ⚠ Enumeration still inconsistent after retries: "
-                    f"num_cameras={num_cameras}, enumerated={len(camera_list)}"
-                )
-
-            self.log(f"Camera detection complete: {len(self.cameras)} camera(s) enumerated")
-            return self.cameras
-
-        except Exception as e:
-            self.log(f"ERROR during camera detection: {e}")
-            import traceback
-            self.log(f"Stack trace: {traceback.format_exc()}")
-            return []
+        """Detect connected ZWO cameras (delegates to camera_detect)."""
+        from .camera_detect import detect_cameras as detect_cameras_impl
+        return detect_cameras_impl(self)
 
     # =========================================================================
     # Camera Connection
@@ -293,6 +229,7 @@ class CameraConnection:
 
     def connect(self, camera_index: int = 0, settings: Optional[Dict[str, Any]] = None,
                 expected_camera_name: Optional[str] = None,
+                expected_camera_serial: Optional[str] = None,
                 post_recovery: bool = False,
                 _skip_roi_usb_recovery: bool = False) -> bool:
         """
@@ -351,11 +288,20 @@ class CameraConnection:
             for attempt in range(1, max_attempts + 1):
                 try:
                     # Bounded: asi.Camera() runs ASIOpenCamera + ASIInitCamera,
-                    # the calls that historically hang on a wedged USB device.
-                    self.camera = call_with_timeout(
-                        lambda: self.asi.Camera(camera_index), _OPEN_TIMEOUT_SEC,
-                        hint="camera open/init — USB may be wedged",
-                    )
+                    # which historically hang on a wedged USB device. Serialize
+                    # the open under sdk_lock so it can't race another SDK call on
+                    # the shared DLL (e.g. an abandoned serial-probe close in
+                    # camera_identity._probe_serial). Best-effort: on contention
+                    # we still open (pre-lock parity), never fail on the lock.
+                    got_lock = self.sdk_lock.acquire(timeout=_OPEN_LOCK_TIMEOUT_SEC)
+                    try:
+                        self.camera = call_with_timeout(
+                            lambda: self.asi.Camera(camera_index), _OPEN_TIMEOUT_SEC,
+                            hint="camera open/init — USB may be wedged",
+                        )
+                    finally:
+                        if got_lock:
+                            self.sdk_lock.release()
                     break  # Success - exit retry loop
                 except Exception as e:
                     if attempt < max_attempts:
@@ -414,14 +360,46 @@ class CameraConnection:
                     self.camera = None
                     return False
 
-            # Store camera name for future reconnection
+            # Authoritative identity gate. The model name above is shared by
+            # every body of the same model, so when a serial is on file we
+            # confirm THIS physical device before writing any settings — the
+            # name match alone let the app reconfigure a guide camera when
+            # indices shifted (June 2026). Serial reads require the open handle;
+            # an unreadable serial (None) falls through to the name match above.
+            from .camera_identity import read_serial, serials_match
+            actual_serial = read_serial(self.camera)
+            if expected_camera_serial and actual_serial is not None \
+                    and not serials_match(expected_camera_serial, actual_serial):
+                self.log(
+                    f"✗ Camera identity mismatch by SERIAL! Expected "
+                    f"{expected_camera_serial} at index {camera_index}, but SDK "
+                    f"returned {actual_serial}. Closing wrong camera and failing."
+                )
+                try:
+                    self.camera.close()
+                except Exception:
+                    pass
+                self.camera = None
+                return False
+
+            # Store identity and persist to config. The serial is the stable
+            # key; configs predating it learn it here on the first clean connect.
             self.camera_name = actual_name
             self.camera_index = camera_index
-
-            # Save camera name to config for persistence across restarts
+            self.camera_serial = actual_serial
             if self.config_callback:
                 self.config_callback('zwo_selected_camera_name', self.camera_name)
-                self.log(f"Saved camera name to config: {self.camera_name}")
+                # Name and serial must always describe the SAME physical body.
+                # The serial read is intermittently flaky (returns None on a
+                # perfectly good camera); if we updated the name here but kept a
+                # previously-stored serial, the two could end up pointing at
+                # different cameras — and a later connect would then reject the
+                # right camera by serial (the 340b/232a desync, 2026-06-26).
+                # When the serial is unreadable, clear it so it is re-learned
+                # cleanly next time rather than left stale against the new name.
+                self.config_callback('zwo_selected_camera_serial', actual_serial or '')
+                self.log(f"Saved camera identity: {self.camera_name} "
+                         f"(serial {actual_serial or 'unavailable'})")
 
             # Store camera capabilities for later access
             self.camera_info = camera_info
@@ -517,6 +495,7 @@ class CameraConnection:
                     return self.connect(
                         target_index, settings,
                         expected_camera_name=expected_camera_name,
+                        expected_camera_serial=expected_camera_serial,
                         post_recovery=True, _skip_roi_usb_recovery=True,
                     )
                 self.log("✗ Camera still not recoverable after USB disable/enable")
@@ -524,24 +503,9 @@ class CameraConnection:
             return False
 
     def _log_invalid_id_diagnostics(self, camera_index: int) -> None:
-        """Log diagnostic information for Invalid ID errors"""
-        self.log("=== Diagnostic Information ===")
-        self.log(f"Attempted camera index: {camera_index}")
-        self.log("This error typically occurs when:")
-        self.log("  1. Camera was not properly closed by another process")
-        self.log("  2. SDK is in an inconsistent state")
-        self.log("  3. Camera index changed (hot plug event)")
-        self.log("Recommended action: Try stopping/restarting the application")
-
-        # Try to get current camera list for diagnostics
-        try:
-            num_cameras = self.asi.get_num_cameras()
-            self.log(f"Current SDK state: {num_cameras} camera(s) reported by SDK")
-            listed_cameras = self.asi.list_cameras()
-            for idx, name in enumerate(listed_cameras):
-                self.log(f"  Camera {idx}: {name}")
-        except Exception as diag_err:
-            self.log(f"  Could not query camera list for diagnostics: {diag_err}")
+        """Log diagnostic information for Invalid ID errors (delegates)."""
+        from .camera_detect import log_invalid_id_diagnostics
+        log_invalid_id_diagnostics(self, camera_index)
 
     def _wait_for_stable_detection(self, camera_name: str,
                                     timeout_sec: float = 10.0,
@@ -566,22 +530,18 @@ class CameraConnection:
         return wait_for_stable_detection(self, camera_name, timeout_sec, poll_interval)
 
     def _find_camera_index_by_name(self, cameras: List[Dict[str, Any]], camera_name: str) -> Optional[int]:
-        """
-        Find camera index by exact name match.
+        """Return the index of the camera whose name exactly matches (after strip).
 
-        Args:
-            cameras: List of detected cameras with 'index' and 'name' keys
-            camera_name: Name of camera to find
-
-        Returns:
-            Camera index if found, None if not found
+        Exact, not substring — a substring could match a different model family
+        (e.g. "...676MC" inside "...676MC Pro"). This only picks the start index;
+        connect()'s serial gate is the authoritative downstream check. None if absent.
         """
+        target = (camera_name or '').strip()
         for cam in cameras:
-            if camera_name in cam['name']:
+            if target == (cam['name'] or '').strip():
                 self.log(f"✓ Found camera '{camera_name}' at index {cam['index']}")
                 return cam['index']
 
-        # Log available cameras for debugging
         self.log(f"✗ Camera '{camera_name}' not found in detected cameras:")
         for cam in cameras:
             self.log(f"  - [{cam['index']}] {cam['name']}")
@@ -589,7 +549,8 @@ class CameraConnection:
 
     def reconnect_safe(self, target_camera_name: Optional[str] = None,
                        settings: Optional[Dict[str, Any]] = None,
-                       allow_fallback: bool = False) -> bool:
+                       allow_fallback: bool = False,
+                       target_camera_serial: Optional[str] = None) -> bool:
         """
         Safely reconnect to camera by re-detecting available cameras first.
 
@@ -610,7 +571,8 @@ class CameraConnection:
         is disconnected.
         """
         from .camera_reconnect import reconnect_safe as reconnect_safe_impl
-        return reconnect_safe_impl(self, target_camera_name, settings, allow_fallback)
+        return reconnect_safe_impl(self, target_camera_name, settings, allow_fallback,
+                                   target_camera_serial=target_camera_serial)
 
     # =========================================================================
     # Camera Configuration
@@ -618,7 +580,9 @@ class CameraConnection:
 
     def verify_identity(self) -> bool:
         """Verify the open camera handle still points to the expected physical camera."""
-        return verify_camera_identity(self.camera, self.camera_name, self.log)
+        return verify_camera_identity(
+            self.camera, self.camera_name, self.log, camera_serial=self.camera_serial
+        )
 
     def configure(self, settings: Dict[str, Any]) -> None:
         """Configure camera settings.
@@ -632,7 +596,8 @@ class CameraConnection:
             self.log("Cannot configure: camera not connected")
             return
         self.log("Configuring camera settings...")
-        if not verify_camera_identity(self.camera, self.camera_name, self.log):
+        if not verify_camera_identity(self.camera, self.camera_name, self.log,
+                                      camera_serial=self.camera_serial):
             raise Exception("Camera identity mismatch — aborting configure")
         image_type, bit_depth = configure_camera(
             self.camera, self.asi, settings, self.supports_raw16, self.log

@@ -16,9 +16,11 @@ from datetime import datetime
 from .logger import app_logger
 from .config import Config
 from .camera import ZWOCamera
+from .camera.camera_utils import get_selected_camera_name
 from .web_output import WebOutputServer
 from .processor import add_overlays
 from .cleanup import run_cleanup
+from .library import ImageLibrary
 
 
 class HeadlessRunner:
@@ -38,9 +40,11 @@ class HeadlessRunner:
         self.config = Config()
         self.zwo_camera = None
         self.web_server = None
+        self.image_library = None
         self.image_count = 0
         self._last_capture_epoch = None  # Unix ts of last successful frame (for /status)
         self._last_error = None          # Most recent capture error (for /status health)
+        self._last_webserver_retry = 0.0  # Throttles web-server bind re-attempts
         self._shutdown_event = threading.Event()
         
         # Register signal handlers for graceful shutdown
@@ -67,7 +71,14 @@ class HeadlessRunner:
             # Load configuration
             self._log("Loading configuration...")
             self._load_config()
-            
+
+            # Rolling image library — archives downscaled frames off the hot
+            # path and backs the /library endpoints. Start before the web server
+            # so it can be handed in. enqueue() no-ops while library.enabled is
+            # false, so this is safe to start unconditionally.
+            self.image_library = ImageLibrary(lambda: self.config.data)
+            self.image_library.start()
+
             # Start web server if configured
             if self.config.get('output', {}).get('mode') == 'webserver':
                 self._start_webserver()
@@ -111,7 +122,7 @@ class HeadlessRunner:
         """Load and validate configuration"""
         self.config.load()
 
-        cam_name = self.config.get('zwo_selected_camera_name', '') or self.config.get('zwo_camera_name', '')
+        cam_name = get_selected_camera_name(self.config)
         profile = self._active_profile()
 
         # Log key settings
@@ -126,24 +137,56 @@ class HeadlessRunner:
     def _active_profile(self) -> dict:
         """Return the active camera's profile, or DEFAULT_CAMERA_PROFILE if no camera selected."""
         from services.config import DEFAULT_CAMERA_PROFILE
-        cam_name = self.config.get('zwo_selected_camera_name', '') or self.config.get('zwo_camera_name', '')
+        cam_name = get_selected_camera_name(self.config)
         if not cam_name:
             return dict(DEFAULT_CAMERA_PROFILE)
-        return self.config.get_camera_profile(cam_name) or dict(DEFAULT_CAMERA_PROFILE)
+        serial = self.config.get('zwo_selected_camera_serial', '')
+        return self.config.get_camera_profile(cam_name, serial) or dict(DEFAULT_CAMERA_PROFILE)
     
+    # Minimum seconds between web-server bind re-attempts.
+    _WEBSERVER_RETRY_SEC = 15.0
+
+    def _webserver_mode_enabled(self) -> bool:
+        return self.config.get('output', {}).get('mode') == 'webserver'
+
+    def _ensure_webserver(self):
+        """Re-attempt a failed web-server bind from the capture loop.
+
+        At logon autostart the configured bind address (a Tailscale/LAN IP)
+        may not be up on any interface yet, so the initial start in start()
+        fails. Without this, web output stays off for the whole session even
+        though capture and file output keep working. Throttled so a persistent
+        failure doesn't re-attempt (and re-log) on every frame.
+        """
+        if not self._webserver_mode_enabled():
+            return
+        if self.web_server and self.web_server.running:
+            return
+        if (time.time() - self._last_webserver_retry) < self._WEBSERVER_RETRY_SEC:
+            return
+        self._log("Retrying web server start...")
+        self._start_webserver()
+
     def _start_webserver(self):
         """Start web server for image output"""
+        # Stamp every attempt so the loop's retry throttle counts from here,
+        # whether this is the initial start or a re-attempt.
+        self._last_webserver_retry = time.time()
         output_config = self.config.get('output', {})
-        
+
         host = output_config.get('webserver_host', '127.0.0.1')
         port = output_config.get('webserver_port', 8080)
         image_path = output_config.get('webserver_path', '/latest')
         status_path = output_config.get('webserver_status_path', '/status')
         docs_path = output_config.get('webserver_docs_path', '/docs')
+        library_path = output_config.get('webserver_library_path', '/library')
 
         self._log(f"Starting web server on {host}:{port}...")
 
-        self.web_server = WebOutputServer(host, port, image_path, status_path, docs_path)
+        self.web_server = WebOutputServer(
+            host, port, image_path, status_path, docs_path,
+            library_path=library_path, image_library=self.image_library,
+        )
         if self.web_server.start():
             self._log(f"✓ Web server running: {self.web_server.get_url()}")
             self._log(f"  Status endpoint: {self.web_server.get_status_url()}")
@@ -168,7 +211,8 @@ class HeadlessRunner:
             self.zwo_camera = ZWOCamera(
                 sdk_path=sdk_path,
                 camera_index=self.config.get('zwo_selected_camera', 0),
-                camera_name=self.config.get('zwo_camera_name'),
+                camera_name=get_selected_camera_name(self.config),
+                camera_serial=self.config.get('zwo_selected_camera_serial', ''),
                 exposure_sec=exposure_sec,
                 gain=profile.get('gain', DEFAULT_CAMERA_PROFILE['gain']),
                 white_balance_r=profile.get('wb_r', DEFAULT_CAMERA_PROFILE['wb_r']),
@@ -212,7 +256,14 @@ class HeadlessRunner:
             if not self.zwo_camera.connect_camera(camera_index):
                 self._log(f"ERROR: Failed to connect to camera {camera_index}")
                 return False
-            
+
+            # Persist the serial learned on connect so it survives a restart and
+            # can reject the wrong camera if the index later shifts.
+            from services.camera.camera_identity import persist_camera_serial
+            serial = getattr(self.zwo_camera, 'camera_serial', None)
+            if persist_camera_serial(self.config, serial):
+                self._log(f"Persisted camera serial: {serial}")
+
             self._log(f"✓ Connected to camera: {cameras[camera_index]}")
             return True
             
@@ -226,6 +277,10 @@ class HeadlessRunner:
         """Main capture loop"""
         while self.running and not self._shutdown_event.is_set():
             try:
+                # Self-heal a web server that failed its initial bind (e.g. the
+                # Tailscale/LAN IP wasn't up yet at logon autostart).
+                self._ensure_webserver()
+
                 # Check scheduled capture window
                 if not self.zwo_camera.is_within_scheduled_window():
                     self._log("Outside scheduled capture window, waiting...")
@@ -348,6 +403,10 @@ class HeadlessRunner:
             else:
                 img.save(output_path, 'PNG', optimize=True)
             
+            # Archive a downscaled copy to the rolling image library (non-blocking).
+            if self.image_library:
+                self.image_library.enqueue(img, metadata)
+
             # Push to web server if running
             if self.web_server and self.web_server.running:
                 img_bytes = io.BytesIO()
@@ -390,6 +449,13 @@ class HeadlessRunner:
                 self._log("Web server stopped")
         except Exception as e:
             self._log(f"Error stopping web server: {e}")
+
+        try:
+            if self.image_library:
+                self.image_library.stop()
+                self._log("Image library stopped")
+        except Exception as e:
+            self._log(f"Error stopping image library: {e}")
         
         self._log(f"Headless session complete. Captured {self.image_count} images.")
         self._log("=" * 60)

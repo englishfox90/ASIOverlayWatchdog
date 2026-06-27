@@ -68,6 +68,17 @@ class _MainWindowCaptureMixin:
             self._on_detect_cameras()
 
     def _on_detect_cameras(self):
+        # Coalesce overlapping triggers. The Detect button, the AppBar connect
+        # action, the missing-camera "Detect Again" button and the startup
+        # auto-detect can all fire near-simultaneously, each spawning a full
+        # enumeration thread (four ran in 3s on 2026-06-26). One in-flight
+        # detection is enough; ignore re-entrant calls until it completes. The
+        # flag is cleared in _on_cameras_detected, which every detect path
+        # reaches via the cameras_detected signal.
+        if getattr(self, '_detection_in_progress', False):
+            app_logger.debug("Camera detection already in progress — ignoring duplicate trigger")
+            return
+
         app_logger.info("=== Camera Detection Initiated ===")
 
         sdk_path = self.config.get('zwo_sdk_path', '')
@@ -80,6 +91,7 @@ class _MainWindowCaptureMixin:
             self.capture_panel.set_detection_error(f"SDK not found: {sdk_path}")
             return
 
+        self._detection_in_progress = True
         self.capture_panel.set_detecting(True)
 
         main_window = self
@@ -183,14 +195,14 @@ class _MainWindowCaptureMixin:
         threading.Thread(target=detect_thread, daemon=True).start()
 
     def _on_cameras_detected(self, cameras: list, error: str):
+        self._detection_in_progress = False
         self.capture_panel.set_detecting(False)
 
         if error:
             self.capture_panel.set_detection_error(error)
             app_logger.error(f"Camera detection error: {error}")
             self._notify(f"Camera detection: {error}", "error")
-            self.app_bar.camera_chip.set_status('idle')
-            self.app_bar.camera_chip.set_label('Camera')
+            self.app_bar.set_camera_status('idle')
         else:
             self.capture_panel.set_cameras(cameras)
             self._notify(f"{len(cameras)} camera(s) detected")
@@ -198,8 +210,7 @@ class _MainWindowCaptureMixin:
             self.config.set('available_cameras', cameras)
 
             if cameras:
-                self.app_bar.camera_chip.set_status('connected')
-                self.app_bar.camera_chip.set_label('Ready')
+                self.app_bar.set_camera_status('connected', 'Ready')
 
             saved_name = self.config.get('zwo_selected_camera_name', '')
 
@@ -279,9 +290,11 @@ class _MainWindowCaptureMixin:
                 self.capture_panel.set_missing_camera_warning(
                     saved_name, phantom_count
                 )
-            elif not saved_name and cameras:
-                # Fresh install (no prior selection): auto-pick the first so
-                # the user isn't staring at an empty combo.
+            elif not saved_name and len(cameras) == 1:
+                # Fresh install on an unambiguous single-camera rig: auto-pick so
+                # the user isn't staring at an empty combo. We deliberately do
+                # NOT auto-pick on a multi-camera rig — grabbing "the first
+                # camera" is how a guide camera got hijacked (June 2026).
                 cam = cameras[0]
                 cam_clean = cam.split(' (Index:')[0] if '(Index:' in cam else cam
                 actual_index = 0
@@ -293,12 +306,19 @@ class _MainWindowCaptureMixin:
                 self.capture_panel.camera_widget.camera_combo.setCurrentIndex(0)
                 self.config.set('zwo_selected_camera', actual_index)
                 self.config.set('zwo_selected_camera_name', cam_clean)
+                self.config.set('zwo_selected_camera_serial', '')  # learned on connect
                 self.config.save()
                 app_logger.info(
-                    f"Auto-selected camera (first install, no saved name): "
+                    f"Auto-selected camera (first install, single camera): "
                     f"'{cam_clean}' (SDK Index: {actual_index})"
                 )
                 self.capture_panel.set_missing_camera_warning('')
+            elif not saved_name and len(cameras) > 1:
+                app_logger.info(
+                    f"{len(cameras)} cameras present and none selected — leaving "
+                    "the choice to the user (refusing to auto-pick on a multi-camera rig)."
+                )
+                self.capture_panel.clear_camera_selection()
 
             self.capture_panel.camera_widget.camera_combo.blockSignals(False)
             self.capture_panel.camera_widget.load_from_config(self.config)
@@ -459,6 +479,11 @@ class _MainWindowCaptureMixin:
                 return
         self.app_bar.set_start_enabled(True)
 
+    def _lock_camera_picker(self, active: bool):
+        """Lock/unlock the Capture-tab camera picker as capture starts/stops."""
+        if hasattr(self, 'capture_panel'):
+            self.capture_panel.set_capture_active(active)
+
     def start_capture(self):
         mode = self.config.get('capture_mode', 'camera')
 
@@ -477,6 +502,7 @@ class _MainWindowCaptureMixin:
 
             self.is_capturing = True
             self.app_bar.set_capturing(True)
+            self._lock_camera_picker(True)
             self.app_bar.set_status('waiting')
             self._last_capture_error = None
             self.push_capture_status()
@@ -494,6 +520,7 @@ class _MainWindowCaptureMixin:
             app_logger.error(f"Failed to start capture: {e}")
             self.is_capturing = False
             self.app_bar.set_capturing(False)
+            self._lock_camera_picker(False)
             self._notify(f"Capture failed: {e}", "error")
             self._send_discord_error(f"Failed to start capture: {e}")
 
@@ -504,6 +531,8 @@ class _MainWindowCaptureMixin:
             self.app_bar.set_capturing(False)
 
             mode = self.config.get('capture_mode', 'camera')
+
+            self._lock_camera_picker(False)
 
             if mode == 'camera' and self.camera_controller:
                 self.camera_controller.stop_capture()
@@ -525,8 +554,7 @@ class _MainWindowCaptureMixin:
             # Slower status updates when idle
             self.status_timer.setInterval(1000)
 
-            self.app_bar.camera_chip.set_status('connected')
-            self.app_bar.camera_chip.set_label('Ready')
+            self.app_bar.set_camera_status('connected', 'Ready')
 
             self._update_start_button()
 
@@ -619,24 +647,12 @@ class _MainWindowCaptureMixin:
         self._on_detect_cameras()
 
     def _start_camera_capture(self):
+        # start_capture() connects on a worker thread and returns before the
+        # camera is open, so is_capturing/zwo_camera aren't ready yet. The chip
+        # and RAW16 capabilities are updated from the capture_started signal
+        # (_on_camera_capture_started); failures arrive via the error signal.
         self._ensure_camera_controller()
         self.camera_controller.start_capture()
-
-        if self.camera_controller.is_capturing:
-            self.app_bar.camera_chip.set_status('connected')
-            self.app_bar.camera_chip.set_label('Connected')
-            app_logger.info("Camera capture started")
-
-            if self.camera_controller.zwo_camera and hasattr(self, 'capture_panel'):
-                try:
-                    supports_raw16 = self.camera_controller.zwo_camera.supports_raw16
-                    bit_depth = self.camera_controller.zwo_camera.sensor_bit_depth
-                    self.capture_panel.update_camera_capabilities(supports_raw16, bit_depth)
-                except Exception as e:
-                    app_logger.debug(f"Could not update camera capabilities: {e}")
-        else:
-            self.app_bar.camera_chip.set_status('error')
-            self.app_bar.camera_chip.set_label('Connection Failed')
 
     def _start_watch_mode(self):
         from .controllers.watch_controller import WatchControllerQt
@@ -662,8 +678,7 @@ class _MainWindowCaptureMixin:
         self._notify(f"Camera error: {error_msg}", "error")
 
         if hasattr(self, 'app_bar') and self.app_bar:
-            self.app_bar.camera_chip.set_status('error')
-            self.app_bar.camera_chip.set_label('Camera Error')
+            self.app_bar.set_camera_status('error', 'Camera error')
 
         should_notify = (
             self.camera_controller is None
@@ -694,21 +709,41 @@ class _MainWindowCaptureMixin:
     def _on_camera_capture_started(self):
         """Handle controller capture_started signal.
 
-        Fires when the controller starts capture — usually from the user's
-        own button click (where we've already mirrored the state), but also
-        from auto-recovery, which otherwise leaves the AppBar's Start/Stop
-        button showing "Start" while capture is actually running.
+        Fires on the main thread once the worker has actually connected and the
+        capture loop is running — the first point where zwo_camera is populated,
+        so the reliable place to read camera capabilities (RAW16 support, bit
+        depth). Reached both from the user's own button click and from
+        auto-recovery (which otherwise leaves the AppBar showing "Start").
         """
-        if self.is_capturing:
+        self.app_bar.set_camera_status('connected', 'Connected')
+        self._update_camera_capabilities()
+
+        # Auto-recovery restarted capture with no user click, so the rest of the
+        # UI state still says "stopped" — sync it. The user-initiated path has
+        # already mirrored this in start_capture().
+        if not self.is_capturing:
+            app_logger.info("Capture resumed by auto-recovery — syncing UI state")
+            self.is_capturing = True
+            self.app_bar.set_capturing(True)
+            self._lock_camera_picker(True)
+            self.app_bar.set_status('waiting')
+            self._last_capture_error = None
+            self.push_capture_status()
+
+    def _update_camera_capabilities(self):
+        """Push the connected camera's RAW16 support to the Capture panel.
+
+        Must run after the camera is open — start_capture() connects on a worker
+        thread, so zwo_camera is only populated by the time capture_started fires.
+        """
+        cam = self.camera_controller.zwo_camera if self.camera_controller else None
+        if not cam or not hasattr(self, 'capture_panel'):
             return
-        app_logger.info("Capture resumed by auto-recovery — syncing UI state")
-        self.is_capturing = True
-        self.app_bar.set_capturing(True)
-        self.app_bar.set_status('waiting')
-        self.app_bar.camera_chip.set_status('connected')
-        self.app_bar.camera_chip.set_label('Connected')
-        self._last_capture_error = None
-        self.push_capture_status()
+        try:
+            self.capture_panel.update_camera_capabilities(
+                cam.supports_raw16, cam.sensor_bit_depth)
+        except Exception as e:
+            app_logger.debug(f"Could not update camera capabilities: {e}")
 
     def _on_raw16_mode_changed(self, enabled: bool):
         if not self.camera_controller or not self.camera_controller.is_capturing:

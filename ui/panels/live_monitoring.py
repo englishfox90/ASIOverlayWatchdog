@@ -4,9 +4,9 @@ Always-visible panel showing preview, histogram, and activity log
 """
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-    QScrollArea, QSizePolicy, QTextEdit, QGridLayout
+    QScrollArea, QSizePolicy, QTextEdit
 )
-from PySide6.QtCore import Qt, Signal, QTimer, Slot
+from PySide6.QtCore import Qt, Signal, QTimer, Slot, QSize
 from PySide6.QtGui import QFont, QPixmap, QImage, QPainter, QColor, QPen
 from qfluentwidgets import CardWidget, SubtitleLabel, BodyLabel, CaptionLabel, ProgressBar
 
@@ -15,6 +15,7 @@ import numpy as np
 from datetime import datetime
 
 from ..theme.tokens import Colors, Typography, Spacing, Layout
+from ..theme.icons import qicon
 from ..components.cards import MonitoringCard
 
 
@@ -25,25 +26,31 @@ class PreviewWidget(QFrame):
         super().__init__(parent)
         self._pixmap = None
         self._metadata = {}
+        self._overlay_key = None
         self._setup_ui()
-    
+
     def _setup_ui(self):
         self.setMinimumSize(200, 150)
         # Allow flexible sizing - image will scale to fit
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Scope to the class — a bare `QFrame` selector also tints child QLabels
+        # (QLabel subclasses QFrame), which put a box behind the overlay icon.
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(f"""
-            QFrame {{
+            PreviewWidget {{
                 background-color: {Colors.bg_input};
                 border: none;
                 border-radius: {Layout.radius_md}px;
             }}
         """)
-        
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Image label (centered)
-        self.image_label = QLabel("No image yet")
+
+        # Image label (centered). Starts empty — the message overlay below owns
+        # all "no camera / no image" messaging, so a placeholder here would just
+        # show through behind the translucent overlay as duplicate text.
+        self.image_label = QLabel("")
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setStyleSheet(f"""
             color: {Colors.text_muted};
@@ -51,7 +58,60 @@ class PreviewWidget(QFrame):
         """)
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.image_label)
-    
+
+        # Message overlay (no-camera / stale "last frame") drawn over the image.
+        # The bg is scoped to the frame's objectName so it doesn't tint the
+        # child labels/icon (a selector-less rule propagates to children).
+        self._overlay = QFrame(self)
+        self._overlay.setObjectName("previewOverlay")
+        self._overlay.setAttribute(Qt.WA_StyledBackground, True)
+        self._overlay.setStyleSheet(
+            "#previewOverlay { background-color: rgba(6, 8, 11, 0.55); }"
+        )
+        ov = QVBoxLayout(self._overlay)
+        ov.setAlignment(Qt.AlignCenter)
+        ov.setSpacing(Spacing.md)
+        self._overlay_icon = QLabel()
+        self._overlay_icon.setAlignment(Qt.AlignCenter)
+        self._overlay_title = QLabel()
+        self._overlay_title.setAlignment(Qt.AlignCenter)
+        self._overlay_title.setStyleSheet(
+            f"color: {Colors.text_primary}; font-size: {Typography.size_title}px; "
+            f"font-weight: 600; background: transparent;"
+        )
+        self._overlay_sub = QLabel()
+        self._overlay_sub.setAlignment(Qt.AlignCenter)
+        self._overlay_sub.setWordWrap(True)
+        # Fixed width gives the wrapped label a stable box so it isn't shrunk to
+        # its content width (which clipped the text under the centered layout).
+        self._overlay_sub.setFixedWidth(440)
+        self._overlay_sub.setStyleSheet(
+            f"color: {Colors.text_muted}; font-size: {Typography.size_body}px; "
+            f"background: transparent;"
+        )
+        ov.addWidget(self._overlay_icon, 0, Qt.AlignCenter)
+        ov.addWidget(self._overlay_title)
+        ov.addWidget(self._overlay_sub, 0, Qt.AlignCenter)
+        self._overlay.hide()
+
+    def show_overlay(self, icon_name: str, title: str, subtitle: str = ""):
+        """Cover the preview with a centered message (no-camera / stale frame)."""
+        key = (icon_name, title, subtitle)
+        if key == self._overlay_key and self._overlay.isVisible():
+            return
+        self._overlay_key = key
+        self._overlay_icon.setPixmap(qicon(icon_name, Colors.text_muted).pixmap(QSize(64, 64)))
+        self._overlay_title.setText(title)
+        self._overlay_sub.setText(subtitle)
+        self._overlay.setGeometry(0, 0, self.width(), self.height())
+        self._overlay.raise_()
+        self._overlay.show()
+
+    def clear_overlay(self):
+        if self._overlay.isVisible():
+            self._overlay.hide()
+        self._overlay_key = None
+
     def update_image(self, pil_image: Image.Image, metadata: dict = None):
         """Update preview with new image"""
         try:
@@ -68,6 +128,7 @@ class PreviewWidget(QFrame):
             self._pixmap = QPixmap.fromImage(qimg)
             self._metadata = metadata or {}
             self._update_display()
+            self.clear_overlay()  # a fresh frame supersedes any message overlay
         except Exception as e:
             self.image_label.setText(f"Error: {e}")
     
@@ -85,6 +146,9 @@ class PreviewWidget(QFrame):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_display()
+        # Always track the preview size so the overlay is correctly sized the
+        # moment it's shown (not just while already visible).
+        self._overlay.setGeometry(0, 0, self.width(), self.height())
 
 
 class HistogramWidget(QFrame):
@@ -267,173 +331,6 @@ class HistogramWidget(QFrame):
             painter.drawText(int(clip_x) + 3, padding + 22, 'Clip')
 
 
-class MetadataWidget(QFrame):
-    """Compact metadata display with ML predictions support"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._ml_enabled = False
-        self._setup_ui()
-    
-    def _setup_ui(self):
-        self.setStyleSheet(f"""
-            QFrame {{
-                background-color: transparent;
-            }}
-        """)
-        
-        layout = QGridLayout(self)
-        layout.setContentsMargins(0, Spacing.sm, 0, 0)
-        layout.setSpacing(Spacing.sm)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(3, 1)
-        
-        # Row 0: Filename, Timestamp
-        self.filename_label = CaptionLabel("File:")
-        self.filename_label.setStyleSheet(f"color: {Colors.text_muted};")
-        self.filename_value = BodyLabel("-")
-        self.filename_value.setStyleSheet(f"color: {Colors.text_secondary};")
-        
-        self.time_label = CaptionLabel("Time:")
-        self.time_label.setStyleSheet(f"color: {Colors.text_muted};")
-        self.time_value = BodyLabel("-")
-        self.time_value.setStyleSheet(f"color: {Colors.text_secondary};")
-        
-        layout.addWidget(self.filename_label, 0, 0)
-        layout.addWidget(self.filename_value, 0, 1)
-        layout.addWidget(self.time_label, 0, 2)
-        layout.addWidget(self.time_value, 0, 3)
-        
-        # Row 1: Exposure, Gain
-        self.exp_label = CaptionLabel("Exp:")
-        self.exp_label.setStyleSheet(f"color: {Colors.text_muted};")
-        self.exp_value = BodyLabel("-")
-        self.exp_value.setStyleSheet(f"color: {Colors.text_secondary};")
-        
-        self.gain_label = CaptionLabel("Gain:")
-        self.gain_label.setStyleSheet(f"color: {Colors.text_muted};")
-        self.gain_value = BodyLabel("-")
-        self.gain_value.setStyleSheet(f"color: {Colors.text_secondary};")
-        
-        layout.addWidget(self.exp_label, 1, 0)
-        layout.addWidget(self.exp_value, 1, 1)
-        layout.addWidget(self.gain_label, 1, 2)
-        layout.addWidget(self.gain_value, 1, 3)
-        
-        # Row 2: ML Predictions (Roof, Sky) - hidden by default
-        self.roof_label = CaptionLabel("Roof:")
-        self.roof_label.setStyleSheet(f"color: {Colors.text_muted};")
-        self.roof_value = BodyLabel("-")
-        self.roof_value.setStyleSheet(f"color: {Colors.text_secondary};")
-        
-        self.sky_label = CaptionLabel("Sky:")
-        self.sky_label.setStyleSheet(f"color: {Colors.text_muted};")
-        self.sky_value = BodyLabel("-")
-        self.sky_value.setStyleSheet(f"color: {Colors.text_secondary};")
-        
-        layout.addWidget(self.roof_label, 2, 0)
-        layout.addWidget(self.roof_value, 2, 1)
-        layout.addWidget(self.sky_label, 2, 2)
-        layout.addWidget(self.sky_value, 2, 3)
-        
-        # Hide ML row by default
-        self._set_ml_visible(False)
-    
-    def _set_ml_visible(self, visible: bool):
-        """Show/hide ML prediction row"""
-        self.roof_label.setVisible(visible)
-        self.roof_value.setVisible(visible)
-        self.sky_label.setVisible(visible)
-        self.sky_value.setVisible(visible)
-    
-    def set_ml_enabled(self, enabled: bool):
-        """Enable/disable ML predictions display"""
-        self._ml_enabled = enabled
-        self._set_ml_visible(enabled)
-    
-    def update_metadata(self, metadata: dict):
-        """Update displayed metadata"""
-        # Handle both old format (lowercase) and camera format (uppercase)
-        filename = metadata.get('filename') or metadata.get('FILENAME', '-')
-        self.filename_value.setText(filename)
-        
-        timestamp = metadata.get('timestamp') or metadata.get('DATETIME', '-')
-        self.time_value.setText(timestamp)
-        
-        # Format exposure - handle string format "20s" or "0.1s" from camera
-        exp = metadata.get('exposure') or metadata.get('EXPOSURE', '-')
-        if isinstance(exp, str):
-            # Try to parse if it's a string like "20s"
-            try:
-                exp_num = float(exp.rstrip('sSmM'))
-                exp = exp_num
-            except (ValueError, AttributeError):
-                self.exp_value.setText(exp)
-                exp = None
-        
-        if isinstance(exp, (int, float)):
-            # Numeric value in seconds - format dynamically
-            if exp >= 60:
-                # Minutes
-                minutes = exp / 60.0
-                self.exp_value.setText(f"{minutes:.2f}m")
-            elif exp >= 1:
-                # Seconds
-                self.exp_value.setText(f"{exp:.2f}s")
-            else:
-                # Milliseconds
-                ms = exp * 1000.0
-                self.exp_value.setText(f"{ms:.2f}ms")
-        elif exp != '-':
-            self.exp_value.setText('-')
-        
-        gain = metadata.get('gain') or metadata.get('GAIN', '-')
-        self.gain_value.setText(str(gain))
-        
-        # Update ML predictions if enabled
-        if self._ml_enabled:
-            ml_results = metadata.get('_ML_RESULTS', {})
-            if ml_results:
-                # Roof status with confidence
-                roof_status = ml_results.get('roof_status', 'N/A')
-                roof_conf = ml_results.get('roof_confidence')
-                if roof_conf is not None:
-                    roof_text = f"{roof_status} ({int(roof_conf * 100)}%)"
-                    # Color code based on status
-                    if roof_status == 'Open':
-                        self.roof_value.setStyleSheet("color: #4ade80;")  # Green
-                    elif roof_status == 'Closed':
-                        self.roof_value.setStyleSheet("color: #f87171;")  # Red
-                    else:
-                        self.roof_value.setStyleSheet(f"color: {Colors.text_secondary};")
-                else:
-                    roof_text = roof_status
-                self.roof_value.setText(roof_text)
-                
-                # Sky condition with confidence
-                sky_cond = ml_results.get('sky_condition', 'N/A')
-                sky_conf = ml_results.get('sky_confidence')
-                if sky_conf is not None and sky_cond != 'N/A':
-                    sky_text = f"{sky_cond} ({int(sky_conf * 100)}%)"
-                    # Color code based on condition
-                    if sky_cond == 'Clear':
-                        self.sky_value.setStyleSheet("color: #4ade80;")  # Green
-                    elif sky_cond == 'Partly Cloudy':
-                        self.sky_value.setStyleSheet("color: #facc15;")  # Yellow
-                    else:
-                        self.sky_value.setStyleSheet("color: #f87171;")  # Red/Orange
-                else:
-                    sky_text = sky_cond
-                    self.sky_value.setStyleSheet(f"color: {Colors.text_secondary};")
-                self.sky_value.setText(sky_text)
-            else:
-                # No ML results in metadata
-                self.roof_value.setText("-")
-                self.sky_value.setText("-")
-                self.roof_value.setStyleSheet(f"color: {Colors.text_secondary};")
-                self.sky_value.setStyleSheet(f"color: {Colors.text_secondary};")
-
-
 class ActivityLog(QFrame):
     """Compact scrolling activity log"""
     
@@ -503,8 +400,10 @@ class LiveMonitoringPanel(QScrollArea):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._has_frame = False
+        self._last_frame_time = ""
         self._setup_ui()
-    
+
     def _setup_ui(self):
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -570,14 +469,11 @@ class LiveMonitoringPanel(QScrollArea):
         self.progress_bar.hide()
         preview_layout.addWidget(self.progress_bar)
         
-        # Preview image
+        # Preview image — fills the card; per-frame stats now live in the
+        # bottom telemetry bar, so there is no in-panel metadata row.
         self.preview = PreviewWidget()
         preview_layout.addWidget(self.preview, 1)
-        
-        # Metadata row
-        self.metadata = MetadataWidget()
-        preview_layout.addWidget(self.metadata)
-        
+
         layout.addWidget(preview_card, 3)  # Larger stretch
         
         # === HISTOGRAM CARD ===
@@ -671,9 +567,10 @@ class LiveMonitoringPanel(QScrollArea):
             pass
 
     def set_preview_only(self, preview_only: bool):
-        """Show only preview (hide histogram and activity log)"""
+        """Show only the preview (hide histogram, activity log, perf line)"""
         self.hist_card.setVisible(not preview_only)
         self.log_card.setVisible(not preview_only)
+        self.perf_label.setVisible(not preview_only)
     
     def update_exposure_progress(self, total_sec: float, remaining_sec: float):
         """Update exposure progress in preview card header"""
@@ -709,15 +606,40 @@ class LiveMonitoringPanel(QScrollArea):
         """Update preview image and related displays"""
         self.preview.update_image(pil_image, metadata)
         self.histogram.update_histogram(pil_image)
-        
+
         if metadata:
-            self.metadata.update_metadata(metadata)
-    
+            dt = metadata.get('timestamp') or metadata.get('DATETIME') or ''
+            self._last_frame_time = dt[-8:] if len(dt) >= 8 else dt
+            self._has_frame = True
+
+    def refresh_overlay(self, is_capturing: bool, camera_ready: bool):
+        """Show the no-camera / stale-frame overlay based on capture state.
+
+        Driven from the main window's status tick. A fresh frame clears the
+        overlay automatically (see PreviewWidget.update_image).
+        """
+        if is_capturing:
+            self.preview.clear_overlay()
+        elif not camera_ready:
+            self.preview.show_overlay(
+                'camera-off-outline', "No camera connected",
+                "Connect a ZWO ASI camera, or choose a directory to watch for incoming frames.",
+            )
+        elif self._has_frame:
+            sub = f"Showing last frame · {self._last_frame_time}" if self._last_frame_time \
+                else "Showing last frame"
+            self.preview.show_overlay('motion-pause-outline', "Capture stopped", sub)
+        else:
+            self.preview.show_overlay(
+                'camera-off-outline', "No camera connected",
+                "Connect a ZWO ASI camera, or choose a directory to watch for incoming frames.",
+            )
+
     def update_from_camera(self, camera_controller):
         """Update displays from camera controller state"""
         # This can be called for status updates without new images
         pass
-    
+
     def append_logs(self, messages: list):
         """Append log messages to activity log"""
         self.activity_log.append_logs(messages)

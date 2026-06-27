@@ -28,30 +28,46 @@ def _set_roi_with_retry(camera, width, height, image_type, log, attempts=5, dela
             time.sleep(delay)
 
 
-def wait_for_controls_ready(camera, log, timeout: float = 8.0, poll_interval: float = 0.5) -> Dict:
-    """Poll get_controls() until the control count stops growing, then return it.
+def wait_for_controls_ready(camera, log, timeout: float = 8.0, poll_interval: float = 0.5,
+                            min_stable_polls: int = 2) -> Dict:
+    """Poll get_controls() until the control count holds steady, then return it.
 
     A freshly-opened ASI camera enumerates its controls incrementally: the
     ASI676MC reports only ~10 of its ~17 controls in the first ~1s after
     open(), and set_roi() returns ASI_ERROR_INVALID_SIZE for the whole
     interval the firmware is still coming up.  A fixed sleep guesses at how
-    long that takes; polling until two consecutive reads return the same
-    count adapts to a slow cold boot without over-waiting on a warm reconnect.
+    long that takes; polling until the count stops growing adapts to a slow
+    cold boot without over-waiting on a warm reconnect.
+
+    The count must hold steady across ``min_stable_polls`` *consecutive*
+    re-reads, not just one repeat.  Incremental enumeration can briefly
+    plateau (e.g. pause at 10 of ~17 controls) before the rest appear;
+    breaking on the first repeat declared the camera "settled" half-ready and
+    set_roi then failed with Invalid size (2026-06-26).  A short
+    sustained-stability window lets a slow climb finish.  Note this cannot
+    revive a genuinely *wedged* body that reports a stuck count forever — that
+    needs a USB disable/enable — it only stops us opening a merely-slow one
+    too early.
 
     Returns the final controls dict (so the caller need not re-fetch).
     """
     deadline = time.time() + timeout
     prev_count = None
+    stable_streak = 0
     while True:
         controls = camera.get_controls()
         count = len(controls)
         if count == prev_count:
-            break  # unchanged across two consecutive reads — enumeration settled
-        if prev_count is not None:
-            log(f"  Controls still enumerating: {prev_count} → {count}")
+            stable_streak += 1
+            if stable_streak >= min_stable_polls:
+                break  # count held steady long enough — enumeration settled
+        else:
+            if prev_count is not None:
+                log(f"  Controls still enumerating: {prev_count} → {count}")
+            stable_streak = 0
         prev_count = count
         if time.time() >= deadline:
-            log(f"  ⚠ Control count still changing at timeout ({count}) — proceeding anyway")
+            log(f"  ⚠ Control count still settling at timeout ({count}) — proceeding anyway")
             break
         time.sleep(poll_interval)
     log(f"  Available controls: {len(controls)} (enumeration settled)")
@@ -69,14 +85,40 @@ def validate_control(controls, control_type, value, name, log) -> Tuple[Any, Opt
     return value, None
 
 
-def verify_camera_identity(camera, camera_name: Optional[str], log) -> bool:
+def verify_camera_identity(camera, camera_name: Optional[str], log,
+                           camera_serial: Optional[str] = None) -> bool:
     """
     Verify the open camera handle still points to the expected physical camera.
     Returns True if identity matches, False if mismatch or no camera.
-    Exact name match (after strip) — writing one camera's settings to a
-    different-but-similarly-named camera could mis-configure the hardware.
+
+    When a hardware serial is on file it is the authoritative check — the model
+    name is shared by every body of the same model, so a name-only match can
+    still let one camera's settings be written to another (the guide-camera
+    hijack, June 2026). The serial uniquely identifies the physical device.
+    Falls back to an exact name match (after strip) for bodies/configs without
+    a serial.
     """
-    if not camera or not camera_name:
+    if not camera:
+        return False
+    from .camera_identity import read_serial, serials_match
+
+    if camera_serial:
+        actual_serial = read_serial(camera)
+        if serials_match(camera_serial, actual_serial):
+            return True
+        # A None actual_serial means the SDK couldn't read it this call (not a
+        # confirmed different camera); fall through to the name check rather
+        # than hard-failing a camera that genuinely matches by name.
+        if actual_serial is not None:
+            log(
+                f"✗ Camera identity MISMATCH by serial: expected "
+                f"{camera_serial}, SDK returned {actual_serial}. Refusing operation."
+            )
+            return False
+
+    if not camera_name:
+        # No name to fall back on and serial (if any) was unreadable — cannot
+        # confirm identity, so refuse (matches the original conservative gate).
         return False
     try:
         actual_name = (camera.get_camera_property().get('Name') or '').strip()

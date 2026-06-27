@@ -25,6 +25,7 @@ class NavButton(QPushButton):
         self._badge_visible = False
         self._badge_text = ""
         self._badge_color = Colors.accent_default
+        self._compact = False  # collapsed rail: badges shrink to a corner dot
 
         self.setText(text)
         self.setCheckable(True)
@@ -54,39 +55,55 @@ class NavButton(QPushButton):
         self._badge_text = text
         self._badge_color = color or Colors.accent_default
         self.update()  # Trigger repaint
-    
+
+    def set_compact(self, compact: bool):
+        """Collapsed rail: there's no room for a text pill, so badges with text
+        (e.g. BETA) shrink to a corner dot over the icon."""
+        if compact == self._compact:
+            return
+        self._compact = compact
+        self.update()
+
     def paintEvent(self, event):
         """Override to draw badge."""
         super().paintEvent(event)
-        
-        if self._badge_visible:
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor(self._badge_color)))
 
-            if self._badge_text:
-                # Pill shape sized to the text so multi-char labels (e.g. "BETA") fit.
-                font = painter.font()
-                font.setPixelSize(9)
-                font.setBold(True)
-                painter.setFont(font)
-                pill_h = 16
-                text_w = painter.fontMetrics().horizontalAdvance(self._badge_text)
-                pill_w = text_w + 12
-                x = self.width() - pill_w - 12
-                y = (self.height() - pill_h) // 2
-                painter.drawRoundedRect(x, y, pill_w, pill_h, pill_h // 2, pill_h // 2)
-                painter.setPen(QColor("#FFFFFF"))
-                painter.drawText(x, y, pill_w, pill_h, Qt.AlignCenter, self._badge_text)
-            else:
-                # Simple dot
-                badge_size = 10
-                x = self.width() - badge_size - 12
-                y = (self.height() - badge_size) // 2
-                painter.drawEllipse(x, y, badge_size, badge_size)
+        if not self._badge_visible:
+            return
 
-            painter.end()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(self._badge_color)))
+
+        if self._badge_text and not self._compact:
+            # Pill shape sized to the text so multi-char labels (e.g. "BETA") fit.
+            font = painter.font()
+            font.setPixelSize(9)
+            font.setBold(True)
+            painter.setFont(font)
+            pill_h = 16
+            text_w = painter.fontMetrics().horizontalAdvance(self._badge_text)
+            pill_w = text_w + 12
+            x = self.width() - pill_w - 12
+            y = (self.height() - pill_h) // 2
+            painter.drawRoundedRect(x, y, pill_w, pill_h, pill_h // 2, pill_h // 2)
+            painter.setPen(QColor("#FFFFFF"))
+            painter.drawText(x, y, pill_w, pill_h, Qt.AlignCenter, self._badge_text)
+        elif self._compact:
+            # Collapsed: a small dot tucked at the icon's top-right corner.
+            badge_size = 8
+            x = self.width() - badge_size - 8
+            y = 7
+            painter.drawEllipse(x, y, badge_size, badge_size)
+        else:
+            # Expanded, text-less badge (e.g. timelapse activity dot).
+            badge_size = 10
+            x = self.width() - badge_size - 12
+            y = (self.height() - badge_size) // 2
+            painter.drawEllipse(x, y, badge_size, badge_size)
+
+        painter.end()
     
     def _update_style(self):
         if self._selected:
@@ -144,79 +161,86 @@ class NavRail(QFrame):
     
     def _setup_ui(self):
         self.setFixedWidth(self._expanded_width)
+        # Scope to the NavRail class — a bare `QFrame` selector also matches child
+        # QLabels (QLabel subclasses QFrame), giving the group headers a stray
+        # right border that reads as a double line.
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(f"""
-            QFrame {{
+            NavRail {{
                 background-color: {Colors.bg_surface};
                 border-right: 1px solid {Colors.border_subtle};
             }}
         """)
-        
+
+        self._group_labels = []
+        self._dividers = []
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(Spacing.sm, Spacing.sm, Spacing.sm, Spacing.base)
         layout.setSpacing(Spacing.xs)
-        
+
         # Hamburger toggle button
         self.toggle_btn = QPushButton()
-        self.toggle_btn.setText("☰")
+        self.toggle_btn.setIcon(qta.icon('mdi6.menu', color=Colors.text_secondary))
+        self.toggle_btn.setIconSize(QSize(20, 20))
         self.toggle_btn.setFixedSize(40, 40)
         self.toggle_btn.setCursor(Qt.PointingHandCursor)
         self.toggle_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: transparent;
-                color: {Colors.text_secondary};
                 border: none;
                 border-radius: {Layout.radius_md}px;
-                font-size: 18px;
             }}
             QPushButton:hover {{
                 background-color: {Colors.bg_hover};
-                color: {Colors.text_primary};
             }}
         """)
         self.toggle_btn.clicked.connect(self.toggle_collapsed)
         layout.addWidget(self.toggle_btn)
-        
-        # Section header (hidden when collapsed)
-        self.header = QLabel("Navigation")
-        self.header.setStyleSheet(f"""
-            color: {Colors.text_muted};
-            font-size: {Typography.size_small}px;
-            font-weight: {Typography.weight_semibold};
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            padding: 4px 12px;
-        """)
-        layout.addWidget(self.header)
-        
-        # Navigation buttons
-        _ico = lambda name: qta.icon(f'mdi6.{name}', color=Colors.text_secondary)
-        nav_items = [
-            (_ico('monitor-shimmer'), "Live Monitoring", 'monitoring'),
-            (_ico('camera-plus-outline'), "Capture", 'capture'),
-            (_ico('monitor-share'), "Output", 'output'),
-            (_ico('image-edit-outline'), "Image Processing", 'processing'),
-            (_ico('format-textbox'), "Overlays", 'overlays'),
-            (_ico('sphere'), "All-Sky", 'allsky'),
-            (_ico('filmstrip-box-multiple'), "Timelapse", 'timelapse'),
-        ]
-        nav_items.append((_ico('meteor'), "Meteor Tracker", 'meteor'))
-        nav_items.append((_ico('math-log'), "Logs", 'logs'))
 
-        for icon, label, key in nav_items:
+        _ico = lambda name: qta.icon(f'mdi6.{name}', color=Colors.text_secondary)
+
+        # Grouped sections: each (group title, [(icon, label, key), ...]).
+        groups = [
+            ("Monitor", [
+                (_ico('monitor-shimmer'), "Live Monitoring", 'monitoring'),
+                (_ico('meteor'), "Meteor Tracker", 'meteor'),
+            ]),
+            ("Image", [
+                (_ico('camera-plus-outline'), "Capture", 'capture'),
+                (_ico('image-edit-outline'), "Image Processing", 'processing'),
+                (_ico('format-textbox'), "Overlays", 'overlays'),
+                (_ico('sphere'), "All-Sky", 'allsky'),
+            ]),
+            ("Publish", [
+                (_ico('monitor-share'), "Output", 'output'),
+                (_ico('filmstrip-box-multiple'), "Timelapse", 'timelapse'),
+                (_ico('image-multiple'), "Library", 'library'),
+            ]),
+        ]
+
+        for gi, (title, items) in enumerate(groups):
+            if gi > 0:
+                layout.addWidget(self._make_divider())
+            layout.addWidget(self._make_group_label(title))
+            for icon, label, key in items:
+                btn = NavButton(icon, label, key, self)
+                btn.clicked.connect(lambda checked, k=key: self._on_button_clicked(k))
+                layout.addWidget(btn)
+                self._buttons[key] = btn
+
+        # Push Logs + Settings to the bottom.
+        layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        layout.addWidget(self._make_divider())
+        for icon, label, key in (
+            (_ico('math-log'), "Logs", 'logs'),
+            (_ico('cog'), "Settings", 'settings'),
+        ):
             btn = NavButton(icon, label, key, self)
             btn.clicked.connect(lambda checked, k=key: self._on_button_clicked(k))
             layout.addWidget(btn)
             self._buttons[key] = btn
-        
-        # Spacer
-        layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
-        
-        # Settings button (bottom)
-        settings_btn = NavButton(_ico('cog'), "Settings", 'settings', self)
-        settings_btn.clicked.connect(lambda checked: self._on_button_clicked('settings'))
-        layout.addWidget(settings_btn)
-        self._buttons['settings'] = settings_btn
-        
+
         # Both All-Sky and Meteor Tracker are still in beta.
         for beta_key in ('allsky', 'meteor'):
             if beta_key in self._buttons:
@@ -224,6 +248,25 @@ class NavRail(QFrame):
 
         # Set initial selection
         self._buttons['capture'].set_selected(True)
+
+    def _make_group_label(self, text: str) -> QLabel:
+        lbl = QLabel(text.upper())
+        lbl.setStyleSheet(f"""
+            color: {Colors.text_muted};
+            font-size: {Typography.size_small}px;
+            font-weight: {Typography.weight_bold};
+            letter-spacing: 1px;
+            padding: 6px 12px 2px;
+        """)
+        self._group_labels.append(lbl)
+        return lbl
+
+    def _make_divider(self) -> QFrame:
+        div = QFrame()
+        div.setFixedHeight(1)
+        div.setStyleSheet(f"background-color: {Colors.border_subtle}; border: none;")
+        self._dividers.append(div)
+        return div
     
     def _on_button_clicked(self, key: str):
         """Handle button click"""
@@ -274,14 +317,15 @@ class NavRail(QFrame):
         self._width_anim.start()
         self._width_anim2.start()
         
-        # Update button text visibility
-        self.header.setVisible(not self._collapsed)
+        # Hide group labels + dividers and button text when collapsed.
+        for lbl in self._group_labels:
+            lbl.setVisible(not self._collapsed)
+        for div in self._dividers:
+            div.setVisible(not self._collapsed)
         for btn in self._buttons.values():
             btn.setText("" if self._collapsed else btn._original_text)
-        
-        # Update toggle icon
-        self.toggle_btn.setText("☰" if self._collapsed else "☰")
-        
+            btn.set_compact(self._collapsed)
+
         self.collapsed_changed.emit(self._collapsed)
     
     def refresh_styles(self):

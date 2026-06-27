@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import traceback
 
 from PySide6.QtWidgets import (
@@ -17,12 +18,15 @@ from services.config import Config
 from services.logger import app_logger
 from services.web_output import WebOutputServer
 from services.ml_data_collector import init_ml_collector
+from services.library import ImageLibrary
 from version import __version__
 
 from ..theme import apply_theme, apply_accent_theme, get_stylesheet
 from ..theme.tokens import Colors, Typography, Spacing, Layout
 from ..components.app_bar import AppBar
 from ..components.nav_rail import NavRail
+from ..components.status_strip import StatusStrip
+from ..components.telemetry_bar import TelemetryBar
 from ..panels.live_monitoring import LiveMonitoringPanel
 from ..panels.capture_settings import CaptureSettingsPanel
 from ..panels.output_settings import OutputSettingsPanel
@@ -33,10 +37,12 @@ from ..panels.settings_panel import SettingsPanel
 from ..panels.logs_panel import LogsPanel
 from ..panels.allsky_settings import AllSkySettingsPanel
 from ..panels.meteor_panel import MeteorPanel
+from ..panels.library_panel import LibraryPanel
 from ..controllers.image_processor import ImageProcessor
 from ..controllers.timelapse_controller import TimelapseController
 from ..controllers.allsky_controller import AllSkyController
 from ..controllers.meteor_controller import MeteorController
+from ..controllers.library_controller import LibraryController
 
 from .capture import _MainWindowCaptureMixin
 from .output import _MainWindowOutputMixin
@@ -76,11 +82,14 @@ class MainWindow(
         self.output_manager = None
         self.discord_alerts = None
         self.web_server = None
+        self.image_library = None
         self._last_capture_error = None  # Most recent capture error, for /status health
         self._capture_status_timer = None  # Periodic /status snapshot push
+        self._web_server_retry_timer = None  # Re-attempts a failed web-server bind
         self.weather_service = None
         self.timelapse_controller = None
         self.meteor_controller = None
+        self.library_controller = None
         self.system_tray = None  # Set by main_pyside.py when in tray mode
 
         self._init_weather_service()
@@ -90,6 +99,14 @@ class MainWindow(
         self.image_processor = ImageProcessor(self)
         self.image_processor.set_main_window(self)
         self.image_processor.start()
+
+        # Rolling image library — archives downscaled frames off the hot path.
+        self.image_library = ImageLibrary(lambda: self.config.data)
+        self.image_library.start()
+
+        # Background worker that drains per-frame output dispatch (library
+        # archive + web/Discord push) so the GUI thread never does the encode.
+        self._start_output_dispatcher()
 
         self._setup_window()
         self._setup_ui()
@@ -150,6 +167,11 @@ class MainWindow(
         self.app_bar = AppBar(self)
         main_layout.addWidget(self.app_bar)
 
+        # === STATUS STRIP (observatory telemetry band) ===
+        self.status_strip = StatusStrip(self)
+        self.app_bar.set_status_strip(self.status_strip)
+        main_layout.addWidget(self.status_strip)
+
         # === CONTENT AREA (Below app bar) ===
         # Stored as instance attribute so InfoBars can parent to it (below the app bar)
         self.content_area = QWidget()
@@ -158,6 +180,11 @@ class MainWindow(
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
         main_layout.addWidget(content_widget, 1)
+
+        # === TELEMETRY BAR (Bottom mono metrics) ===
+        self.telemetry_bar = TelemetryBar(self)
+        self.telemetry_bar.set_version(__version__)
+        main_layout.addWidget(self.telemetry_bar)
 
         # --- Navigation Rail (Left edge) ---
         self.nav_rail = NavRail(self)
@@ -200,7 +227,22 @@ class MainWindow(
         self.allsky_panel = AllSkySettingsPanel(self)
         self.meteor_panel = MeteorPanel(self)
         self.logs_panel = LogsPanel(self)
+        self.library_panel = LibraryPanel(self)
         self.settings_panel = SettingsPanel(self)
+
+        self.library_controller = LibraryController(self)
+        self.library_controller.sessions_ready.connect(self.library_panel.set_sessions)
+        self.library_controller.frames_ready.connect(self.library_panel.set_frames)
+        self.library_controller.frame_ready.connect(self.library_panel.on_frame_ready)
+        self.library_controller.load_failed.connect(self.library_panel.on_load_failed)
+        # Live updates: the library worker fires this callback after each frame
+        # is archived; it re-emits frame_archived onto the GUI thread (queued),
+        # and the panel updates the open session/list without a manual refresh.
+        self.library_controller.frame_archived.connect(self.library_panel.on_frame_archived)
+        if self.image_library:
+            self.image_library.set_frame_saved_callback(
+                self.library_controller.notify_frame_saved
+            )
 
         self.timelapse_controller = TimelapseController(self)
 
@@ -226,6 +268,7 @@ class MainWindow(
         self.inspector_stack.addWidget(self.meteor_panel)        # Index 6
         self.inspector_stack.addWidget(self.logs_panel)          # Index 7
         self.inspector_stack.addWidget(self.settings_panel)      # Index 8
+        self.inspector_stack.addWidget(self.library_panel)       # Index 9
 
         # Defer splitter restoration until window is shown
         # This ensures we have accurate available width
@@ -249,6 +292,7 @@ class MainWindow(
 
         self.app_bar.start_clicked.connect(self.start_capture)
         self.app_bar.stop_clicked.connect(self.stop_capture)
+        self.app_bar.connect_clicked.connect(self._on_detect_cameras)
 
         self.capture_panel.settings_changed.connect(self._on_settings_changed)
         self.output_panel.settings_changed.connect(self._on_settings_changed)
@@ -312,6 +356,7 @@ class MainWindow(
         apply_accent_theme(saved_accent)
         self.setStyleSheet(get_stylesheet())
         self.nav_rail.refresh_styles()
+        self.status_strip.refresh_styles()
 
     def set_accent_theme(self, name: str) -> None:
         """Switch accent colour at runtime and refresh all styled widgets."""
@@ -319,6 +364,8 @@ class MainWindow(
         self.setStyleSheet(get_stylesheet())
         if hasattr(self, 'nav_rail'):
             self.nav_rail.refresh_styles()
+        if hasattr(self, 'status_strip'):
+            self.status_strip.refresh_styles()
 
     def _start_timers(self):
         self.status_timer = QTimer(self)
@@ -337,6 +384,16 @@ class MainWindow(
         self.watchdog_timer.start(60_000)  # 60s
         self._watchdog_first_fire_ts = None
         self._watchdog_ui_fatal_sent = False
+
+        # Weather is independent of the camera/roof, so refresh it on its own
+        # cadence rather than only during frame processing — this keeps the
+        # tile live while capture is idle or the roof is closed. fetch_weather()
+        # self-throttles to its 10-min cache, so the API is only hit when stale.
+        self._weather_refreshing = False
+        self.weather_timer = QTimer(self)
+        self.weather_timer.timeout.connect(self._refresh_weather_async)
+        self.weather_timer.start(60_000)  # 60s
+        QTimer.singleShot(2000, self._refresh_weather_async)  # prompt first fill
 
     def _check_admin_privileges(self):
         """Warn once at startup if the app lacks Administrator rights.
@@ -450,6 +507,7 @@ class MainWindow(
             'meteor': 6,
             'logs': 7,
             'settings': 8,
+            'library': 9,
         }
 
         index = section_map.get(section, 0)
@@ -464,8 +522,8 @@ class MainWindow(
             self.config.set('inspector_visible', False)
             self.config.set('last_nav_section', section)
             self.config.save()
-        elif section in ('overlays', 'settings'):
-            # Overlays/Settings: hide live panel, show panel full width
+        elif section in ('overlays', 'settings', 'library'):
+            # Overlays/Settings/Library: hide live panel, show panel full width
             self.live_panel.hide()
             self.live_panel.set_preview_only(False)
             self.inspector_stack.show()
@@ -518,14 +576,29 @@ class MainWindow(
     # STATUS UPDATES
     # =========================================================================
 
+    def _camera_ready(self) -> bool:
+        """Whether the primary action should offer Start (vs Connect Camera).
+
+        Watch mode is always 'ready' (start is gated separately by a valid
+        directory); camera mode is ready when a camera is connected or at least
+        one has been detected.
+        """
+        if self.config.get('capture_mode', 'camera') == 'watch':
+            return True
+        if self.camera_controller and getattr(self.camera_controller, 'is_connected', False):
+            return True
+        return bool(self.config.get('available_cameras'))
+
     def _update_status(self):
         try:
+            self.app_bar.set_camera_connected(self._camera_ready())
             self.app_bar.update_status(
                 is_capturing=self.is_capturing,
                 image_count=self.image_count,
                 camera_controller=self.camera_controller,
                 live_panel=self.live_panel
             )
+            self._update_telemetry_strips()
 
             if self.is_capturing and self.camera_controller:
                 self.live_panel.update_from_camera(self.camera_controller)
@@ -545,6 +618,90 @@ class MainWindow(
 
         except Exception as e:
             app_logger.debug(f"Status update error: {e}")
+
+    def _update_telemetry_strips(self):
+        """Refresh the status strip + bottom telemetry bar from live state.
+
+        Per-frame values (roof/sky/seeing, file/exp/gain/sensor) are pushed by
+        the processed-frame handler; this fills the always-available bits
+        (weather, disk) and applies idle/not-configured treatments.
+        """
+        ready = self._camera_ready()
+
+        # Live preview overlay: no-camera prompt or "showing last frame" when idle.
+        self.live_panel.refresh_overlay(self.is_capturing, ready)
+
+        # Weather tile — "Not configured" is decided from config (an API key +
+        # a location/coords), not from the service instance/cache. The live
+        # values come from frame metadata (status_strip.update_from_metadata,
+        # same source as the overlay); the cache is only an idle/no-frame fallback.
+        weather_cfg = self.config.get('weather', {})
+        weather_configured = bool(weather_cfg.get('api_key')) and bool(
+            weather_cfg.get('location')
+            or (weather_cfg.get('latitude') and weather_cfg.get('longitude'))
+        )
+        if not weather_configured:
+            self.status_strip.set_weather("Not configured", 'muted')
+        elif self.weather_service:
+            wd = self.weather_service.cache or {}
+            parts = [p for p in (wd.get('temp'), wd.get('condition'), wd.get('clouds')) if p]
+            if parts:
+                self.status_strip.set_weather(" · ".join(parts), 'primary')
+            # Dim the tile when the cache has gone cold (dead API key / sustained
+            # network failure) so a stale reading isn't mistaken for live weather.
+            self.status_strip.set_weather_stale(self.weather_service.is_display_stale())
+
+        # Roof/Sky read "Not configured" when ML is off; otherwise they're filled
+        # per-frame and dimmed (stale) while capture is idle.
+        ml_on = self.config.get('ml_models', {}).get('enabled', False)
+        if not ml_on:
+            self.status_strip.set_roof("Not configured", 'muted')
+            self.status_strip.set_sky("Not configured", 'muted')
+        self.status_strip.set_sensors_stale(not self.is_capturing)
+
+        # Bottom strip: mute per-frame cells when not actively capturing.
+        if not self.is_capturing:
+            if ready:
+                self.telemetry_bar.set_idle()
+            else:
+                self.telemetry_bar.set_disconnected()
+
+        # Disk free — refreshed roughly every 10s.
+        self._disk_tick = getattr(self, '_disk_tick', 0) + 1
+        if self._disk_tick % 10 == 1:
+            try:
+                from services.performance import get_disk_space
+                out_dir = self.config.get('output_directory', '') or os.path.expanduser('~')
+                disk = get_disk_space(out_dir)
+                self.telemetry_bar.set_disk(disk['free_gb'] if disk else None)
+            except Exception:
+                pass
+
+    def _refresh_weather_async(self):
+        """Refresh the OpenWeather cache off the GUI thread.
+
+        Most fires are no-ops: fetch_weather() only touches the network once its
+        10-min cache expires, so while the cache is still valid we skip the
+        thread entirely and only spawn a worker for the actual blocking call.
+        The worker mutates weather_service.cache; the 1 Hz _update_telemetry_strips
+        reads that cache and repaints the tile, so no signal is needed here.
+        """
+        svc = self.weather_service
+        if self._weather_refreshing or not svc or not svc.is_configured():
+            return
+        if svc.is_cache_valid():
+            return  # cache still fresh — nothing to fetch
+        self._weather_refreshing = True
+
+        def _worker():
+            try:
+                svc.fetch_weather()
+            except Exception as e:
+                app_logger.debug(f"Weather refresh failed: {e}")
+            finally:
+                self._weather_refreshing = False
+
+        threading.Thread(target=_worker, name="WeatherRefresh", daemon=True).start()
 
     def _poll_logs(self):
         try:

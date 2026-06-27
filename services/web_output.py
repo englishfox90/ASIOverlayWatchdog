@@ -9,11 +9,12 @@ import json
 import hashlib
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from PIL import Image
 from .logger import app_logger
+from . import web_library
 
 # Maximum image size served by the web endpoint (5 MB)
 WEB_IMAGE_MAX_BYTES = 5 * 1024 * 1024
@@ -21,6 +22,11 @@ WEB_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 class ImageHTTPHandler(BaseHTTPRequestHandler):
     """HTTP request handler for serving images and status."""
+
+    # Per-request socket timeout (applied by StreamRequestHandler.setup). Bounds
+    # how long a stalled client can tie up a request thread — without it a dead
+    # socket mid-response blocks forever, which used to hang server shutdown.
+    timeout = 30
 
     # Class-level variables shared between all handler instances
     latest_image_path = None
@@ -90,6 +96,7 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         status_path = self.server.status_path
         docs_path = getattr(self.server, 'docs_path', '/docs')
         openapi_path = getattr(self.server, 'openapi_path', '/openapi.json')
+        library_path = getattr(self.server, 'library_path', '/library')
 
         # Parse URL to strip query parameters (e.g., ?t=1764384123178)
         parsed_url = urlparse(self.path)
@@ -101,6 +108,10 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         if query_params:
             app_logger.debug(f"Query params: {query_params}")
 
+        # Library endpoints are delegated to services/web_library.py (keeps this
+        # module under the size cap). The library gate reads the live config, so
+        # only evaluate it for paths that could actually be library routes — the
+        # hot /latest and /status paths must not pay for it on every request.
         if clean_path == config_path:
             self._serve_image()
         elif clean_path == status_path:
@@ -109,8 +120,14 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
             self._serve_openapi()
         elif clean_path == docs_path:
             self._serve_docs()
+        elif clean_path == library_path + '/image' and self._library_api_enabled():
+            web_library.serve_image(self, self._library(), query_params)
+        elif clean_path == library_path and self._library_api_enabled():
+            web_library.serve_list(self, self._library(), library_path, query_params)
         else:
             available = ", ".join([config_path, status_path, openapi_path, docs_path])
+            if self._library_api_enabled():
+                available += f", {library_path}, {library_path}/image"
             self.send_error(404, f"Path not found. Available: {available}")
     
     def do_OPTIONS(self):
@@ -228,11 +245,16 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
     def _build_openapi_spec(self):
         """Build the OpenAPI spec for this server's actual routes."""
         from . import api_docs
+        # Only advertise the library routes when the API is actually enabled,
+        # so the docs never describe an endpoint that 404s.
+        library_path = getattr(self.server, 'library_path', '/library') \
+            if self._library_api_enabled() else None
         return api_docs.build_openapi_spec(
             image_path=self.server.config_path,
             status_path=self.server.status_path,
             docs_path=getattr(self.server, 'docs_path', '/docs'),
             openapi_path=getattr(self.server, 'openapi_path', '/openapi.json'),
+            library_path=library_path,
         )
 
     def _serve_openapi(self):
@@ -272,12 +294,23 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         except Exception as e:
             app_logger.error(f"Error serving API docs: {e}")
 
+    # --- image library endpoints ------------------------------------------
+
+    def _library(self):
+        """The ImageLibrary instance attached to the server, or None."""
+        return getattr(self.server, 'image_library', None)
+
+    def _library_api_enabled(self):
+        lib = self._library()
+        return bool(lib and lib.api_enabled())
+
 
 class WebOutputServer:
     """Manages HTTP server for serving latest processed images."""
     
     def __init__(self, host='0.0.0.0', port=8080, image_path='/latest', status_path='/status',
-                 docs_path='/docs', openapi_path='/openapi.json'):
+                 docs_path='/docs', openapi_path='/openapi.json', library_path='/library',
+                 image_library=None):
         """
         Initialize web server.
 
@@ -288,6 +321,9 @@ class WebOutputServer:
             status_path: URL path for status endpoint
             docs_path: URL path for the human-readable HTML API docs
             openapi_path: URL path for the machine-readable OpenAPI spec
+            library_path: Base URL path for the image library endpoints
+                (``<library_path>`` lists, ``<library_path>/image`` fetches)
+            image_library: Optional ImageLibrary the library endpoints read from
         """
         self.host = host
         self.port = port
@@ -295,6 +331,8 @@ class WebOutputServer:
         self.status_path = status_path
         self.docs_path = docs_path
         self.openapi_path = openapi_path
+        self.library_path = library_path
+        self.image_library = image_library
         self.server = None
         self.server_thread = None
         self.running = False
@@ -306,12 +344,21 @@ class WebOutputServer:
             return False
         
         try:
-            # Create server
-            self.server = HTTPServer((self.host, self.port), ImageHTTPHandler)
+            # Threaded server: each request runs on its own daemon thread, so a
+            # single stalled client can't block the accept loop — that block is
+            # what made server.shutdown() hang for minutes on exit. block_on_close
+            # is off so server_close() abandons (rather than joins) any in-flight
+            # request thread; daemon threads + the handler timeout above bound how
+            # long a straggler can linger.
+            self.server = ThreadingHTTPServer((self.host, self.port), ImageHTTPHandler)
+            self.server.daemon_threads = True
+            self.server.block_on_close = False
             self.server.config_path = self.image_path
             self.server.status_path = self.status_path
             self.server.docs_path = self.docs_path
             self.server.openapi_path = self.openapi_path
+            self.server.library_path = self.library_path
+            self.server.image_library = self.image_library
             
             # Set class variables
             ImageHTTPHandler.server_start_time = time.time()
