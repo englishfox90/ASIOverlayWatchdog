@@ -262,7 +262,7 @@ def _split_samples(samples: list, val_split: float):
 def train_model(
     data_dir: Path,
     output_dir: Path,
-    image_size: int = 256,
+    image_size: int = 384,  # production default (384 beat 256 in the size sweep)
     batch_size: int = 64,  # Larger batch for GPU saturation
     epochs: int = 50,
     learning_rate: float = 0.001,
@@ -346,6 +346,8 @@ def train_model(
     
     model = SkyClassifierCNN(image_size=image_size, metadata_features=6)
     model = model.to(device)
+    print(f"\nModel created with {sum(p.numel() for p in model.parameters()):,} parameters "
+          f"(image_size={image_size})")
     
     # Note: torch.compile() requires Triton which is not available on Windows
     # Skipping compilation - still get good speedup from mixed precision and large batches
@@ -384,6 +386,7 @@ def train_model(
     # Training loop
     best_val_loss = float('inf')
     best_model_state = None
+    best_epoch = 0
     
     print("\n" + "=" * 60)
     print(f"Training with batch_size={batch_size}, AMP={use_amp}")
@@ -487,6 +490,7 @@ def train_model(
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model_state = copy.deepcopy(model.state_dict())
+            best_epoch = epoch + 1
     
     # Load best model
     model.load_state_dict(best_model_state)
@@ -506,13 +510,14 @@ def train_model(
         'val_samples': len(val_samples),
         'test_samples': len(test_samples),
         'epochs': epochs,
+        'best_epoch': best_epoch,
     }, model_path)
     
     print(f"\n✓ Model saved to: {model_path}")
     
     # Final evaluation on the HELD-OUT test set (never seen during selection).
     print("\n" + "=" * 60)
-    print("Final Evaluation on Held-Out Test Set")
+    print(f"Final Evaluation on Held-Out Test Set (Best model from epoch {best_epoch})")
     print("=" * 60)
 
     model.eval()
@@ -600,6 +605,7 @@ def train_model(
         'train_n': len(train_samples),
         'test_n': len(test_samples),
         'params': sum(p.numel() for p in model.parameters()),
+        'best_epoch': best_epoch,
         'model_path': str(model_path),
     }
 
@@ -612,8 +618,8 @@ def main():
                         help="Directory containing calibration files")
     parser.add_argument("--output-dir", type=str, default="ml/models",
                         help="Output directory for model")
-    parser.add_argument("--image-size", type=int, default=256,
-                        help="Image size (default: 256)")
+    parser.add_argument("--image-size", type=int, default=384,
+                        help="Image size (default: 384, the size-sweep winner)")
     parser.add_argument("--batch-size", type=int, default=64,
                         help="Batch size (default: 64 for GPU)")
     parser.add_argument("--epochs", type=int, default=50,

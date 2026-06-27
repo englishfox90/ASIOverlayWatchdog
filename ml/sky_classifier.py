@@ -175,8 +175,15 @@ class SkyClassifier:
             
             self.model = ort.InferenceSession(str(self.model_path))
             self.model_type = 'onnx'
-            # ONNX models use default image_size=256, metadata_features=6
-            print(f"Loaded ONNX sky classifier from: {self.model_path}")
+            # Read the trained input size from the model's image input ([N,1,H,W])
+            # so 384/512 models load at the right size instead of the 256 default.
+            try:
+                ishape = self.model.get_inputs()[0].shape
+                if len(ishape) == 4 and isinstance(ishape[2], int):
+                    self.image_size = ishape[2]
+            except Exception:
+                pass
+            print(f"Loaded ONNX sky classifier from: {self.model_path} (image_size={self.image_size})")
             
         elif suffix == '.pth':
             if not TORCH_AVAILABLE:
@@ -198,7 +205,9 @@ class SkyClassifier:
             self.model.to(self.device)
             self.model.eval()
             self.model_type = 'pytorch'
-            print(f"Loaded PyTorch sky classifier from: {self.model_path}")
+            n_params = sum(p.numel() for p in self.model.parameters())
+            print(f"Loaded PyTorch sky classifier from: {self.model_path} "
+                  f"(image_size={self.image_size}, {n_params:,} params)")
         
         print(f"Loaded sky classifier from: {self.model_path}")
     
