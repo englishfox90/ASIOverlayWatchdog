@@ -192,18 +192,6 @@ class SkyDataset(Dataset):
         return image.astype(np.float32)
 
     def resize_image(self, img: np.ndarray, size: int) -> np.ndarray:
-        """Resize image using block averaging."""
-        h, w = img.shape
-        block_h = h // size
-        block_w = w // size
-
-        if block_h == 0 or block_w == 0:
-            result = np.zeros((size, size), dtype=np.float32)
-            copy_h = min(h, size)
-            copy_w = min(w, size)
-            result[:copy_h, :copy_w] = img[:copy_h, :copy_w]
-            return result
-
-        trimmed = img[:block_h * size, :block_w * size]
-        result = trimmed.reshape(size, block_h, size, block_w).mean(axis=(1, 3))
-        return result
+        """Center-crop to square then block-average (shared with inference)."""
+        from ml.image_preprocess import resize_for_model
+        return resize_for_model(img, size)

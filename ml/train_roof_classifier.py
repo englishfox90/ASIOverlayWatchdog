@@ -129,28 +129,9 @@ class RoofDataset(Dataset):
             return np.zeros((self.image_size, self.image_size), dtype=np.float32)
     
     def resize_image(self, img: np.ndarray, size: int) -> np.ndarray:
-        """Simple resize using block averaging."""
-        h, w = img.shape
-        
-        # Calculate block size
-        block_h = h // size
-        block_w = w // size
-        
-        if block_h == 0 or block_w == 0:
-            # Image smaller than target, just pad/crop
-            result = np.zeros((size, size), dtype=np.float32)
-            copy_h = min(h, size)
-            copy_w = min(w, size)
-            result[:copy_h, :copy_w] = img[:copy_h, :copy_w]
-            return result
-        
-        # Trim to exact multiple
-        trimmed = img[:block_h * size, :block_w * size]
-        
-        # Reshape and average
-        result = trimmed.reshape(size, block_h, size, block_w).mean(axis=(1, 3))
-        
-        return result
+        """Center-crop to square then block-average (shared with inference)."""
+        from ml.image_preprocess import resize_for_model
+        return resize_for_model(img, size)
     
     def normalize(self, image: np.ndarray) -> np.ndarray:
         """Normalize image to [0, 1] with percentile clipping."""
