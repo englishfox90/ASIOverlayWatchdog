@@ -233,7 +233,7 @@ class MLService:
             try:
                 roof_meta = {
                     'corner_to_center_ratio': corner_analysis.get('corner_to_center_ratio', 1.0),
-                    'median_lum': corner_analysis.get('center_med', 0.0),
+                    'median_lum': corner_analysis.get('frame_med', 0.0),
                     'is_astronomical_night': time_context.get('is_astronomical_night', False),
                     'hour': time_context.get('hour', 12),
                 }
@@ -253,7 +253,7 @@ class MLService:
             try:
                 sky_meta = {
                     'corner_to_center_ratio': corner_analysis.get('corner_to_center_ratio', 1.0),
-                    'median_lum': corner_analysis.get('center_med', 0.0),
+                    'median_lum': corner_analysis.get('frame_med', 0.0),
                     'is_astronomical_night': time_context.get('is_astronomical_night', False),
                     'hour': time_context.get('hour', 12),
                     'moon_illumination': 0.0,  # Could fetch from moon service
@@ -283,21 +283,28 @@ class MLService:
         """Compute corner-to-center analysis for ML features."""
         try:
             # Convert to grayscale if needed
+            orig_dtype = image_array.dtype
             if len(image_array.shape) == 3:
                 # RGB to grayscale
                 gray = np.mean(image_array, axis=2)
             else:
                 gray = image_array.astype(np.float32)
-            
-            # Normalize to 0-1
-            if gray.max() > 1.0:
-                gray = gray / 255.0
-            
+
+            # Normalize to 0-1 by the *source* bit depth. Production feeds 16-bit
+            # raw frames (0-65535); watch mode feeds 8-bit (0-255). Infer scale
+            # from dtype, not the max value — a dark 16-bit frame can peak below
+            # 255 and must not be mistaken for 8-bit. median_lum has to land in
+            # [0,1] (the model trained on 16-bit / 65535) or roof predictions flip.
+            if np.issubdtype(orig_dtype, np.integer):
+                gray = gray / float(np.iinfo(orig_dtype).max)
+            elif gray.max() > 1.0:
+                gray = gray / gray.max()
+
             h, w = gray.shape
-            
+
             # Define regions (corners and center)
             corner_size = min(h, w) // 8
-            
+
             # Corners
             corners = [
                 gray[:corner_size, :corner_size],  # Top-left
@@ -305,25 +312,26 @@ class MLService:
                 gray[-corner_size:, :corner_size],  # Bottom-left
                 gray[-corner_size:, -corner_size:],  # Bottom-right
             ]
-            
+
             # Center region
             ch, cw = h // 4, w // 4
             center = gray[ch:h-ch, cw:w-cw]
-            
+
             corner_med = np.median([np.median(c) for c in corners])
             center_med = np.median(center)
-            
+
             ratio = corner_med / max(center_med, 0.001)
-            
+
             return {
                 'corner_med': float(corner_med),
                 'center_med': float(center_med),
+                'frame_med': float(np.median(gray)),  # whole-frame median == training's median_lum
                 'corner_to_center_ratio': float(ratio),
             }
-            
+
         except Exception as e:
             app_logger.debug(f"ML Service: Corner analysis failed: {e}")
-            return {'corner_med': 0.0, 'center_med': 0.0, 'corner_to_center_ratio': 1.0}
+            return {'corner_med': 0.0, 'center_med': 0.0, 'frame_med': 0.0, 'corner_to_center_ratio': 1.0}
     
     def _compute_time_context(self) -> Dict[str, Any]:
         """Compute time context for ML features."""
