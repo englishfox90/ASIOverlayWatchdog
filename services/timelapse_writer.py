@@ -8,6 +8,7 @@ import sys
 import subprocess
 import threading
 import time
+from collections import deque
 from datetime import datetime, date, timedelta
 from typing import Optional, Tuple
 
@@ -30,6 +31,16 @@ class TimelapseWriter:
     internally — callers just call add_frame() on every capture.
     """
 
+    # A session that dies before writing this many frames is treated as a
+    # failed *start* (e.g. ffmpeg rejecting the stream) rather than a healthy
+    # session interrupted late (USB drop). Failed starts trigger backoff.
+    _HEALTHY_FRAME_THRESHOLD = 5
+    # Exponential backoff between restart attempts after consecutive failed
+    # starts, so a persistent ffmpeg crash can no longer mint one video file
+    # per captured frame. Frames received during the cooldown are dropped.
+    _RESTART_BACKOFF_BASE = 15      # seconds before the first retry
+    _RESTART_BACKOFF_CAP = 300      # seconds (5 min) ceiling
+
     def __init__(self):
         self._process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
@@ -42,6 +53,12 @@ class TimelapseWriter:
         self._last_in_window: Optional[bool] = None   # for transition logging
         self._last_enabled: bool = False               # for configure change logging
         self._stderr_thread: Optional[threading.Thread] = None
+        # Last few ffmpeg stderr lines, so an unexpected exit can report the
+        # actual encoder error instead of just a numeric exit code.
+        self._stderr_tail: deque = deque(maxlen=12)
+        # Crash-loop guard state.
+        self._restart_failures: int = 0
+        self._restart_blocked_until: Optional[datetime] = None
         # Optional callback(path, frame_count, elapsed_seconds) called after
         # each session finalizes. Set by TimelapseController for Discord posts.
         self.on_session_finished = None
@@ -80,13 +97,9 @@ class TimelapseWriter:
 
             frame_size = (image.width, image.height)
 
-            # Detect unexpected ffmpeg exit and restart
+            # Detect unexpected ffmpeg exit and decide whether to restart.
             if self._process is not None and self._process.poll() is not None:
-                exit_code = self._process.poll()
-                app_logger.error(
-                    f"Timelapse: ffmpeg exited unexpectedly (code {exit_code}) — restarting session"
-                )
-                self._process = None
+                self._handle_unexpected_exit(now)
 
             # Start or restart session if needed.
             # 'always' mode rolls over at midnight (one video per calendar day).
@@ -98,6 +111,11 @@ class TimelapseWriter:
                 (mode == 'always' and self._session_date != now.date())
             )
             if needs_new_session:
+                # Crash-loop guard: if recent starts failed immediately, wait out
+                # the backoff before trying again instead of minting one broken
+                # video file per captured frame.
+                if self._restart_blocked_until and now < self._restart_blocked_until:
+                    return False
                 self._start_session(frame_size, now)
             elif frame_size != self._frame_size:
                 # Resolution changed — restart with new size
@@ -117,6 +135,10 @@ class TimelapseWriter:
                     self._process.stdin.write(frame_bytes)
                     self._process.stdin.flush()
                     self._frame_count += 1
+                    # Session is proving healthy — clear any prior crash-loop state.
+                    if self._restart_failures and self._frame_count >= self._HEALTHY_FRAME_THRESHOLD:
+                        self._restart_failures = 0
+                        self._restart_blocked_until = None
                     if self._frame_count % 100 == 0:
                         app_logger.debug(f"Timelapse: {self._frame_count} frames recorded")
                     return True
@@ -128,6 +150,52 @@ class TimelapseWriter:
             app_logger.error(f"Timelapse: add_frame error: {e}")
 
         return False
+
+    def _handle_unexpected_exit(self, now: datetime):
+        """ffmpeg died while we still expected it to be recording.
+
+        Surfaces the encoder's real error (from the stderr tail) and applies a
+        backoff so a persistent crash can't spawn a new video file on every
+        frame. A late death after a healthy run (e.g. USB drop) is allowed to
+        restart immediately; only immediate failures escalate the backoff.
+        """
+        exit_code = self._process.poll()
+        died_frames = self._frame_count
+        died_path = self._session_path
+        stderr_tail = " | ".join(self._stderr_tail)
+
+        self._process = None
+
+        detail = f" — ffmpeg said: {stderr_tail}" if stderr_tail else ""
+        failed_start = died_frames < self._HEALTHY_FRAME_THRESHOLD
+
+        if failed_start:
+            # Remove the orphaned (empty / near-empty) output so a crash loop
+            # doesn't leave timelapse_YYYYMMDD_2.mp4, _3, _4 … littering disk.
+            if died_frames == 0 and died_path:
+                try:
+                    os.remove(died_path)
+                except OSError:
+                    pass
+            self._restart_failures += 1
+            backoff = min(
+                self._RESTART_BACKOFF_CAP,
+                self._RESTART_BACKOFF_BASE * (2 ** (self._restart_failures - 1)),
+            )
+            self._restart_blocked_until = now + timedelta(seconds=backoff)
+            app_logger.error(
+                f"Timelapse: ffmpeg exited on startup (code {exit_code}, "
+                f"{died_frames} frames){detail} — retrying in {backoff}s "
+                f"(failure #{self._restart_failures})"
+            )
+        else:
+            # Healthy session ended abnormally — restart promptly, no backoff.
+            self._restart_failures = 0
+            self._restart_blocked_until = None
+            app_logger.error(
+                f"Timelapse: ffmpeg exited unexpectedly (code {exit_code}, "
+                f"{died_frames} frames){detail} — restarting session"
+            )
 
     def stop(self):
         """Stop any active session gracefully (call on app shutdown)."""
@@ -204,6 +272,11 @@ class TimelapseWriter:
                 'frame_height': frame_size[1],
             })
 
+            # Fresh stderr ring buffer for this session — captures the encoder's
+            # last words so an unexpected exit can report the real cause.
+            self._stderr_tail.clear()
+            tail = self._stderr_tail
+
             # Drain stderr in a background thread so it never blocks ffmpeg.
             # Filter out per-frame progress lines (frame=...) which ffmpeg emits
             # every ~0.5s — over an 11-hour session that's ~80k lines of log bloat.
@@ -213,6 +286,7 @@ class TimelapseWriter:
                     for line in p.stderr:
                         text = line.decode(errors='replace').rstrip()
                         if text and not text.lstrip('\r ').startswith('frame='):
+                            tail.append(text)
                             app_logger.debug(f"Timelapse [ffmpeg]: {text}")
                 except Exception:
                     pass
@@ -491,9 +565,21 @@ class TimelapseWriter:
             '-pix_fmt', 'yuv420p',
         ]
 
+        vf_filters = []
         # Optional downscale — scale longest side to max_dim, keep aspect ratio
         if max_dim > 0 and (width > max_dim or height > max_dim):
-            cmd += ['-vf', f'scale={max_dim}:{max_dim}:force_original_aspect_ratio=decrease']
+            vf_filters.append(f'scale={max_dim}:{max_dim}:force_original_aspect_ratio=decrease')
+
+        # libx264 + yuv420p require BOTH width and height to be even. A raw source
+        # frame can be odd (watch mode), and the aspect-preserving downscale above
+        # can also land on an odd dimension. Either makes x264 abort on the first
+        # frame — which, combined with per-frame restart, used to spawn a broken
+        # video on every captured image. Crop at most 1px per axis to force even.
+        if vf_filters or width % 2 or height % 2:
+            vf_filters.append('crop=trunc(iw/2)*2:trunc(ih/2)*2')
+
+        if vf_filters:
+            cmd += ['-vf', ','.join(vf_filters)]
 
         cmd += [
             # Fragmented MP4: the header (moov) is written up front (+empty_moov)
