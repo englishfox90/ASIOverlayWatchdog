@@ -30,6 +30,37 @@ from services.posthog_service import posthog, get_distinct_id
 
 ---
 
+## Log Forwarding
+
+Beyond discrete events, the app mirrors its application logs to PostHog's
+**Logs** product over OpenTelemetry (OTLP/HTTP). Implemented in
+[`services/posthog_logs.py`](../../services/posthog_logs.py); docs:
+https://posthog.com/docs/logs/installation/python.
+
+How it works:
+- An OTel `LoggingHandler` is attached to the dedicated `PFRSentinel` logger
+  (the one `app_logger` routes everything through), so every `app_logger.info/
+  warning/error` is shipped to PostHog **in addition to** the rotating file log.
+- `attach_posthog_log_handler()` is called once at startup in `main.py`;
+  records are batched and flushed on exit via `shutdown_posthog_logs()` (before
+  `posthog.shutdown()`).
+- Logs carry resource attributes `service.name=PFRSentinel`,
+  `service.version=<app version>`, and `distinct_id=<install UUID>`, so they
+  correlate with the same anonymous person that emits events.
+- **Level**: `INFO` and above are forwarded (`DEBUG` stays file-only to avoid
+  noise). Change the `level=` on the `LoggingHandler` in `posthog_logs.py` to
+  adjust.
+
+Fully optional and best-effort:
+- Requires `opentelemetry-sdk` + `opentelemetry-exporter-otlp-proto-http`
+  (in `requirements.txt`). If absent, forwarding is a silent no-op and the file
+  log is unaffected.
+- Respects the same opt-out as events — a logging filter re-checks
+  `is_enabled()` per record, so toggling **Send Anonymous Usage Data** stops log
+  forwarding immediately.
+
+View logs in PostHog under **Logs**, filtered to service `PFRSentinel`.
+
 ## Opt-Out
 
 Users can disable all analytics via **Settings > System > "Send Anonymous Usage Data"**.

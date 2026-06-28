@@ -144,6 +144,24 @@ except Exception as e:
     print(f"[WARN] backoff: {e}")
     backoff_datas, backoff_binaries, backoff_hiddenimports = [], [], []
 
+# --- opentelemetry (PostHog log forwarding) ---
+# OTel resolves exporters/processors via entry points and lazy imports, so
+# collect_all is required to bundle the full pipeline. Spread across packages.
+otel_datas, otel_binaries, otel_hiddenimports = [], [], []
+for _otel_pkg in (
+    'opentelemetry.sdk',
+    'opentelemetry.exporter.otlp.proto.http',
+    'opentelemetry.exporter.otlp.proto.common',
+):
+    try:
+        _d, _b, _h = collect_all(_otel_pkg)
+        otel_datas += _d
+        otel_binaries += _b
+        otel_hiddenimports += _h
+        print(f"[OK] {_otel_pkg}: {len(_d)} datas, {len(_h)} imports")
+    except Exception as e:
+        print(f"[WARN] {_otel_pkg}: {e}")
+
 # --- Google API client (YouTube timelapse uploads) ---
 google_packages = [
     'googleapiclient',
@@ -294,6 +312,7 @@ hiddenimports = [
     'services.color_balance', 'services.web_output',
     'services.discord_alerts', 'services.headless_runner', 'services.weather',
     'services.ml_service', 'services.ascom_safety', 'services.posthog_service',
+    'services.posthog_logs',
     'services.youtube_auth', 'services.youtube_config', 'services.youtube_upload',
     'services.youtube_upload_state', 'services.timelapse_publishers',
     'ui', 'ui.main_window', 'ui.theme', 'ui.components', 'ui.panels',
@@ -302,7 +321,7 @@ hiddenimports = [
     # --- ML modules ---
     'ml', 'ml.roof_classifier', 'ml.sky_classifier',
     'onnxruntime',
-] + fluent_hiddenimports + requests_hiddenimports + jaraco_hiddenimports + pystray_hiddenimports + platformdirs_hiddenimports + onnx_hiddenimports + posthog_hiddenimports + backoff_hiddenimports + scipy_hiddenimports + google_hiddenimports
+] + fluent_hiddenimports + requests_hiddenimports + jaraco_hiddenimports + pystray_hiddenimports + platformdirs_hiddenimports + onnx_hiddenimports + posthog_hiddenimports + backoff_hiddenimports + otel_hiddenimports + scipy_hiddenimports + google_hiddenimports
 
 # ============================================================================
 # ANALYSIS
@@ -311,8 +330,8 @@ hiddenimports = [
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=fluent_binaries + requests_binaries + jaraco_binaries + pystray_binaries + platformdirs_binaries + onnx_binaries + xml_binaries + posthog_binaries + backoff_binaries + scipy_binaries + google_binaries,
-    datas=added_files + fluent_datas + requests_datas + jaraco_datas + pystray_datas + platformdirs_datas + onnx_datas + posthog_datas + backoff_datas + scipy_datas + google_datas,
+    binaries=fluent_binaries + requests_binaries + jaraco_binaries + pystray_binaries + platformdirs_binaries + onnx_binaries + xml_binaries + posthog_binaries + backoff_binaries + otel_binaries + scipy_binaries + google_binaries,
+    datas=added_files + fluent_datas + requests_datas + jaraco_datas + pystray_datas + platformdirs_datas + onnx_datas + posthog_datas + backoff_datas + otel_datas + scipy_datas + google_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

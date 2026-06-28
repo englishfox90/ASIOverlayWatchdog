@@ -209,7 +209,11 @@ def main():
             'is_admin': is_admin,
         })
     capture_event('app_started', {'version': __version__, 'is_admin': is_admin})
-    
+
+    # Mirror app logs to PostHog (best-effort; no-op if opted out / OTel absent).
+    from services.posthog_logs import attach_posthog_log_handler
+    attach_posthog_log_handler()
+
     # Create main window (this takes time - splash stays visible)
     window = MainWindow()
     window._is_admin = is_admin  # Pass admin status to window for UI notifications
@@ -338,7 +342,13 @@ def main():
 
     capture_event('app_shutdown')
     # Best-effort flush — don't let a slow network stall the exit.
-    _pht = threading.Thread(target=posthog.shutdown, daemon=True)
+    from services.posthog_logs import shutdown_posthog_logs
+
+    def _flush_posthog():
+        shutdown_posthog_logs()  # flush queued log records first
+        posthog.shutdown()
+
+    _pht = threading.Thread(target=_flush_posthog, daemon=True)
     _pht.start()
     _pht.join(timeout=3.0)
     sys.exit(exit_code)

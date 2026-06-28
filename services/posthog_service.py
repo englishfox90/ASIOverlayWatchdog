@@ -12,9 +12,13 @@ from posthog import Posthog
 from .config import Config
 from .logger import app_logger
 
+# Shared across analytics events and log forwarding (see posthog_logs.py).
+PROJECT_API_KEY = 'phc_yZQPicEvLtuwo4ws6uMCX2RuLc23fsJVbrh7PdSBggyt'
+POSTHOG_HOST = 'https://us.i.posthog.com'
+
 posthog = Posthog(
-    project_api_key='phc_yZQPicEvLtuwo4ws6uMCX2RuLc23fsJVbrh7PdSBggyt',
-    host='https://us.i.posthog.com',
+    project_api_key=PROJECT_API_KEY,
+    host=POSTHOG_HOST,
     enable_exception_autocapture=True,
 )
 
