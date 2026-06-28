@@ -428,16 +428,13 @@ class MainWindow(
             "a bad USB state. To enable full recovery, right-click the PFR "
             "Sentinel shortcut → Properties → Compatibility → 'Run as administrator'."
         )
+        # Running without admin is a supported mode, not an error — only USB
+        # disable/enable recovery is unavailable. Surface it in the log and the
+        # tray, but don't fire a Discord error alert on every non-admin startup.
         self._notify(
             "Running without Admin — USB recovery is limited. See logs.",
             "warning",
         )
-        try:
-            self._send_discord_error(
-                "Started without Administrator privileges — USB recovery is limited."
-            )
-        except Exception:
-            pass
 
     # =========================================================================
     # UI STATE MANAGEMENT
