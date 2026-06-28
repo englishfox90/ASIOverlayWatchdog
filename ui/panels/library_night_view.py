@@ -58,6 +58,7 @@ class NightView(QWidget):
         self._meteors = []
         self._speed = _SPEEDS[0]
         self._pending_hero_id = None
+        self._live_edge_id = None  # frame whose hero bytes also feed the filmstrip
 
         self._timer = QTimer(self)
         self._timer.setInterval(_TICK_MS)
@@ -246,6 +247,7 @@ class NightView(QWidget):
         self._frames = []
         self._id_index = {}
         self._meteors = []
+        self._live_edge_id = None
         self.title_label.setText(f"Night · {session.get('key', '')}")
         self._update_issue_badge(session)
         self.hero_image.setText("Loading night…")
@@ -301,12 +303,20 @@ class NightView(QWidget):
 
         if following:
             idx = len(self._frames) - 1
+            # The hero load for this frame doubles as the filmstrip thumbnail —
+            # on_frame_ready feeds its bytes to the scrubber so the strip extends
+            # to the live edge instead of leaving a gap there.
+            self._live_edge_id = rid
             self.scrubber.set_index(idx)
             self._on_index_changed(idx)
         else:
             self._set_counter(self.scrubber.current_index())
 
     def on_frame_ready(self, image_id, data):
+        if image_id == self._live_edge_id:
+            idx = self._id_index.get(image_id)
+            if idx is not None:
+                self.scrubber.add_live_thumb(idx, data)
         if image_id != self._pending_hero_id:
             return  # stale; the playhead moved on
         pix = QPixmap()

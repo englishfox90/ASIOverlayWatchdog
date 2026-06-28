@@ -127,6 +127,12 @@ class MainWindow(
 
         self.load_config()
 
+        # Bring the web server up now if it's enabled — it publishes the latest
+        # image/status and shouldn't wait for the first capture to start. Deferred
+        # to the event loop so the app bar (status indicator) exists, and the bind
+        # retry handles a port not yet free at logon.
+        QTimer.singleShot(0, self._ensure_output_servers_started)
+
         QTimer.singleShot(500, self._auto_detect_cameras)
 
         QTimer.singleShot(1000, self._send_discord_startup)

@@ -224,7 +224,7 @@ class _SessionCard(CardWidget):
         parts = [f"{self._session.get('frame_count', 0):,} frames"]
         temp = fmt_temp_c(self._session.get("min_temp_c"))
         if temp:
-            parts.append(f"min {temp}")
+            parts.append(f"min sensor {temp}")
         # Star/seeing peaks only appear on nights where star detection ran
         # (roof open + dark), so they stay off daytime / roof-closed cards.
         stars = self._session.get("max_stars")
@@ -232,13 +232,14 @@ class _SessionCard(CardWidget):
             parts.append(f"peak {stars:,} stars")
         seeing = self._session.get("best_seeing")
         if seeing:
-            parts.append(f"best seeing {seeing}")
+            parts.append(f"sky quality {seeing}")
         clear_pct = self._session.get("clear_pct")
         stats = CaptionLabel("      ".join(parts))
         stats.setStyleSheet(f"color: {Colors.text_muted};")
 
         wrap = QHBoxLayout()
-        wrap.setContentsMargins(0, 0, 0, 0)
+        # Small left indent so the stats line isn't flush against the card edge.
+        wrap.setContentsMargins(Spacing.sm, 0, 0, 0)
         wrap.setSpacing(Spacing.base)
         wrap.addWidget(stats)
         if clear_pct is not None:

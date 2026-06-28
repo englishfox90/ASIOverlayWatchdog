@@ -131,11 +131,32 @@ class TestSummarize:
         result = S.summarize_sessions(self._index())
         latest = result[0]
         assert latest["frame_count"] == 2
-        assert latest["roof_closed"] is True
+        # The night both opened and closed, so it is NOT flagged "roof closed".
+        assert latest["roof_closed"] is False
         assert latest["min_temp_c"] == 14.0
         assert latest["band"]  # has condition segments
         first = result[1]
         assert first["clear_pct"] == 100
+
+    def test_roof_closed_only_when_never_opened(self):
+        n = _epoch(2026, 6, 24, 13, 0)
+        closed_all = _FakeIndex([
+            {"id": 1, "captured_at": n, "roof": "Closed", "condition": None, "clouds": None},
+            {"id": 2, "captured_at": n + 60, "roof": "Closed", "condition": None, "clouds": None},
+        ])
+        assert S.summarize_sessions(closed_all)[0]["roof_closed"] is True
+
+        opened = _FakeIndex([
+            {"id": 1, "captured_at": n, "roof": "Closed", "condition": None, "clouds": None},
+            {"id": 2, "captured_at": n + 60, "roof": "Open", "condition": "Clear", "clouds": 0},
+        ])
+        assert S.summarize_sessions(opened)[0]["roof_closed"] is False
+
+        # No roof signal at all → not asserted closed (we have no evidence).
+        unknown = _FakeIndex([
+            {"id": 1, "captured_at": n, "roof": None, "condition": None, "clouds": None},
+        ])
+        assert S.summarize_sessions(unknown)[0]["roof_closed"] is False
 
     def test_star_and_seeing_aggregates(self):
         n = _epoch(2026, 6, 24, 22, 0)

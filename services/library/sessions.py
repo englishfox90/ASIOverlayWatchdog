@@ -213,6 +213,9 @@ def summarize_sessions(index, since=None):
         clear = sum(1 for s in statuses if s == STATUS_CLEAR)
         star_counts = [r["star_count"] for r in grp if r.get("star_count") is not None]
         seeing_label, seeing_fwhm = best_seeing(grp)
+        roof_states = [roof_state(r.get("roof")) for r in grp]
+        roof_ever_open = any(rs == "open" for rs in roof_states)
+        roof_ever_closed = any(rs == "closed" for rs in roof_states)
         sessions.append({
             "key": key,
             "start_epoch": grp[0]["captured_at"],
@@ -225,7 +228,10 @@ def summarize_sessions(index, since=None):
             "max_gap_seconds": max((g["seconds"] for g in gaps), default=0),
             "band": status_segments(grp, grp[0]["captured_at"], grp[-1]["captured_at"]),
             "clear_pct": round(100 * clear / len(grp)) if grp else None,
-            "roof_closed": any(s == STATUS_CLOSED for s in statuses),
+            # "roof closed" badge means the roof never opened all session (e.g. a
+            # daytime/weathered-out night) — not merely that it closed at some
+            # point, since most real nights both open and close.
+            "roof_closed": roof_ever_closed and not roof_ever_open,
             "max_stars": max(star_counts) if star_counts else None,
             "best_seeing": seeing_label,
             "best_fwhm": seeing_fwhm,

@@ -30,6 +30,12 @@ from .library_format import fmt_clock, fmt_gap, fmt_count_suffix
 
 _PIN_HOVER_PX = 7         # cursor-to-pin x distance that triggers the tooltip
 
+# Floor on the frame spacing between committed live thumbnails. A night opened
+# with few frames samples every frame (consecutive indices), which would make the
+# computed spacing 1 and grow the strip 1:1 with the night over hours of
+# unattended capture. The floor keeps the live cell count bounded (~night/step).
+_MIN_LIVE_STEP = 60.0
+
 _PAD_X = 4
 _PINS_TOP = 0
 _PINS_H = 10
@@ -50,6 +56,9 @@ class Scrubber(QWidget):
         super().__init__(parent)
         self._frames = []
         self._film = []        # [(frame_index, QPixmap)] — sampled thumbnails
+        self._film_step = 1.0  # index spacing between committed live thumbnails
+        self._film_anchor = None  # index of the last committed live thumbnail
+        self._film_has_tail = False  # is _film[-1] a provisional live-edge cell?
         self._band = []        # [(frac0, frac1, status)] in frame-index space
         self._pins = []        # [(frac, event_dict)] — gap/roof/meteor event pins
         self._id_index = {}    # image id -> frame index (pin click-to-seek)
@@ -72,8 +81,57 @@ class Scrubber(QWidget):
             pix = QPixmap()
             if pix.loadFromData(data):
                 self._film.append((idx, pix))
+        self._reset_live_film()
 
-        self._index = len(self._frames) // 2 if self._frames else 0
+        # Open on the latest frame, not the middle — a night is usually opened to
+        # see how it ended (or, when live, the current frame), not its midpoint.
+        self._index = len(self._frames) - 1 if self._frames else 0
+        self.update()
+
+    def _reset_live_film(self):
+        """Prime live-filmstrip bookkeeping from the initial sample.
+
+        ``_film_step`` is the spacing (in frame indices) between committed
+        thumbnails, taken from the initial sample so live additions keep the same
+        density; ``_film_anchor`` is the last committed sample's index; and
+        ``_film_has_tail`` whether the rightmost cell is a provisional live edge
+        that newer frames slide forward rather than pile up behind.
+        """
+        if len(self._film) >= 2:
+            span = self._film[-1][0] - self._film[0][0]
+            self._film_step = max(_MIN_LIVE_STEP, span / (len(self._film) - 1))
+        else:
+            self._film_step = _MIN_LIVE_STEP  # night opened tiny / single sample
+        self._film_anchor = self._film[-1][0] if self._film else None
+        self._film_has_tail = False
+
+    def add_live_thumb(self, index, data):
+        """Extend the filmstrip to a new live-edge frame.
+
+        Fed the hero frame's JPEG when the playhead is following the live edge,
+        so the strip keeps pace with the growing night instead of leaving a gap
+        on the right. A new frame within one ``_film_step`` of the last committed
+        thumbnail just slides the rightmost (live-tail) cell forward; once a full
+        step past it the cell is committed and a fresh tail starts — bounding the
+        thumbnail count to roughly the initial sample density.
+        """
+        pix = QPixmap()
+        if not pix.loadFromData(data):
+            return
+        if self._film_anchor is None:
+            self._film_anchor = index
+        if index - self._film_anchor >= self._film_step:
+            if self._film_has_tail:
+                self._film[-1] = (index, pix)
+            else:
+                self._film.append((index, pix))
+            self._film_anchor = index
+            self._film_has_tail = False
+        elif self._film_has_tail:
+            self._film[-1] = (index, pix)
+        else:
+            self._film.append((index, pix))
+            self._film_has_tail = True
         self.update()
 
     def update_data(self, frames, events):
@@ -81,7 +139,9 @@ class Scrubber(QWidget):
 
         Used when a frame arrives live: unlike ``set_data`` this keeps the
         current index (clamped) and the existing sampled filmstrip, so the
-        playhead doesn't jump back to the middle as the timeline grows.
+        playhead stays put — and a mid-night scrub isn't yanked — as the
+        timeline grows. Live filmstrip growth is handled separately via
+        ``add_live_thumb``.
         """
         self._load_frames(frames, events)
         self._index = min(self._index, len(self._frames) - 1) if self._frames else 0
