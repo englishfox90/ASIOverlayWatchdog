@@ -81,7 +81,10 @@ def attach_posthog_log_handler():
         )
         provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
 
-        handler = LoggingHandler(level=logging.INFO, logger_provider=provider)
+        # Only forward WARNING and above. DEBUG/INFO are high-volume and not
+        # useful in the shared PostHog log stream — keep them in the local file
+        # log only.
+        handler = LoggingHandler(level=logging.WARNING, logger_provider=provider)
         handler.addFilter(_OptOutFilter())
 
         # APP_NAME is the dedicated logger that AppLogger routes every message
