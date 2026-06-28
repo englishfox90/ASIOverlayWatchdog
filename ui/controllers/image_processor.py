@@ -53,6 +53,13 @@ class ImageProcessorWorker(QThread):
         self._confirmed_roof_open = None  # None until first ML result
         self._pending_roof_open = None
         self._pending_roof_count = 0
+        # ASCOM safety-file write is gated by its own confirmation FSM (Policy A,
+        # fail-safe). Kept separate from the Discord FSM above because the safety
+        # verdict folds in the confidence gate: only a *confident* Open is
+        # "safe"; Closed, N/A and low/None-confidence all confirm to UNSAFE.
+        from services.ascom_safety_fsm import RoofSafetyFSM, UNSAFE_RESULT
+        self._safety_fsm = RoofSafetyFSM(on_failure=self._on_safety_write_failure)
+        self._unsafe_result = UNSAFE_RESULT
 
     def set_weather_service(self, weather_service):
         """Set weather service for overlay tokens"""
@@ -305,37 +312,48 @@ class ImageProcessorWorker(QThread):
 
             # === ML Models: Add predictions to metadata for overlay tokens ===
             ml_config = config.get('ml_models', {})
+            ascom_config = ml_config.get('ascom_safety_file', {})
+            _ml_produced_result = False
+            ml_results = None
             if ml_config.get('enabled', False):
                 try:
                     ml_service = get_ml_service()
                     if not ml_service.is_available():
                         ml_service.initialize()
-                    
+
                     if ml_service.is_available():
                         # Get ML predictions formatted for overlay tokens
                         ml_tokens = analyze_image_for_tokens(raw_array, config=ml_config)
                         metadata.update(ml_tokens)
-                        
+
                         # Store full results for preview display and roof-gated timelapse
                         ml_results = ml_service.get_last_results()
                         metadata['_ML_RESULTS'] = ml_results
+                        _ml_produced_result = True
                         _ml_roof_status = (
                             ml_results.get('roof_status'),
                             ml_results.get('roof_confidence', 0.0),
                         )
                         if self._main_window:
                             self._main_window.last_ml_results = ml_results
-                        
+
                         app_logger.debug(f"ML predictions: roof={ml_tokens.get('ROOF_STATUS')}, sky={ml_tokens.get('SKY_CONDITION')}")
-                        
-                        # Write ASCOM Safety Monitor file if enabled
-                        ascom_config = ml_config.get('ascom_safety_file', {})
-                        if ascom_config.get('enabled', False):
-                            from services.ascom_safety import write_ascom_safety_file
-                            write_ascom_safety_file(ml_results, ascom_config)
                 except Exception as e:
                     app_logger.debug(f"ML prediction skipped: {e}")
-            
+
+            # Update the ASCOM Safety Monitor file (if enabled) from a CONFIRMED
+            # roof-safety verdict, never the raw per-frame result, so one noisy
+            # frame can't flip it. When ML did not produce a usable result this
+            # frame — disabled, model unavailable, or inference raised — feed
+            # UNSAFE so the file can't freeze at a stale OPEN. Both routes go
+            # through the same 2-frame-confirmation FSM.
+            if ascom_config.get('enabled', False):
+                try:
+                    verdict = ml_results if _ml_produced_result else self._unsafe_result
+                    self._safety_fsm.update(verdict, ascom_config)
+                except Exception as e:
+                    app_logger.debug(f"ASCOM safety update skipped: {e}")
+
             # Feed clean (pre-enhancement) frame to the background calibration
             # service. Runs AFTER ML so the is_observing_window roof gate sees
             # ROOF_STATUS — calibration and the all-sky overlay must both stay
@@ -456,6 +474,28 @@ class ImageProcessorWorker(QThread):
             alerts.send_roof_status_change(roof_open, confidence, image_path)
         except Exception as e:
             app_logger.warning(f"Roof change Discord alert failed: {e}")
+
+    def _on_safety_write_failure(self):
+        """Surface a genuinely-failed safety-file write to operator-visible
+        channels. Called by RoofSafetyFSM (already deduped per failure run)."""
+        msg = ("ASCOM safety-file write FAILED - NINA may be reading a stale "
+               "roof state. Check the safety-file path and disk.")
+        app_logger.error(msg)
+
+        try:
+            from services.posthog_service import capture_error
+            capture_error(RuntimeError("ascom_safety_write_failed"),
+                          context='ascom_safety_write')
+        except Exception as e:
+            app_logger.debug(f"PostHog capture_error skipped: {e}")
+
+        if self._main_window:
+            try:
+                from services.discord_alerts import DiscordAlerts
+                alerts = DiscordAlerts(self._main_window.config)
+                alerts.send_error_message(msg)
+            except Exception as e:
+                app_logger.warning(f"ASCOM safety failure Discord alert failed: {e}")
 
 
 class ImageProcessor(QObject):

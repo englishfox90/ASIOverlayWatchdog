@@ -277,13 +277,20 @@ class _MainWindowOutputMixin:
     _WEB_SERVER_RETRY_MS = 15000
 
     def _ensure_output_servers_started(self):
+        """Reconcile the web server against config: idempotent, so it's safe to
+        call on capture start AND on a runtime settings change. Starting when
+        enabled and stopping when disabled is what makes the GUI toggle take
+        effect live instead of only at the next app launch (W8)."""
         output_config = self.config.get('output', {})
 
         if output_config.get('webserver_enabled', False):
             if not self.web_server or not self.web_server.running:
                 self._start_web_server()
         else:
-            self._cancel_web_server_retry()
+            if self.web_server:
+                self._stop_web_server()
+            else:
+                self._cancel_web_server_retry()
 
     def _start_web_server(self):
         output_config = self.config.get('output', {})
@@ -514,7 +521,7 @@ class _MainWindowOutputMixin:
                 if self.image_library:
                     self.image_library.enqueue(output_image, metadata)
                 if has_outputs:
-                    self._push_to_output_servers(output_path, output_image)
+                    self._push_to_output_servers(output_path, output_image, metadata)
             except Exception as e:
                 app_logger.error(f"Output dispatch failed: {e}")
                 app_logger.error(traceback.format_exc())
@@ -527,7 +534,16 @@ class _MainWindowOutputMixin:
         self._put_dispatch_job(self._OUTPUT_STOP)  # drop-oldest guarantees it lands
         thread.join(timeout=5.0)
 
-    def _push_to_output_servers(self, image_path: str, processed_img):
+    def _push_to_output_servers(self, image_path: str, processed_img, metadata: dict = None):
+        # metadata is the per-job metadata for THIS frame. Optional/back-compat:
+        # external callers that omit it fall back to the last preview metadata.
+        # Tagging /latest with the job's own metadata keeps /status and /latest
+        # describing the same frame on bursts (W9).
+        push_metadata = metadata if metadata is not None else getattr(self, 'preview_metadata', None)
+
+        # Web and Discord are independent sinks — keep them in separate
+        # try/except blocks so a failed web encode/push can't skip the Discord
+        # post (and vice-versa) (W7).
         try:
             if self.web_server and self.web_server.running:
                 img_bytes = io.BytesIO()
@@ -546,11 +562,14 @@ class _MainWindowOutputMixin:
                 self.web_server.update_image(
                     image_path,
                     img_bytes.getvalue(),
-                    metadata=self.preview_metadata,
+                    metadata=push_metadata,
                     content_type=content_type
                 )
                 app_logger.debug(f"Pushed image to web server ({content_type})")
+        except Exception as e:
+            app_logger.error(f"Error pushing image to web server: {e}")
 
+        try:
             discord_config = self.config.get('discord', {})
             discord_enabled = discord_config.get('enabled', False)
             periodic_enabled = discord_config.get('periodic_enabled', False)
@@ -591,7 +610,7 @@ class _MainWindowOutputMixin:
                     self._send_discord_periodic_update(image_path)
 
         except Exception as e:
-            app_logger.error(f"Error pushing to output servers: {e}")
+            app_logger.error(f"Error scheduling Discord post: {e}")
 
     def _send_discord_periodic_update(self, image_path: str):
         from services.discord_alerts import DiscordAlerts

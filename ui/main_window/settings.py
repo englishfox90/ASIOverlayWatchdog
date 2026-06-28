@@ -18,6 +18,12 @@ class _MainWindowSettingsMixin:
 
         self._update_service_status()
 
+        # W8: apply a runtime webserver_enabled toggle live (reconciler is idempotent).
+        # Reconcile while capturing, OR whenever a server is already up so an idle
+        # disable actually stops it (the server outlives stop_capture by design).
+        if self.is_capturing or self.web_server is not None:
+            self._ensure_output_servers_started()
+
         self._update_start_button()
 
         # Live update camera settings if capturing (e.g., target brightness, auto-exposure)

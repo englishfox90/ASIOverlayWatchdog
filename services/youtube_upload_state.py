@@ -24,9 +24,43 @@ def get_state_path(storage_dir: str | None = None) -> str:
 class YouTubeUploadStateStore:
     """Thread-safe JSON-backed upload state store."""
 
+    # An ``in_progress`` claim whose liveness timestamp is older than this is
+    # assumed orphaned — the worker crashed or the app was killed mid-upload —
+    # and is reclaimable so the upload can resume instead of being stranded
+    # forever. The original ``resumable_uri`` is preserved so the resume is cheap.
+    #
+    # LIVENESS CONTRACT: reclaim distinguishes a dead worker from a slow-but-
+    # alive one purely by ``updated_at`` freshness. A live upload MUST refresh
+    # its timestamp (via ``update_progress``/``touch``) at least this often, or a
+    # genuinely slow upload risks being reclaimed and started a SECOND time.
+    # ``update_progress`` already stamps ``updated_at``; callers driving a long
+    # upload should ``touch(key)`` on each progress tick. NOTE: the current
+    # caller (``services/timelapse_publishers.py`` ``_progress``) only refreshes
+    # when the resumable URI changes, so a multi-hour upload could in principle
+    # trip this — fixing that requires a one-line ``touch`` there (cross-file).
+    STALE_IN_PROGRESS_SECONDS = 6 * 60 * 60
+
     def __init__(self, storage_dir: str | None = None):
         self.path = get_state_path(storage_dir)
         self._lock = threading.RLock()
+
+    def _is_stale_in_progress(self, entry: dict[str, Any]) -> bool:
+        """True if an ``in_progress`` entry is old enough to be orphaned.
+
+        Unparseable/missing timestamps are treated as stale so a corrupt entry
+        can never strand an upload permanently.
+        """
+        stamp = entry.get("updated_at") or entry.get("claimed_at")
+        if not stamp:
+            return True
+        try:
+            claimed = datetime.fromisoformat(stamp)
+        except (ValueError, TypeError):
+            return True
+        if claimed.tzinfo is None:
+            claimed = claimed.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - claimed).total_seconds()
+        return age >= self.STALE_IN_PROGRESS_SECONDS
 
     def make_identity(self, video_path: str) -> dict[str, Any]:
         abs_path = os.path.normcase(os.path.abspath(video_path))
@@ -57,7 +91,10 @@ class YouTubeUploadStateStore:
             uploads = data.setdefault("uploads", {})
             key = self.make_key(video_path)
             existing = uploads.get(key)
-            if existing and existing.get("status") in {"uploaded", "in_progress"}:
+            if existing and existing.get("status") == "uploaded":
+                return False, key, existing
+            if (existing and existing.get("status") == "in_progress"
+                    and not self._is_stale_in_progress(existing)):
                 return False, key, existing
 
             identity = self.make_identity(video_path)
@@ -81,6 +118,15 @@ class YouTubeUploadStateStore:
             entry.update(fields)
             entry["updated_at"] = _now()
             self._save(data)
+
+    def touch(self, key: str) -> None:
+        """Refresh an in_progress entry's liveness timestamp.
+
+        A live upload should call this on each progress tick so a slow-but-alive
+        worker is never mistaken for a dead one and reclaimed (see the liveness
+        contract on ``STALE_IN_PROGRESS_SECONDS``).
+        """
+        self.update_progress(key, {})
 
     def mark_uploaded(self, key: str, *, video_id: str = "", watch_url: str = "") -> None:
         self.update_progress(key, {

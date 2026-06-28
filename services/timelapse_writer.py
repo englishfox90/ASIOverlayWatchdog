@@ -7,7 +7,6 @@ import os
 import sys
 import subprocess
 import threading
-import time
 from collections import deque
 from datetime import datetime, date, timedelta
 from typing import Optional, Tuple
@@ -17,6 +16,19 @@ import numpy as np
 
 from .logger import app_logger
 from .ffmpeg_utils import is_ffmpeg_available, get_ffmpeg_path
+from .timelapse_finalizer import finalize_session, finalize_in_background, reap_in_background
+
+
+def _to_local_naive(dt: datetime) -> datetime:
+    """Convert a tz-aware datetime to naive local time.
+
+    astral returns tz-aware UTC; the rest of the writer compares against
+    datetime.now(), which is naive LOCAL. Stripping tzinfo without converting
+    (the old bug) shifted the window by the host's UTC offset — hours wrong off
+    the prime meridian. astimezone() with no argument converts to the system's
+    local zone first, so the naive result lines up with datetime.now().
+    """
+    return dt.astimezone().replace(tzinfo=None)
 
 
 class TimelapseWriter:
@@ -44,6 +56,7 @@ class TimelapseWriter:
     def __init__(self):
         self._process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
+        self._shutting_down: bool = False
         self._session_date: Optional[date] = None
         self._session_start: Optional[datetime] = None
         self._frame_size: Optional[Tuple[int, int]] = None  # (width, height)
@@ -82,97 +95,182 @@ class TimelapseWriter:
         Handles window detection, day rollover, ffmpeg startup and
         resolution changes internally. Returns True if a frame was
         actually written.
+
+        All session-state mutation happens under ``self._lock``; any session
+        that needs finalizing (window close, resolution change, midnight
+        rollover) is detached under the lock and handed to a background
+        finalizer once the lock is released, so the long ffmpeg drain never
+        stalls the frame-delivery thread and never races ``stop()``.
         """
         if not self._config.get('enabled', False):
             return False
 
+        now = datetime.now()
+
+        # Cheap gate first: the window check reads only _config, so run it BEFORE
+        # the multi-MB RGB convert + serialize. For all of daytime — and during
+        # backoff or shutdown — a captured frame must not pay for a conversion it
+        # would discard one line later. Detach a running session if the window
+        # has just closed.
+        pending_finalize = None
         try:
-            now = datetime.now()
-
-            # Check session window
-            if not self._is_in_window(now):
-                if self._process is not None:
-                    self._stop_session()
-                return False
-
-            frame_size = (image.width, image.height)
-
-            # Detect unexpected ffmpeg exit and decide whether to restart.
-            if self._process is not None and self._process.poll() is not None:
-                self._handle_unexpected_exit(now)
-
-            # Start or restart session if needed.
-            # 'always' mode rolls over at midnight (one video per calendar day).
-            # All other modes are window-driven: only start when not already recording —
-            # midnight does NOT split an overnight session.
-            mode = self._config.get('window_mode', 'sun')
-            needs_new_session = (
-                self._process is None or
-                (mode == 'always' and self._session_date != now.date())
-            )
-            if needs_new_session:
-                # Crash-loop guard: if recent starts failed immediately, wait out
-                # the backoff before trying again instead of minting one broken
-                # video file per captured frame.
-                if self._restart_blocked_until and now < self._restart_blocked_until:
-                    return False
-                self._start_session(frame_size, now)
-            elif frame_size != self._frame_size:
-                # Resolution changed — restart with new size
-                app_logger.info(f"Timelapse: resolution changed {self._frame_size} → {frame_size}, restarting session")
-                self._stop_session()
-                self._start_session(frame_size, now)
-
-            if self._process is None:
-                return False
-
-            # Convert PIL Image to raw RGB24 bytes and pipe to ffmpeg
-            img_rgb = image.convert('RGB')
-            frame_bytes = np.array(img_rgb, dtype=np.uint8).tobytes()
-
             with self._lock:
-                if self._process and self._process.poll() is None:
-                    self._process.stdin.write(frame_bytes)
-                    self._process.stdin.flush()
-                    self._frame_count += 1
-                    # Session is proving healthy — clear any prior crash-loop state.
-                    if self._restart_failures and self._frame_count >= self._HEALTHY_FRAME_THRESHOLD:
-                        self._restart_failures = 0
-                        self._restart_blocked_until = None
-                    if self._frame_count % 100 == 0:
-                        app_logger.debug(f"Timelapse: {self._frame_count} frames recorded")
-                    return True
+                if self._shutting_down:
+                    return False
+                if not self._is_in_window(now):
+                    pending_finalize = self._detach_session_locked()
+                    return False
+        finally:
+            self._finalize_async(pending_finalize)
 
-        except BrokenPipeError:
-            app_logger.error("Timelapse: ffmpeg pipe broke — stopping session")
-            self._process = None
+        # In-window: now pay for the conversion — OFF the lock, it's the heavy bit.
+        try:
+            frame_size = (image.width, image.height)
+            frame_bytes = np.array(image.convert('RGB'), dtype=np.uint8).tobytes()
+        except Exception as e:
+            app_logger.error(f"Timelapse: frame convert error: {e}")
+            return False
+
+        pending_finalize = None
+        wrote = False
+        try:
+            with self._lock:
+                # State may have changed while the lock was released for the
+                # conversion (e.g. a concurrent stop()).
+                if self._shutting_down:
+                    return False
+
+                # Detect unexpected ffmpeg exit and decide whether to restart.
+                if self._process is not None and self._process.poll() is not None:
+                    self._handle_unexpected_exit(now)
+
+                # 'always' mode rolls over at midnight (one video per calendar day).
+                # All other modes are window-driven: only start when not already
+                # recording — midnight does NOT split an overnight session.
+                mode = self._config.get('window_mode', 'sun')
+                needs_new_session = (
+                    self._process is None or
+                    (mode == 'always' and self._session_date != now.date())
+                )
+                if needs_new_session:
+                    # Crash-loop guard: if recent starts failed immediately, wait
+                    # out the backoff before trying again instead of minting one
+                    # broken video file per captured frame.
+                    if self._restart_blocked_until and now < self._restart_blocked_until:
+                        return False
+                    pending_finalize = self._detach_session_locked()
+                    self._start_session(frame_size, now)
+                elif frame_size != self._frame_size:
+                    app_logger.info(
+                        f"Timelapse: resolution changed {self._frame_size} → "
+                        f"{frame_size}, restarting session"
+                    )
+                    pending_finalize = self._detach_session_locked()
+                    self._start_session(frame_size, now)
+
+                if self._process is not None and self._process.poll() is None:
+                    try:
+                        self._process.stdin.write(frame_bytes)
+                        self._process.stdin.flush()
+                        self._frame_count += 1
+                        # Session is proving healthy — clear crash-loop state.
+                        if self._restart_failures and self._frame_count >= self._HEALTHY_FRAME_THRESHOLD:
+                            self._restart_failures = 0
+                            self._restart_blocked_until = None
+                        if self._frame_count % 100 == 0:
+                            app_logger.debug(f"Timelapse: {self._frame_count} frames recorded")
+                        wrote = True
+                    except BrokenPipeError:
+                        # The pipe broke mid-write. The old code nulled the
+                        # process without kill()/wait() and skipped the backoff,
+                        # leaking ffmpeg and reopening the one-video-per-frame
+                        # crash loop (the d271cc8 regression). Run the SAME guard.
+                        app_logger.error("Timelapse: ffmpeg pipe broke during write")
+                        self._handle_broken_pipe(now)
         except Exception as e:
             app_logger.error(f"Timelapse: add_frame error: {e}")
+        finally:
+            self._finalize_async(pending_finalize)
 
-        return False
+        return wrote
+
+    def _finalize_async(self, spec: Optional[dict]):
+        """Hand a detached session to the background finalizer (no-op if None)."""
+        if spec is not None:
+            finalize_in_background(
+                spec['proc'], path=spec['path'], frames=spec['frames'],
+                elapsed=spec['elapsed'], on_finished=self.on_session_finished,
+            )
+
+    def _detach_session_locked(self) -> Optional[dict]:
+        """Detach the live ffmpeg session under the lock for off-thread finalize.
+
+        Must be called with ``self._lock`` held. Clears the process/session
+        fields and returns a finalize spec (or None when nothing is recording),
+        so the caller can finalize outside the lock without racing ``stop()``.
+        """
+        proc = self._process
+        if proc is None:
+            return None
+        spec = {
+            'proc': proc,
+            'path': self._session_path,
+            'frames': self._frame_count,
+            'elapsed': (
+                int((datetime.now() - self._session_start).total_seconds())
+                if self._session_start else 0
+            ),
+        }
+        self._process = None
+        self._session_date = None
+        self._session_start = None
+        return spec
 
     def _handle_unexpected_exit(self, now: datetime):
         """ffmpeg died while we still expected it to be recording.
 
-        Surfaces the encoder's real error (from the stderr tail) and applies a
-        backoff so a persistent crash can't spawn a new video file on every
-        frame. A late death after a healthy run (e.g. USB drop) is allowed to
-        restart immediately; only immediate failures escalate the backoff.
+        Caller holds ``self._lock``. Surfaces the encoder's real error and runs
+        the shared crash-loop guard.
         """
         exit_code = self._process.poll()
+        self._process = None
+        self._apply_exit_guard(now, exit_code=exit_code)
+
+    def _handle_broken_pipe(self, now: datetime):
+        """ffmpeg's stdin pipe broke mid-write.
+
+        Caller holds ``self._lock``. Detach the (possibly zombie) process — the
+        old path leaked it — and run the cheap crash-loop guard under the lock,
+        but hand the blocking kill()/wait() to a background reaper: doing it
+        under the lock would stall get_status() (the UI's 5s status poll) for up
+        to the reap timeout.
+        """
+        proc = self._process
+        self._process = None
+        if proc is not None:
+            reap_in_background(proc)
+        self._apply_exit_guard(now, exit_code='broken-pipe')
+
+    def _apply_exit_guard(self, now: datetime, *, exit_code):
+        """Shared crash-loop guard for a detected exit OR a broken pipe.
+
+        Surfaces the stderr tail, removes an unhealthy orphan output file, and
+        applies exponential backoff so a persistent failure can't mint a new
+        video on every frame. A late death after a healthy run restarts
+        promptly; only immediate failures escalate the backoff. Caller holds
+        ``self._lock``.
+        """
         died_frames = self._frame_count
         died_path = self._session_path
         stderr_tail = " | ".join(self._stderr_tail)
-
-        self._process = None
-
         detail = f" — ffmpeg said: {stderr_tail}" if stderr_tail else ""
         failed_start = died_frames < self._HEALTHY_FRAME_THRESHOLD
 
         if failed_start:
             # Remove the orphaned (empty / near-empty) output so a crash loop
             # doesn't leave timelapse_YYYYMMDD_2.mp4, _3, _4 … littering disk.
-            if died_frames == 0 and died_path:
+            # Covers 1–4 frame stubs too, not just the exactly-zero case.
+            if died_path and os.path.isfile(died_path):
                 try:
                     os.remove(died_path)
                 except OSError:
@@ -189,7 +287,6 @@ class TimelapseWriter:
                 f"(failure #{self._restart_failures})"
             )
         else:
-            # Healthy session ended abnormally — restart promptly, no backoff.
             self._restart_failures = 0
             self._restart_blocked_until = None
             app_logger.error(
@@ -198,32 +295,54 @@ class TimelapseWriter:
             )
 
     def stop(self):
-        """Stop any active session gracefully (call on app shutdown)."""
-        self._stop_session()
+        """Stop any active session gracefully (capture stop OR app shutdown).
+
+        Sets the shutdown flag and detaches the session under the lock, then
+        finalizes synchronously — a stop wants to block until ffmpeg has
+        flushed the final video. The flag is scoped to the duration of this
+        call: the writer is long-lived and reused across capture sessions
+        (the controller calls stop() on every capture stop), so it must clear
+        the flag before returning or add_frame() would early-return forever and
+        no further timelapse would ever record until the app restarts.
+        """
+        with self._lock:
+            self._shutting_down = True
+            spec = self._detach_session_locked()
+        try:
+            if spec is not None:
+                finalize_session(
+                    spec['proc'], path=spec['path'], frames=spec['frames'],
+                    elapsed=spec['elapsed'], on_finished=self.on_session_finished,
+                )
+        finally:
+            with self._lock:
+                self._shutting_down = False
 
     def get_status(self) -> dict:
         """Return current timelapse status for UI display."""
-        recording = self._process is not None and self._process.poll() is None
-        elapsed = 0
-        if self._session_start and recording:
-            elapsed = int((datetime.now() - self._session_start).total_seconds())
-        return {
-            'recording': recording,
-            'frame_count': self._frame_count,
-            'session_path': self._session_path,
-            'elapsed_seconds': elapsed,
-        }
+        with self._lock:
+            proc = self._process
+            recording = proc is not None and proc.poll() is None
+            elapsed = 0
+            if self._session_start and recording:
+                elapsed = int((datetime.now() - self._session_start).total_seconds())
+            return {
+                'recording': recording,
+                'frame_count': self._frame_count,
+                'session_path': self._session_path,
+                'elapsed_seconds': elapsed,
+            }
 
     # ------------------------------------------------------------------ #
     #  Session management                                                  #
     # ------------------------------------------------------------------ #
 
     def _start_session(self, frame_size: Tuple[int, int], now: datetime):
-        """Start a new ffmpeg session for today."""
-        # Stop any in-progress session first (e.g. day rollover while still recording)
-        if self._process is not None:
-            self._stop_session()
+        """Start a new ffmpeg session for today.
 
+        Caller holds ``self._lock`` and has already detached any prior session
+        via ``_detach_session_locked`` — so ``self._process`` is None here.
+        """
         if not is_ffmpeg_available():
             app_logger.warning("Timelapse: ffmpeg not found — cannot start session")
             return
@@ -299,69 +418,6 @@ class TimelapseWriter:
         except Exception as e:
             app_logger.error(f"Timelapse: failed to start ffmpeg: {e}")
             self._process = None
-
-    def _stop_session(self):
-        """Close the ffmpeg stdin pipe, letting it finalize the video."""
-        with self._lock:
-            proc = self._process
-            self._process = None
-
-        if proc is None:
-            return
-
-        # Capture session info before clearing state
-        finished_path = self._session_path
-        finished_frames = self._frame_count
-        finished_elapsed = (
-            int((datetime.now() - self._session_start).total_seconds())
-            if self._session_start else 0
-        )
-
-        try:
-            proc.stdin.close()
-        except Exception:
-            pass
-
-        clean_exit = True
-        try:
-            # Fragmented MP4 needs no end-of-stream rewrite, so ffmpeg exits soon
-            # after stdin closes — it only has to flush the final buffered frames.
-            # The generous timeout just absorbs a slow disk on a large session.
-            proc.wait(timeout=60)
-            mins, secs = divmod(finished_elapsed, 60)
-            app_logger.info(
-                f"Timelapse: session finalized — {finished_frames} frames  "
-                f"{mins}m{secs:02d}s → {os.path.basename(finished_path or '')}"
-            )
-        except subprocess.TimeoutExpired:
-            clean_exit = False
-            proc.kill()
-            proc.wait()
-            app_logger.warning("Timelapse: ffmpeg did not exit cleanly, killed")
-
-        self._session_date = None
-        self._session_start = None
-
-        # Wait for the OS to finish flushing the file to disk — on Windows the
-        # file may not report a stable size immediately after proc.wait() returns,
-        # and the Discord poster reads it right after.
-        if clean_exit and finished_path:
-            time.sleep(1)
-            for _ in range(10):
-                try:
-                    size = os.path.getsize(finished_path)
-                    time.sleep(1)
-                    if os.path.getsize(finished_path) == size:
-                        break  # File size stable
-                except OSError:
-                    time.sleep(1)
-
-        # Notify listener (e.g. Discord) only when ffmpeg exited cleanly
-        if clean_exit and finished_path and finished_frames > 0 and self.on_session_finished:
-            try:
-                self.on_session_finished(finished_path, finished_frames, finished_elapsed)
-            except Exception as e:
-                app_logger.error(f"Timelapse: on_session_finished callback error: {e}")
 
     # ------------------------------------------------------------------ #
     #  Window detection                                                    #
@@ -471,34 +527,34 @@ class TimelapseWriter:
             if sun_mode == 'sunset_sunrise':
                 s_today = sun(loc.observer, date=day)
                 s_tomorrow = sun(loc.observer, date=tomorrow)
-                window_start = s_today['sunset'].replace(tzinfo=None)
-                window_end = s_tomorrow['sunrise'].replace(tzinfo=None)
+                window_start = _to_local_naive(s_today['sunset'])
+                window_end = _to_local_naive(s_tomorrow['sunrise'])
 
             elif sun_mode == 'civil':
                 s_today = sun(loc.observer, date=day)
                 s_tomorrow = sun(loc.observer, date=tomorrow)
-                window_start = s_today['dusk'].replace(tzinfo=None)
-                window_end = s_tomorrow['dawn'].replace(tzinfo=None)
+                window_start = _to_local_naive(s_today['dusk'])
+                window_end = _to_local_naive(s_tomorrow['dawn'])
 
             elif sun_mode == 'nautical':
-                window_start = time_at_elevation(
+                window_start = _to_local_naive(time_at_elevation(
                     loc.observer, -12, date=day,
                     direction=SunDirection.SETTING
-                ).replace(tzinfo=None)
-                window_end = time_at_elevation(
+                ))
+                window_end = _to_local_naive(time_at_elevation(
                     loc.observer, -12, date=tomorrow,
                     direction=SunDirection.RISING
-                ).replace(tzinfo=None)
+                ))
 
             else:  # astronomical
-                window_start = time_at_elevation(
+                window_start = _to_local_naive(time_at_elevation(
                     loc.observer, -18, date=day,
                     direction=SunDirection.SETTING
-                ).replace(tzinfo=None)
-                window_end = time_at_elevation(
+                ))
+                window_end = _to_local_naive(time_at_elevation(
                     loc.observer, -18, date=tomorrow,
                     direction=SunDirection.RISING
-                ).replace(tzinfo=None)
+                ))
 
             return window_start, window_end
 

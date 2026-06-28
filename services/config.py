@@ -568,6 +568,16 @@ class Config:
                                 'gated' if config.get('scheduled_capture_enabled') else 'always'
                             )
 
+                        # Back-compat (W1): legacy configs enabled the web server
+                        # via output.mode == 'webserver'; the modern GUI uses
+                        # output.webserver_enabled. Carry the old flag forward so
+                        # the web server isn't silently dead on upgraded configs.
+                        loaded_output = loaded.get('output', {})
+                        if (isinstance(loaded_output, dict)
+                                and 'webserver_enabled' not in loaded_output
+                                and loaded_output.get('mode') == 'webserver'):
+                            config['output']['webserver_enabled'] = True
+
                         return config
                 except Exception as e:
                     try:

@@ -3,6 +3,7 @@ Discord webhook integration for alerts and notifications
 """
 import os
 import io
+import re
 import json
 import time
 import requests
@@ -16,6 +17,27 @@ DISCORD_IMAGE_MAX_HEIGHT = 750
 
 # Hard limit for Discord image uploads (1 MB)
 DISCORD_IMAGE_MAX_BYTES = 1 * 1024 * 1024
+
+
+# A live webhook secret. requests reports the failed request as a BARE PATH
+# (".../url: /api/webhooks/<id>/<token> (Caused by ...)"), not a full http(s)://
+# URL — so the shared URL redactor misses it. Strip the path itself first.
+_WEBHOOK_PATH_RE = re.compile(r"/api/webhooks/\d+/[^\s/)]+", re.I)
+
+
+def redact_discord_error(exc) -> str:
+    """Return a log-safe ``"ExcType: message"`` string for a Discord webhook error.
+
+    A ``requests`` exception (ConnectionError, etc.) embeds the webhook the
+    request targeted — ``/api/webhooks/<id>/<token>`` — as a bare path, and the
+    token is a live secret. Logs are forwarded to PostHog over OTLP (f3a5dd4),
+    so a leak egresses. Strip the webhook path here, then run the shared
+    URL/secret redactor for any full URLs / tokens. The exception type is
+    included so callers don't re-prepend it (and re-invoke the redactor).
+    """
+    from .youtube_upload import sanitize_exception
+    redacted = sanitize_exception(_WEBHOOK_PATH_RE.sub("/api/webhooks/[REDACTED]", str(exc)))
+    return f"{type(exc).__name__}: {redacted}"
 
 
 def format_exposure_time(exp_seconds):
@@ -291,15 +313,16 @@ class DiscordAlerts:
             return False
             
         except requests.exceptions.ConnectionError as e:
-            self.last_send_status = f"Failed: Connection error"
-            app_logger.error(f"Discord webhook connection error: {e}")
+            self.last_send_status = "Failed: Connection error"
+            app_logger.error(f"Discord webhook connection error: {redact_discord_error(e)}")
             return False
-            
+
         except Exception as e:
-            self.last_send_status = f"Failed: {str(e)[:200]}"
-            app_logger.error(f"Discord webhook error: {e}")
+            err = redact_discord_error(e)
+            self.last_send_status = f"Failed: {err}"
+            app_logger.error(f"Discord webhook error: {err}")
             return False
-    
+
     def send_startup_message(self):
         """Send application startup notification"""
         discord_config = self.config.get('discord', {})
@@ -565,8 +588,9 @@ Latest sky capture from {APP_DISPLAY_NAME}."""
             app_logger.error("Discord webhook timeout (video upload)")
             return False
         except Exception as e:
-            self.last_send_status = f"Failed: {str(e)[:200]}"
-            app_logger.error(f"Discord webhook error: {e}")
+            err = redact_discord_error(e)
+            self.last_send_status = f"Failed: {err}"
+            app_logger.error(f"Discord webhook error: {err}")
             return False
 
     def get_last_status(self):

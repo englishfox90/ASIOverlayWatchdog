@@ -80,7 +80,7 @@ class HeadlessRunner:
             self.image_library.start()
 
             # Start web server if configured
-            if self.config.get('output', {}).get('mode') == 'webserver':
+            if self._webserver_mode_enabled():
                 self._start_webserver()
             
             # Initialize camera
@@ -147,7 +147,11 @@ class HeadlessRunner:
     _WEBSERVER_RETRY_SEC = 15.0
 
     def _webserver_mode_enabled(self) -> bool:
-        return self.config.get('output', {}).get('mode') == 'webserver'
+        # The modern GUI writes output.webserver_enabled; only legacy configs
+        # carry output.mode == 'webserver'. Honour both so headless web
+        # monitoring isn't silently dead for current configs (W1).
+        output = self.config.get('output', {})
+        return bool(output.get('webserver_enabled', False)) or output.get('mode') == 'webserver'
 
     def _ensure_webserver(self):
         """Re-attempt a failed web-server bind from the capture loop.

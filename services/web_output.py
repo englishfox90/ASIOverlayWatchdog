@@ -7,6 +7,7 @@ import os
 import io
 import json
 import hashlib
+import re
 import threading
 import time
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -19,6 +20,43 @@ from . import web_library
 # Maximum image size served by the web endpoint (5 MB)
 WEB_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
+# Matches a GENUINE absolute filesystem path anywhere in a string (W5). The
+# POSIX form is rooted at a string/whitespace boundary and needs ≥2 segments,
+# so it scrubs real paths like ``/home/observer/data`` without clobbering
+# benign slash-bearing values such as a date ``06/28/2026`` or ratio ``16/9``
+# (whose inner slashes are preceded by digits, not a boundary). Matched spans
+# are redacted in place so the rest of the value (and unrelated keys) survive.
+_REDACTED_PATH = "<redacted-path>"
+_ABS_PATH_RE = re.compile(
+    r'[A-Za-z]:[\\/]\S*'             # Windows drive: C:\... or C:/...
+    r'|\\\\\S+'                      # UNC: \\host\share
+    r'|(?:^|(?<=\s))/[^\s/]+/\S*'    # POSIX absolute, boundary-rooted, 2+ segments
+)
+
+
+def _safe_image_label(path):
+    """Reduce an image path to a bare filename for the /status payload."""
+    if not path:
+        return "None"
+    return os.path.basename(path) or "None"
+
+
+def _scrub_metadata(metadata):
+    """Redact absolute filesystem paths out of metadata string values.
+
+    Defense-in-depth for the local-only /status endpoint: overlay/capture
+    metadata can carry source paths (e.g. the saved-file path) that would
+    otherwise expose the drive + Windows username + folder layout. Only the
+    matched path span is replaced, so the key and any surrounding text are
+    preserved and benign slash-bearing values (dates, ratios) are untouched.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    return {
+        k: (_ABS_PATH_RE.sub(_REDACTED_PATH, v) if isinstance(v, str) else v)
+        for k, v in metadata.items()
+    }
+
 
 class ImageHTTPHandler(BaseHTTPRequestHandler):
     """HTTP request handler for serving images and status."""
@@ -30,11 +68,13 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
 
     # Class-level variables shared between all handler instances
     latest_image_path = None
-    latest_image_data = None
-    latest_image_content_type = 'image/jpeg'  # Default to JPEG
-    latest_image_etag = None  # PERF-002: ETag for caching support
-    latest_image_update_time = None  # Unix ts of last update_image() call
     latest_metadata = {}
+    # Single immutable snapshot of the served image body, assigned atomically by
+    # update_image() and bound to a local exactly once by each reader. Tuple of
+    # (data, content_type, etag, update_time). A reference swap is atomic under
+    # CPython, so a request thread can never observe a Content-Length that
+    # belongs to a different frame than the body it writes (W3 torn-read fix).
+    latest_image_snapshot = None
     server_start_time = None
     image_count = 0
     # Images older than this are flagged as stale in /status and via
@@ -59,14 +99,18 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
             path: Optional file path for logging
             metadata: Optional metadata dict
         """
-        cls.latest_image_data = image_data
-        cls.latest_image_content_type = content_type
+        # Assemble the full snapshot first, then publish with a single atomic
+        # reference assignment so readers see all four fields together or not
+        # at all. Never mutate the tuple in place.
+        cls.latest_image_snapshot = (
+            image_data,
+            content_type,
+            hashlib.md5(image_data).hexdigest(),  # ETag for cache validation
+            time.time(),
+        )
         cls.latest_image_path = path
         if metadata:
             cls.latest_metadata = metadata
-        # Generate ETag from content hash for cache validation
-        cls.latest_image_etag = hashlib.md5(image_data).hexdigest()
-        cls.latest_image_update_time = time.time()
         cls.image_count += 1
 
     @classmethod
@@ -82,9 +126,10 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
     @classmethod
     def _image_age_seconds(cls):
         """Seconds since the last update_image() call, or None if never set."""
-        if cls.latest_image_update_time is None:
+        snapshot = cls.latest_image_snapshot
+        if snapshot is None:
             return None
-        return max(0.0, time.time() - cls.latest_image_update_time)
+        return max(0.0, time.time() - snapshot[3])
     
     def log_message(self, format, *args):
         """Override to use our logger instead of stderr."""
@@ -130,6 +175,12 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
                 available += f", {library_path}, {library_path}/image"
             self.send_error(404, f"Path not found. Available: {available}")
     
+    # ACCEPTED RISK (W4): wildcard CORS (`Access-Control-Allow-Origin: *`) and
+    # the lack of Host-header validation allow a DNS-rebinding page to read
+    # /status and /library. Accepted because the server binds loopback
+    # (127.0.0.1) by default and is local-only by design (auth is out of
+    # scope). Revisit — add Host allow-listing and drop the wildcard ACAO —
+    # only if the server is ever bound to a non-loopback host.
     def do_OPTIONS(self):
         """Handle OPTIONS requests for CORS preflight."""
         self.send_response(200)
@@ -141,32 +192,37 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
     
     def _serve_image(self):
         """Serve the latest processed image with ETag caching support."""
-        if not self.latest_image_data:
+        # Bind the snapshot once: every field below (404 guard, ETag,
+        # Content-Length, body) comes from this single local, so a concurrent
+        # update_image() swap can't tear the response (W3).
+        snapshot = self.latest_image_snapshot
+        if snapshot is None or not snapshot[0]:
             try:
                 self.send_error(404, "No image available yet")
             except (ConnectionAbortedError, BrokenPipeError):
                 # Client disconnected while we were sending 404 - ignore
                 pass
             return
-        
+
+        image_data, content_type, image_etag, update_time = snapshot
+
         try:
             # PERF-002: Check If-None-Match header for ETag-based caching
             client_etag = self.headers.get('If-None-Match')
-            if client_etag and client_etag == self.latest_image_etag:
+            if client_etag and client_etag == image_etag:
                 # Client has current version - return 304 Not Modified
                 self.send_response(304)
-                self.send_header("ETag", self.latest_image_etag)
+                self.send_header("ETag", image_etag)
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 app_logger.debug(f"Served 304 Not Modified (ETag match)")
                 return
-            
+
             self.send_response(200)
-            self.send_header("Content-Type", self.latest_image_content_type)
-            self.send_header("Content-Length", len(self.latest_image_data))
-            # Include ETag for cache validation
-            if self.latest_image_etag:
-                self.send_header("ETag", self.latest_image_etag)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", len(image_data))
+            # ETag for cache validation (an md5 hexdigest, always present).
+            self.send_header("ETag", image_etag)
             self.send_header("Cache-Control", "no-cache, must-revalidate")  # Allow conditional requests
             self.send_header("Pragma", "no-cache")
             self.send_header("Expires", "0")
@@ -177,39 +233,47 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
             # Staleness signalling — consumers that want to know whether the
             # served image is current can check these headers instead of
             # having to diff ETags over time.
-            age = self._image_age_seconds()
-            if age is not None:
-                self.send_header("X-PFR-Image-Age-Seconds", f"{int(age)}")
-                if age >= self.stale_threshold_sec:
-                    self.send_header("X-PFR-Image-Stale", "true")
+            age = max(0.0, time.time() - update_time)
+            self.send_header("X-PFR-Image-Age-Seconds", f"{int(age)}")
+            if age >= self.stale_threshold_sec:
+                self.send_header("X-PFR-Image-Stale", "true")
             self.end_headers()
-            self.wfile.write(self.latest_image_data)
-            app_logger.debug(f"Served image: {len(self.latest_image_data)} bytes ({self.latest_image_content_type})")
+            self.wfile.write(image_data)
+            app_logger.debug(f"Served image: {len(image_data)} bytes ({content_type})")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
             # Client disconnected - this is normal, don't log as error
             app_logger.debug(f"Client disconnected during image transfer: {e.__class__.__name__}")
         except Exception as e:
             app_logger.error(f"Error serving image: {e}")
     
-    def _serve_status(self):
-        """Serve server status as JSON."""
-        uptime = 0
-        if self.server_start_time:
-            uptime = int(time.time() - self.server_start_time)
+    @classmethod
+    def _build_status_dict(cls):
+        """Assemble the /status JSON payload (no socket I/O — unit-testable).
 
-        age = self._image_age_seconds()
-        image_stale = age is not None and age >= self.stale_threshold_sec
+        Never exposes filesystem paths: ``latest_image`` is reduced to a bare
+        filename and ``metadata`` is scrubbed of absolute-path values so the
+        endpoint can't leak the drive layout / Windows username (W5).
+        """
+        uptime = 0
+        if cls.server_start_time:
+            uptime = int(time.time() - cls.server_start_time)
+
+        age = cls._image_age_seconds()
+        image_stale = age is not None and age >= cls.stale_threshold_sec
 
         status = {
             "server": "PFR Sentinel HTTP Server",
             "status": "running",
             "uptime_seconds": uptime,
-            "images_served": self.image_count,
-            "latest_image": self.latest_image_path or "None",
+            "images_served": cls.image_count,
+            "latest_image": _safe_image_label(cls.latest_image_path),
             "image_age_seconds": int(age) if age is not None else None,
             "image_stale": image_stale,
-            "stale_threshold_seconds": self.stale_threshold_sec,
-            "metadata": self.latest_metadata,
+            "stale_threshold_seconds": cls.stale_threshold_sec,
+            # Scrub at the egress boundary (not at write) so a path can't leak
+            # regardless of how latest_metadata was set — security over the small
+            # per-request regex cost on a local-only, low-frequency endpoint.
+            "metadata": _scrub_metadata(cls.latest_metadata),
             "timestamp": datetime.now().isoformat()
         }
 
@@ -219,15 +283,21 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         try:
             from . import api_status
             view = api_status.derive_status_view(
-                self.capture_status,
+                cls.capture_status,
                 image_age=age,
                 now=time.time(),
-                stale_threshold=self.stale_threshold_sec,
+                stale_threshold=cls.stale_threshold_sec,
             )
             status["capture"] = view["capture"]
             status["health"] = view["health"]
         except Exception as e:
             app_logger.error(f"Error deriving capture status: {e}")
+
+        return status
+
+    def _serve_status(self):
+        """Serve server status as JSON."""
+        status = self._build_status_dict()
 
         try:
             self.send_response(200)
@@ -350,6 +420,12 @@ class WebOutputServer:
             # is off so server_close() abandons (rather than joins) any in-flight
             # request thread; daemon threads + the handler timeout above bound how
             # long a straggler can linger.
+            # ACCEPTED RISK (W6): ThreadingHTTPServer spawns one (unbounded)
+            # thread per connection, so a connection flood could exhaust
+            # threads. Accepted under the local-only/loopback deployment — the
+            # only clients are the operator's own monitoring tools. If the
+            # server is ever exposed on a non-loopback host, cap concurrency
+            # with a bounded pool or an active-connection 503.
             self.server = ThreadingHTTPServer((self.host, self.port), ImageHTTPHandler)
             self.server.daemon_threads = True
             self.server.block_on_close = False

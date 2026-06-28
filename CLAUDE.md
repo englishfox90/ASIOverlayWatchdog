@@ -174,6 +174,7 @@ Standalone (not in pytest suite):
 - [`docs/CODE_QUALITY_PLAN.md`](docs/CODE_QUALITY_PLAN.md) — code quality + structure roadmap
 - [`docs/ALLSKY_CALIBRATION_PLAN.md`](docs/ALLSKY_CALIBRATION_PLAN.md) — read before touching all-sky calibration
 - [`docs/METEOR_DETECTION_PLAN.md`](docs/METEOR_DETECTION_PLAN.md) — meteor detection rework for the long-exposure regime; read before touching `services/meteor/`
+- [`docs/FEATURE_HARDENING_PLAN.md`](docs/FEATURE_HARDENING_PLAN.md) — prioritized hardening backlog (web server, ASCOM roof safety file, timelapse) from the 2026-06-28 deep review; P0/P1/P2 + sizing + file:line pointers
 
 Developer-facing technical reference (feature design, build/release tooling, vendor SDK) lives in [`docs/dev/`](docs/dev/README.md). End-user content is on the project wiki.
 

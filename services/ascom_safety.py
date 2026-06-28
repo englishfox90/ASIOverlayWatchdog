@@ -22,6 +22,24 @@ from typing import Optional, Dict, Any
 from services.logger import app_logger
 
 
+def is_safe_open(ml_results: Dict[str, Any], min_confidence: float) -> bool:
+    """The single home for the roof-safety verdict (Policy A, fail-safe).
+
+    The file may report SAFE only for a *confident* ``Open``. Every other
+    reading — ``Closed``, ``N/A``, any unexpected status, or a confidence that
+    is ``None`` or below the threshold — is UNSAFE. Both the trigger-text choice
+    (``ASCOMSafetyWriter.write_status``) and the confirmation FSM
+    (``RoofSafetyFSM``) call this so the "should we write SAFE?" decision can
+    never drift between the two and silently invert the roof verdict.
+    """
+    conf = ml_results.get('roof_confidence')
+    return (
+        ml_results.get('roof_status', 'N/A') == 'Open'
+        and conf is not None
+        and conf >= min_confidence
+    )
+
+
 class ASCOMSafetyWriter:
     """
     Writes ML predictions to ASCOM-compatible safety monitor file.
@@ -80,19 +98,21 @@ class ASCOMSafetyWriter:
         roof_confidence = ml_results.get('roof_confidence')
         sky_condition = ml_results.get('sky_condition', 'N/A')
         sky_confidence = ml_results.get('sky_confidence')
-        
-        # Skip if roof status unknown
-        if roof_status == 'N/A':
-            app_logger.debug("ASCOM Safety: Skipping write - roof status N/A")
-            return False
-        
-        # Skip if confidence below threshold
-        if roof_confidence is not None and roof_confidence < self.min_confidence:
-            app_logger.debug(f"ASCOM Safety: Skipping write - confidence {roof_confidence:.1%} < {self.min_confidence:.1%}")
-            return False
-        
+
+        # Policy A (fail-safe): the file may report SAFE only for a confident
+        # 'Open'. Every other reading — 'N/A', any unexpected status, or a
+        # confidence that is None or below the threshold — writes the
+        # CLOSED/UNSAFE trigger. Never skip the write: a skip leaves a stale
+        # (possibly OPEN/safe) file on disk that NINA keeps reading while the
+        # model is blind, which is fail-dangerous.
+        safe = is_safe_open(ml_results, self.min_confidence)
+        if not safe:
+            app_logger.debug(
+                f"ASCOM Safety: uncertain roof reading (status={roof_status}, "
+                f"confidence={roof_confidence}) -> writing UNSAFE")
+
         # Build file content
-        trigger = self.open_trigger if roof_status == 'Open' else self.closed_trigger
+        trigger = self.open_trigger if safe else self.closed_trigger
         lines = [f"{self.preamble} {trigger}"]
         
         if self.include_confidence and roof_confidence is not None:
@@ -167,26 +187,38 @@ class ASCOMSafetyWriter:
 
 # Module-level convenience function
 _writer_instance: Optional[ASCOMSafetyWriter] = None
+_writer_config: Optional[Dict[str, Any]] = None
+
+# Fields that change the writer's behaviour. A tightened min_confidence or a
+# changed trigger must take effect without an app restart — comparing only
+# file_path (the old behaviour) silently ignored every other edit.
+_RELEVANT_FIELDS = (
+    'file_path', 'preamble', 'open_trigger', 'closed_trigger',
+    'include_confidence', 'include_sky_condition', 'min_confidence',
+)
 
 
 def write_ascom_safety_file(ml_results: Dict[str, Any], config: Dict[str, Any]) -> bool:
     """
     Convenience function to write ML results to ASCOM safety file.
-    
+
     Args:
         ml_results: ML prediction results dict
         config: ascom_safety_file config dict
-    
+
     Returns:
         True if file was written successfully
     """
-    global _writer_instance
-    
+    global _writer_instance, _writer_config
+
     if not config.get('enabled', False):
         return False
-    
-    # Create or update writer instance
-    if _writer_instance is None or _writer_instance.file_path != config.get('file_path', ''):
+
+    # Rebuild the cached writer when ANY relevant field changes, not just the
+    # file path — otherwise a tightened min_confidence/trigger is ignored.
+    relevant = {key: config.get(key) for key in _RELEVANT_FIELDS}
+    if _writer_instance is None or _writer_config != relevant:
         _writer_instance = ASCOMSafetyWriter(config)
-    
+        _writer_config = relevant
+
     return _writer_instance.write_status(ml_results)

@@ -29,6 +29,9 @@ class _FakeServer:
         self.running = bool(self._bind_ok["value"])
         return self.running
 
+    def stop(self):
+        self.running = False
+
     def get_url(self):
         return "http://100.64.0.1:8080/latest"
 
@@ -87,6 +90,32 @@ def test_failed_bind_schedules_retry_and_recovers():
     assert win.web_server.running
 
 
+def test_runtime_toggle_starts_and_stops_web_server():
+    """W8: flipping webserver_enabled at runtime must start AND stop the server
+    via the (now idempotent) reconciler, instead of doing nothing."""
+    bind_ok = {"value": True}
+    win = _make_window(bind_ok)
+    win._stop_web_server = types.MethodType(
+        _MainWindowOutputMixin._stop_web_server, win
+    )
+    win._stop_capture_status_timer = MagicMock()
+
+    def factory(*args, **kwargs):
+        return _FakeServer(bind_ok, *args, **kwargs)
+
+    with patch("ui.main_window.output.WebOutputServer", side_effect=factory):
+        # Enabled → server starts.
+        win._ensure_output_servers_started()
+        started = win.web_server
+        assert started is not None and started.running
+
+        # Toggle off at runtime → reconciler tears the server down.
+        win.config["output"]["webserver_enabled"] = False
+        win._ensure_output_servers_started()
+        assert win.web_server is None
+        assert started.running is False
+
+
 def test_retry_is_noop_once_running():
     bind_ok = {"value": True}
     win = _make_window(bind_ok)
@@ -128,6 +157,36 @@ def _make_runner(bind_ok):
     runner._last_webserver_retry = 0.0
     runner._log = lambda *a, **k: None
     return runner
+
+
+def test_headless_starts_webserver_from_webserver_enabled_flag():
+    """W1: headless must start the web server from the modern
+    output.webserver_enabled flag, even when the legacy output.mode is absent."""
+    bind_ok = {"value": True}
+    runner = HeadlessRunner.__new__(HeadlessRunner)
+    runner.config = {
+        "output": {
+            "webserver_enabled": True,
+            "webserver_host": "127.0.0.1",
+            "webserver_port": 8080,
+        }
+    }
+    runner.web_server = None
+    runner.image_library = None
+    runner._last_webserver_retry = 0.0
+    runner._log = lambda *a, **k: None
+
+    # The gate now honours webserver_enabled (mode is absent).
+    assert runner._webserver_mode_enabled() is True
+
+    def factory(*args, **kwargs):
+        return _FakeServer(bind_ok, *args, **kwargs)
+
+    with patch("services.headless_runner.WebOutputServer", side_effect=factory):
+        runner._ensure_webserver()
+
+    assert runner.web_server is not None
+    assert runner.web_server.running
 
 
 def test_headless_ensure_webserver_recovers_after_failed_bind():

@@ -159,6 +159,11 @@ class TimelapsePublishers:
             def _progress(fields: dict):
                 if "resumable_uri" in fields:
                     self.youtube_state.update_progress(key, {"resumable_uri": fields["resumable_uri"]})
+                else:
+                    # Refresh liveness on every progress tick so a genuinely
+                    # slow-but-alive upload (no URI change for hours) can't be
+                    # judged stale and reclaimed into a duplicate upload.
+                    self.youtube_state.touch(key)
 
             try:
                 result = self.youtube_uploader.upload_video(

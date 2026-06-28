@@ -167,6 +167,116 @@ def test_upload_state_claims_and_prevents_duplicate(tmp_path):
     assert uploaded["video_id"] == "abc123"
 
 
+def test_stale_in_progress_is_reclaimable(tmp_path):
+    """T6 — an in_progress entry orphaned by a crash must be reclaimable so the
+    upload resumes, keeping its resumable_uri for a cheap resume."""
+    from datetime import datetime, timezone, timedelta
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake video")
+    store = YouTubeUploadStateStore(storage_dir=str(tmp_path))
+
+    key = store.make_key(str(video))
+    identity = store.make_identity(str(video))
+    old = (datetime.now(timezone.utc)
+           - timedelta(seconds=store.STALE_IN_PROGRESS_SECONDS + 60)).isoformat()
+    store._save({
+        "version": 1,
+        "uploads": {
+            key: {
+                **identity,
+                "status": "in_progress",
+                "claimed_at": old,
+                "updated_at": old,
+                "attempts": 1,
+                "resumable_uri": "https://uploads.example/resume/abc",
+            }
+        },
+    })
+
+    claimed, claimed_key, entry = store.claim(str(video))
+
+    assert claimed is True
+    assert claimed_key == key
+    assert entry["status"] == "in_progress"
+    assert entry["resumable_uri"] == "https://uploads.example/resume/abc"
+    assert entry["attempts"] == 2
+
+
+def test_fresh_in_progress_is_not_reclaimable(tmp_path):
+    """A recently-claimed in_progress entry must still block a duplicate claim."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake video")
+    store = YouTubeUploadStateStore(storage_dir=str(tmp_path))
+
+    store.claim(str(video))
+    claimed, _, entry = store.claim(str(video))
+
+    assert claimed is False
+    assert entry["status"] == "in_progress"
+
+
+def test_recently_progressed_in_progress_not_reclaimable(tmp_path):
+    """A slow-but-ALIVE upload (old claimed_at, but updated_at refreshed
+    recently via progress) must NOT be reclaimed — else it gets double-started."""
+    from datetime import datetime, timezone, timedelta
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake video")
+    store = YouTubeUploadStateStore(storage_dir=str(tmp_path))
+
+    key = store.make_key(str(video))
+    identity = store.make_identity(str(video))
+    old = (datetime.now(timezone.utc)
+           - timedelta(seconds=store.STALE_IN_PROGRESS_SECONDS + 600)).isoformat()
+    recent = datetime.now(timezone.utc).isoformat()
+    store._save({
+        "version": 1,
+        "uploads": {
+            key: {
+                **identity,
+                "status": "in_progress",
+                "claimed_at": old,        # claimed long ago …
+                "updated_at": recent,     # … but a live worker just progressed
+                "attempts": 1,
+                "resumable_uri": "https://uploads.example/resume/abc",
+            }
+        },
+    })
+
+    claimed, _, entry = store.claim(str(video))
+
+    assert claimed is False               # liveness from updated_at protects it
+    assert entry["status"] == "in_progress"
+
+
+def test_touch_refreshes_liveness_and_blocks_reclaim(tmp_path):
+    """touch() refreshes updated_at so a long upload that keeps touching is
+    never mistaken for a dead worker."""
+    from datetime import datetime, timezone, timedelta
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake video")
+    store = YouTubeUploadStateStore(storage_dir=str(tmp_path))
+
+    key = store.make_key(str(video))
+    identity = store.make_identity(str(video))
+    old = (datetime.now(timezone.utc)
+           - timedelta(seconds=store.STALE_IN_PROGRESS_SECONDS + 600)).isoformat()
+    store._save({
+        "version": 1,
+        "uploads": {key: {**identity, "status": "in_progress",
+                          "claimed_at": old, "updated_at": old, "attempts": 1,
+                          "resumable_uri": "https://u/r"}},
+    })
+
+    assert store._is_stale_in_progress(store.get(key)) is True   # stale before
+    store.touch(key)
+    assert store._is_stale_in_progress(store.get(key)) is False  # fresh after
+    claimed, _, _ = store.claim(str(video))
+    assert claimed is False               # duplicate claim now blocked
+
+
 def test_upload_state_recovers_from_corrupt_file(tmp_path):
     state_path = tmp_path / "youtube_upload_state.json"
     state_path.write_text("{not json", encoding="utf-8")

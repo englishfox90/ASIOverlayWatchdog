@@ -66,8 +66,7 @@ class TestWebServerBasic:
         the threshold, image_stale flips to True.
         """
         # Ensure a clean class state regardless of other tests.
-        ImageHTTPHandler.latest_image_update_time = None
-        ImageHTTPHandler.latest_image_data = None
+        ImageHTTPHandler.latest_image_snapshot = None
         ImageHTTPHandler.image_count = 0
         ImageHTTPHandler.stale_threshold_sec = 2  # test-local short threshold
 
@@ -80,8 +79,9 @@ class TestWebServerBasic:
         assert age is not None and age < 1.0
         assert not (age >= ImageHTTPHandler.stale_threshold_sec)
 
-        # Simulate ageing: rewind update time by 10s.
-        ImageHTTPHandler.latest_image_update_time = time.time() - 10
+        # Simulate ageing: rewind the snapshot's update time by 10s.
+        data, ct, etag, _ = ImageHTTPHandler.latest_image_snapshot
+        ImageHTTPHandler.latest_image_snapshot = (data, ct, etag, time.time() - 10)
         age = ImageHTTPHandler._image_age_seconds()
         assert age >= ImageHTTPHandler.stale_threshold_sec
 
@@ -148,7 +148,7 @@ class TestWebServerImage:
         
         try:
             # Reset handler state
-            ImageHTTPHandler.latest_image_data = None
+            ImageHTTPHandler.latest_image_snapshot = None
             
             time.sleep(0.2)
             response = requests.get(server.get_url(), timeout=5)
@@ -377,3 +377,116 @@ class TestWebServerLibraryEndpoints:
         finally:
             server.stop()
             lib.stop()
+
+
+class TestStatusPathLeak:
+    """W5 — /status must not expose absolute filesystem paths."""
+
+    def test_status_does_not_leak_absolute_paths(self):
+        import json as _json
+
+        ImageHTTPHandler.latest_image_path = (
+            r"C:\Users\SecretUser\AppData\Local\PFRSentinel\images\latest.jpg"
+        )
+        ImageHTTPHandler.latest_metadata = {
+            "CAMERA": "ASI676MC",
+            # Benign slash-bearing values that must NOT be mistaken for paths.
+            "DATE": "06/28/2026",
+            "RATIO": "16/9",
+            "FILEPATH": r"C:\Users\SecretUser\captures\frame_001.fits",
+            "SOURCE": "/home/observer/data/x.png",
+            "UNC": r"\\nas\share\frame.png",
+            # Absolute path embedded MID-STRING (not at the start) must also be
+            # scrubbed — an ^-anchored pattern would leak this one.
+            "NOTE": r"saved to C:\Users\SecretUser\AppData\frame.fits ok",
+        }
+
+        status = ImageHTTPHandler._build_status_dict()
+        meta = status["metadata"]
+
+        # latest_image is reduced to a bare filename.
+        assert status["latest_image"] == "latest.jpg"
+
+        # No absolute path / username / layout leaks anywhere in the payload.
+        blob = _json.dumps(status)
+        assert "SecretUser" not in blob
+        assert "/home/observer" not in blob
+        assert "nas" not in blob
+        assert "AppData" not in blob
+        assert "frame_001" not in blob
+
+        # Benign fields survive untouched — no over-matching of dates/ratios
+        # (the keys must stay AND keep their original value).
+        assert meta.get("CAMERA") == "ASI676MC"
+        assert meta.get("DATE") == "06/28/2026"
+        assert meta.get("RATIO") == "16/9"
+
+        # Path-bearing values keep their key but have the path redacted out.
+        assert meta["FILEPATH"] == "<redacted-path>"
+        assert meta["SOURCE"] == "<redacted-path>"
+        assert meta["UNC"] == "<redacted-path>"
+        # Mid-string path: surrounding text preserved, path removed.
+        assert meta["NOTE"].startswith("saved to ")
+        assert meta["NOTE"].endswith(" ok")
+        assert "<redacted-path>" in meta["NOTE"]
+        assert "SecretUser" not in meta["NOTE"]
+
+
+@pytest.mark.requires_network
+class TestWebServerConcurrency:
+    """W3 — /latest must never serve a torn frame under concurrent updates."""
+
+    def test_latest_never_torn_under_concurrent_updates(self):
+        import threading as _t
+
+        server = WebOutputServer(host='127.0.0.1', port=18095, image_path='/latest')
+        server.start()
+        try:
+            small = io.BytesIO()
+            Image.new("RGB", (32, 32), (10, 20, 30)).save(small, format="JPEG", quality=90)
+            big = io.BytesIO()
+            Image.new("RGB", (1200, 1200), (200, 100, 50)).save(big, format="JPEG", quality=95)
+            small_b, big_b = small.getvalue(), big.getvalue()
+            assert abs(len(big_b) - len(small_b)) > 1000  # very different sizes
+
+            stop = _t.Event()
+
+            def writer():
+                toggle = False
+                while not stop.is_set():
+                    server.update_image(
+                        "x.jpg", big_b if toggle else small_b, content_type="image/jpeg"
+                    )
+                    toggle = not toggle
+
+            wt = _t.Thread(target=writer, daemon=True)
+            wt.start()
+
+            errors = []
+
+            def reader():
+                for _ in range(80):
+                    try:
+                        r = requests.get("http://127.0.0.1:18095/latest", timeout=5)
+                        if r.status_code != 200:
+                            continue
+                        cl = int(r.headers.get("Content-Length", -1))
+                        if cl != len(r.content):
+                            errors.append(("content_length_mismatch", cl, len(r.content)))
+                            continue
+                        # A truncated/garbled JPEG raises on decode.
+                        Image.open(io.BytesIO(r.content)).load()
+                    except Exception as e:
+                        errors.append(("exc", repr(e)))
+
+            readers = [_t.Thread(target=reader) for _ in range(8)]
+            for t in readers:
+                t.start()
+            for t in readers:
+                t.join()
+            stop.set()
+            wt.join(timeout=2)
+
+            assert not errors, errors[:5]
+        finally:
+            server.stop()

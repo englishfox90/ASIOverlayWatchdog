@@ -676,3 +676,72 @@ class TestDiscordImagePathValidation:
         )
         
         assert result is True
+
+
+class TestDiscordTokenRedaction:
+    """T5 — a webhook token in an exception must never reach logs or status.
+
+    requests reports the failed request as a BARE PATH (not a full URL): for
+    Discord that is /api/webhooks/<id>/<token> — a live secret. Logs egress to
+    PostHog over OTLP, so any leak leaves the host.
+    """
+
+    SENTINEL = "s3cr3t-webhook-token-DO-NOT-LEAK"
+    WEBHOOK = f"https://discord.com/api/webhooks/123456789/{SENTINEL}"
+    # The shape requests actually produces — webhook appears as a bare path.
+    REAL_MSG = (
+        "HTTPSConnectionPool(host='discord.com', port=443): Max retries "
+        f"exceeded with url: /api/webhooks/123456789/{SENTINEL} "
+        "(Caused by NewConnectionError('<urllib3.connection."
+        "HTTPSConnection object>: Failed to establish a new connection'))"
+    )
+
+    def _alerts(self):
+        from services.discord_alerts import DiscordAlerts
+        cfg = {'discord': {'enabled': True, 'webhook_url': self.WEBHOOK,
+                           'include_latest_image': False}}
+        config = Mock()
+        config.get = lambda key, default=None: cfg.get(key, default)
+        return DiscordAlerts(config)
+
+    @patch('services.discord_alerts.time.sleep', lambda *a, **k: None)
+    @patch('services.discord_alerts.requests.post')
+    def test_connection_error_token_not_logged_or_stored(self, mock_post):
+        import requests
+        from services import discord_alerts as da
+
+        # The realistic requests ConnectionError — bare webhook path embedded.
+        mock_post.side_effect = requests.exceptions.ConnectionError(self.REAL_MSG)
+
+        logged = []
+        with patch.object(da.app_logger, 'error', lambda msg: logged.append(str(msg))), \
+             patch.object(da.app_logger, 'warning', lambda msg: logged.append(str(msg))):
+            alerts = self._alerts()
+            result = alerts.send_discord_message("T", "D", level="error")
+
+        assert result is False
+        assert self.SENTINEL not in alerts.last_send_status
+        assert all(self.SENTINEL not in line for line in logged), logged
+
+    @patch('services.discord_alerts.time.sleep', lambda *a, **k: None)
+    @patch('services.discord_alerts.requests.post')
+    def test_generic_error_token_not_logged_or_stored(self, mock_post):
+        from services import discord_alerts as da
+
+        # A non-retryable exception carrying the same bare-path webhook leak.
+        mock_post.side_effect = RuntimeError(self.REAL_MSG)
+
+        logged = []
+        with patch.object(da.app_logger, 'error', lambda msg: logged.append(str(msg))):
+            alerts = self._alerts()
+            result = alerts.send_discord_message("T", "D", level="error")
+
+        assert result is False
+        assert self.SENTINEL not in alerts.last_send_status
+        assert all(self.SENTINEL not in line for line in logged), logged
+
+    def test_redactor_strips_bare_webhook_path(self):
+        from services.discord_alerts import redact_discord_error
+        out = redact_discord_error(RuntimeError(self.REAL_MSG))
+        assert self.SENTINEL not in out
+        assert "/api/webhooks/[REDACTED]" in out

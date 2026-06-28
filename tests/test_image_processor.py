@@ -1,0 +1,150 @@
+"""
+Worker-integration tests for ui/controllers/image_processor.py.
+
+The roof-safety confirmation FSM itself is unit-tested in test_ascom_safety.py
+(RoofSafetyFSM). Here we assert the WIRING through the image-processing worker:
+- ML enabled + safety enabled routes confirmed results through the FSM,
+- the fail-safe still runs when ML is DISABLED but the safety file is enabled,
+- a hard inference failure routes an UNSAFE verdict,
+- a genuine write failure escalates via the worker's operator-visible channels.
+"""
+import pytest
+
+# A QApplication is needed before constructing the QThread-derived worker.
+QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+from PIL import Image
+from ui.controllers.image_processor import ImageProcessorWorker, ImageProcessingTask
+
+
+@pytest.fixture(scope="module")
+def _qapp():
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    yield app
+
+
+@pytest.fixture
+def worker(_qapp):
+    return ImageProcessorWorker()
+
+
+class _DiscordStub:
+    last_error = None
+
+    def __init__(self, config):
+        pass
+
+    def send_error_message(self, text):
+        _DiscordStub.last_error = text
+        return True
+
+
+def _ascom(tmp_path, **over):
+    cfg = {'enabled': True, 'file_path': str(tmp_path / 'roof.txt'),
+           'min_confidence': 0.7, 'heartbeat_seconds': 0}
+    cfg.update(over)
+    return cfg
+
+
+def _base_config(tmp_path, ml_models):
+    return {
+        'output_dir': str(tmp_path),
+        'output_format': 'PNG',
+        'resize_percent': 100,
+        'auto_stretch': {'enabled': False},
+        'overlays': [],
+        'dev_mode': {'enabled': False},
+        'ml_contribution': {'enabled': False},
+        'meteor': {},
+        'sharpening': {},
+        'allsky_overlay': {},
+        'weather': {},
+        'ml_models': ml_models,
+    }
+
+
+def test_ml_disabled_but_ascom_enabled_writes_unsafe(worker, tmp_path):
+    # Item 2: even with ML disabled, an enabled safety file must not freeze at a
+    # stale OPEN — the fail-safe routes UNSAFE through the FSM.
+    writes = []
+    worker._safety_fsm._writer = lambda ml, cfg: (writes.append(dict(ml)), True)[1]
+    worker._main_window = None
+
+    cfg = _base_config(tmp_path, {
+        'enabled': False,
+        'ascom_safety_file': _ascom(tmp_path),
+    })
+    worker._process_task(ImageProcessingTask(
+        Image.new('RGB', (32, 32), (40, 40, 40)), {'FILENAME': 'x.png'}, cfg))
+
+    assert len(writes) == 1
+    assert writes[0]['roof_status'] == 'N/A'  # UNSAFE baseline
+
+
+def test_inference_exception_writes_unsafe(worker, monkeypatch, tmp_path):
+    # A hard inference failure (model blind) must route an UNSAFE verdict.
+    monkeypatch.setattr('ui.controllers.image_processor.get_ml_service',
+                        lambda: (_ for _ in ()).throw(RuntimeError("blind")))
+    writes = []
+    worker._safety_fsm._writer = lambda ml, cfg: (writes.append(dict(ml)), True)[1]
+    worker._main_window = None
+
+    cfg = _base_config(tmp_path, {
+        'enabled': True,
+        'ascom_safety_file': _ascom(tmp_path),
+    })
+    worker._process_task(ImageProcessingTask(
+        Image.new('RGB', (32, 32), (40, 40, 40)), {'FILENAME': 'x.png'}, cfg))
+
+    assert len(writes) == 1
+    assert writes[0]['roof_status'] == 'N/A'
+
+
+def test_confident_open_via_worker_routes_through_fsm(worker, tmp_path, monkeypatch):
+    # ML produces a confident Open: it must go through the FSM (which, per
+    # Policy A, writes UNSAFE first and does NOT certify SAFE on one frame).
+    writes = []
+    worker._safety_fsm._writer = lambda ml, cfg: (writes.append(dict(ml)), True)[1]
+    worker._main_window = None
+
+    class _Svc:
+        def is_available(self):
+            return True
+
+        def initialize(self):
+            return True
+
+        def get_last_results(self):
+            return {'roof_status': 'Open', 'roof_confidence': 0.95}
+
+    monkeypatch.setattr('ui.controllers.image_processor.get_ml_service', lambda: _Svc())
+    monkeypatch.setattr('ui.controllers.image_processor.analyze_image_for_tokens',
+                        lambda arr, config=None: {'ROOF_STATUS': 'Open'})
+
+    cfg = _base_config(tmp_path, {
+        'enabled': True,
+        'ascom_safety_file': _ascom(tmp_path),
+    })
+    worker._process_task(ImageProcessingTask(
+        Image.new('RGB', (32, 32), (40, 40, 40)), {'FILENAME': 'x.png'}, cfg))
+
+    # First confident-Open frame writes the UNSAFE baseline, NOT SAFE/OPEN.
+    assert len(writes) == 1
+    assert writes[0]['roof_status'] != 'Open'
+    assert worker._safety_fsm._confirmed_safe is False
+
+
+def test_genuine_write_failure_escalates_via_worker(worker, monkeypatch, tmp_path):
+    _DiscordStub.last_error = None
+    captured = []
+    monkeypatch.setattr('services.discord_alerts.DiscordAlerts', _DiscordStub)
+    monkeypatch.setattr('services.posthog_service.capture_error',
+                        lambda exc, context=None: captured.append(context))
+    worker._main_window = type('MW', (), {'config': {}})()
+    worker._safety_fsm._writer = lambda ml, cfg: False  # genuine failure
+
+    worker._safety_fsm.update({'roof_status': 'Closed', 'roof_confidence': 0.9},
+                              _ascom(tmp_path))
+
+    assert _DiscordStub.last_error is not None
+    assert 'stale' in _DiscordStub.last_error
+    assert captured == ['ascom_safety_write']
