@@ -26,19 +26,30 @@ _IS_WINDOWS = sys.platform == "win32"
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
 
 
-def _resolve_launch_command(auto_start: bool) -> str:
+def _resolve_launch_command(auto_start: bool, start_in_tray: bool = True) -> str:
     """Build the ``/TR`` command string for the scheduled task.
+
+    ``start_in_tray`` controls whether the logon launch is hidden in the tray
+    (``--tray``) or opens a visible window. Users who want "start on login but
+    NOT in the background" turn tray mode off, and the task then launches the
+    window visibly; capture still auto-starts via ``--auto-start`` alone (see
+    the auto-start path in ``main.py``).
 
     Handles both the frozen PyInstaller build (``sys.executable`` is the app
     exe) and a source run (``sys.executable`` is python; we append main.py).
     Paths are quoted because the install dir normally contains a space
     (e.g. ``C:\\Program Files\\PFRSentinel``).
     """
-    flags = "--tray --auto-start" if auto_start else "--tray"
+    flags = []
+    if start_in_tray:
+        flags.append("--tray")
+    if auto_start:
+        flags.append("--auto-start")
+    suffix = (" " + " ".join(flags)) if flags else ""
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" {flags}'
+        return f'"{sys.executable}"{suffix}'
     main_py = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py")
-    return f'"{sys.executable}" "{main_py}" {flags}'
+    return f'"{sys.executable}" "{main_py}"{suffix}'
 
 
 def _run_schtasks(args: list[str]) -> subprocess.CompletedProcess | None:
@@ -84,8 +95,11 @@ def is_enabled() -> bool:
     return bool(result and result.returncode == 0)
 
 
-def enable(auto_start: bool = True) -> bool:
+def enable(auto_start: bool = True, start_in_tray: bool = True) -> bool:
     """Register (or update) the logon task. Returns True on success.
+
+    ``start_in_tray`` controls whether the task launches hidden to the tray or
+    opens a visible window (see ``_resolve_launch_command``).
 
     Tries a direct create first; if that is denied (non-elevated session),
     retries through a UAC elevation prompt.
@@ -94,7 +108,7 @@ def enable(auto_start: bool = True) -> bool:
         app_logger.debug("autostart: enable() is a no-op off Windows")
         return False
 
-    command = _resolve_launch_command(auto_start)
+    command = _resolve_launch_command(auto_start, start_in_tray)
     args = ["/Create", "/TN", TASK_NAME, "/TR", command,
             "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]
 

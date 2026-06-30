@@ -103,7 +103,8 @@ class SettingsPanel(QScrollArea):
         # System tray mode
         tray_row = SwitchRow(
             "Enable System Tray",
-            "Minimize to system tray instead of taskbar when closing window"
+            "Run in the background: minimize to tray on close, and start hidden "
+            "when launched on login. Turn off to keep the window visible."
         )
         self.tray_enabled_switch = tray_row.switch
         self.tray_enabled_switch.checkedChanged.connect(self._on_system_changed)

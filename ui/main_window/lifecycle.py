@@ -273,6 +273,17 @@ class _MainWindowLifecycleMixin:
                 app_logger.error(f"Error disabling system tray: {e}")
                 self.system_tray = None
 
+        # Tray mode also decides whether the logon task starts hidden, so keep
+        # the registered command in sync. Base it on the real outcome (did the
+        # tray actually come up?), not the requested flag. No-op unless start-on-
+        # login is enabled; may surface a one-time UAC prompt to update the task.
+        if self.config.get('run_on_startup', False):
+            from services import autostart
+            autostart.enable(
+                auto_start=self.config.get('autostart_capture', True),
+                start_in_tray=self.system_tray is not None,
+            )
+
     def set_run_on_startup(self, enabled: bool, auto_start: bool = True):
         """Register or remove the Windows logon task and report the outcome.
 
@@ -282,8 +293,11 @@ class _MainWindowLifecycleMixin:
         """
         from services import autostart
 
+        # Tray mode decides whether the logon launch is hidden (--tray) or opens
+        # a visible window. "Start on login but NOT in the background" = tray off.
+        start_in_tray = self.config.get('tray_mode_enabled', False)
         if enabled:
-            ok = autostart.enable(auto_start=auto_start)
+            ok = autostart.enable(auto_start=auto_start, start_in_tray=start_in_tray)
         else:
             ok = autostart.disable()
 

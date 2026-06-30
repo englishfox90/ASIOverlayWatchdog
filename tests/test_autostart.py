@@ -50,6 +50,31 @@ class TestLaunchCommand:
         assert cmd == r'"C:\app\PFRSentinel.exe" --tray'
         assert "--auto-start" not in cmd
 
+    def test_visible_login_omits_tray_but_keeps_autostart(self):
+        # "Start on login but NOT in the background": tray off → no --tray, so
+        # the window opens visibly, while --auto-start still starts capture.
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "executable", r"C:\app\PFRSentinel.exe"):
+            cmd = autostart._resolve_launch_command(auto_start=True, start_in_tray=False)
+        assert cmd == r'"C:\app\PFRSentinel.exe" --auto-start'
+        assert "--tray" not in cmd
+
+    def test_visible_login_without_capture_has_no_flags(self):
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "executable", r"C:\app\PFRSentinel.exe"):
+            cmd = autostart._resolve_launch_command(auto_start=False, start_in_tray=False)
+        assert cmd == r'"C:\app\PFRSentinel.exe"'
+
+    def test_enable_passes_start_in_tray_through_to_command(self, on_windows):
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "executable", r"C:\app\PFRSentinel.exe"), \
+             patch.object(autostart.subprocess, "run", return_value=_completed(0)) as run:
+            assert autostart.enable(auto_start=True, start_in_tray=False) is True
+        argv = run.call_args.args[0]
+        command = argv[argv.index("/TR") + 1]
+        assert "--tray" not in command
+        assert "--auto-start" in command
+
 
 class TestIsEnabled:
     def test_false_off_windows(self):

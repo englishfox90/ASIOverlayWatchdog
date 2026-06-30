@@ -238,10 +238,9 @@ def main():
             )
             window.system_tray = tray  # Store reference so window knows it's in tray mode
 
-            # If --tray was explicitly provided, save it to config
-            if args.tray:
-                window.config.set('tray_mode_enabled', True)
-                window.config.save()
+            # NOTE: --tray is a per-launch directive (the logon task passes it),
+            # NOT a persistent preference — don't write tray_mode_enabled here.
+            # Doing so clobbered a user's explicit "tray off" every reboot.
 
             if not start_hidden:
                 window.show()
