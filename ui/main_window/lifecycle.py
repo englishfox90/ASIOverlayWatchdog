@@ -95,6 +95,12 @@ class _MainWindowLifecycleMixin:
             app_logger.debug("Window minimized to system tray")
             return
 
+        # Real teardown from here. Arm the force-exit watchdog FIRST so a wedge
+        # in any step below (timelapse flush, web server, camera SDK) can't
+        # leave a locked zombie that fails the next in-place upgrade.
+        from services.shutdown_watchdog import arm_force_exit
+        arm_force_exit()
+
         self._send_discord_shutdown()
 
         # Stop all timers first to prevent callbacks during shutdown
@@ -180,6 +186,14 @@ class _MainWindowLifecycleMixin:
 
     def quit_application(self):
         """Properly quit application (called from tray exit)"""
+        # Arm the force-exit watchdog before touching the tray or running
+        # teardown: tray Exit and the installer's --shutdown both land here, and
+        # both must guarantee the process actually dies (releasing file locks)
+        # even if a teardown step wedges. Idempotent — closeEvent re-arming is a
+        # no-op. See services/shutdown_watchdog.py.
+        from services.shutdown_watchdog import arm_force_exit
+        arm_force_exit()
+
         if self.system_tray and hasattr(self.system_tray, 'tray_icon') and self.system_tray.tray_icon:
             try:
                 self.system_tray.tray_icon.stop()

@@ -323,22 +323,15 @@ def main():
     # Run event loop
     exit_code = app.exec()
 
-    # Start a shutdown watchdog before cleanup begins.  The ZWO SDK DLL can
-    # block DllMain(DLL_PROCESS_DETACH) indefinitely when a capture thread is
-    # permanently wedged inside native SDK code — sys.exit() then hangs and
-    # Windows shows "Not Responding".  The watchdog force-terminates the
-    # process after 10 s so cleanup still runs on a clean exit but never
-    # stalls an unrecoverable one.
-    if sys.platform == 'win32':
-        import ctypes
-        _wt = threading.Timer(
-            10.0,
-            lambda: ctypes.windll.kernel32.TerminateProcess(
-                ctypes.windll.kernel32.GetCurrentProcess(), 0
-            ),
-        )
-        _wt.daemon = True
-        _wt.start()
+    # Fallback force-exit watchdog for the post-event-loop cleanup below. The
+    # ZWO SDK DLL can block DllMain(DLL_PROCESS_DETACH) indefinitely when a
+    # capture thread is wedged in native code — sys.exit() then hangs and
+    # Windows shows "Not Responding". This is a no-op if the watchdog was
+    # already armed at the start of teardown (the usual case — see
+    # window.quit_application / closeEvent); it only matters for an exit path
+    # that reaches here without having armed it. 10 s, since teardown is done.
+    from services.shutdown_watchdog import arm_force_exit
+    arm_force_exit(10.0)
 
     capture_event('app_shutdown')
     # Best-effort flush — don't let a slow network stall the exit.
