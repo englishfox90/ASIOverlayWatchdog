@@ -306,6 +306,52 @@ class TestGuidedCalibration:
         with pytest.raises(CalibrationError, match="at least"):
             calibrate_from_anchors(anchors, lat, lon, dt, 1137.0, 1306.0, 968.0)
 
+    def test_free_centre_recovers_offset_sky_circle(self):
+        """With >=6 anchors the optical centre joins the fit: a sky-circle
+        estimate 30px off the true centre must no longer put an RMS floor
+        under perfect identifications."""
+        pytest.importorskip('scipy')
+        from datetime import datetime, timezone
+        from services.allsky.guided_calibration import calibrate_from_anchors
+
+        true_model = self._true_model()
+        lat, lon = 31.33, -100.46
+        dt = datetime(2026, 6, 22, 6, 0, tzinfo=timezone.utc)
+        anchors = self._anchors(true_model, lat, lon, dt, n=7)
+        assert len(anchors) >= 6
+
+        m = calibrate_from_anchors(
+            anchors, lat, lon, dt,
+            sky_cx=1137.0 + 30.0, sky_cy=1306.0 - 30.0, sky_radius=968.0,
+            image_width=2628, image_height=2628)
+        assert m.rms_residual < 4.0, f"RMS {m.rms_residual:.1f}px"
+        assert abs(m.cx - 1137.0) < 20.0
+        assert abs(m.cy - 1306.0) < 20.0
+
+    def test_bad_anchor_named_in_error(self):
+        """A mis-clicked anchor must be identifiable from the error message
+        (per-anchor residuals, worst first), not just 'you're wrong'."""
+        pytest.importorskip('scipy')
+        from datetime import datetime, timezone
+        from services.allsky.guided_calibration import calibrate_from_anchors
+        from services.allsky.calibration import CalibrationError
+
+        true_model = self._true_model()
+        lat, lon = 31.33, -100.46
+        dt = datetime(2026, 6, 22, 6, 0, tzinfo=timezone.utc)
+        base = self._anchors(true_model, lat, lon, dt, n=6)
+        named = [(x, y, ra, dec, f"Star{i}") for i, (x, y, ra, dec)
+                 in enumerate(base)]
+        # Corrupt one anchor's click by 200px.
+        x, y, ra, dec, name = named[2]
+        named[2] = (x + 200.0, y, ra, dec, name)
+
+        with pytest.raises(CalibrationError) as exc:
+            calibrate_from_anchors(named, lat, lon, dt, 1137.0, 1306.0, 968.0)
+        msg = str(exc.value)
+        assert "Star2" in msg
+        assert "px" in msg
+
 
 class TestCalibrationError:
     def test_insufficient_stars_raises(self):

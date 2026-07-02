@@ -21,11 +21,14 @@ from services.allsky.calibration_validate import (
     REF_SKY_R_PX,
     score_matches_with_spread,
     tol_scale,
+    validate_a1_scale,
     validate_bright_anchors,
     validate_lens_polynomial,
+    validate_pole,
     warn_sky_coverage,
 )
 from services.allsky.fisheye import FisheyeModel
+from services.allsky.pole_finder import PoleEstimate
 
 
 def _make_match(alt: float, az: float, xy=(0.0, 0.0)):
@@ -169,13 +172,14 @@ class TestValidateBrightAnchors:
         rejected a perfectly good fit.
         """
         model = self._zenith_model()
-        # 12 bright anchors spread across the sky, brightest first.
+        # 12 bright anchors spread across the sky (all above the 40° floor),
+        # brightest first.
         positions = [
             (75.0, 0.0), (70.0, 30.0), (65.0, 70.0), (60.0, 110.0),
-            (55.0, 150.0), (50.0, 190.0),            # 6 brightest: obstructed
-            (48.0, 230.0), (44.0, 270.0), (40.0, 300.0),
-            (36.0, 330.0), (32.0, 20.0),             # 5 of these in clear sky
-            (28.0, 200.0),
+            (55.0, 150.0), (52.0, 190.0),            # 6 brightest: obstructed
+            (50.0, 230.0), (48.0, 270.0), (46.0, 300.0),
+            (44.0, 330.0), (42.0, 20.0),             # 5 of these in clear sky
+            (40.0, 200.0),
         ]
         ah = self._above_horizon(model, positions)
         # Only the last 5 anchors are detected (first 7 behind the obstruction).
@@ -197,37 +201,38 @@ class TestValidateBrightAnchors:
         assert ok
         assert 'skipping' in msg
 
-    def test_altitude_floor_15_excludes_dead_zone(self):
-        """Stars in 10-14° are in the detection mask's dead zone and are never
-        detected.  With the old 10° floor they counted as missed anchors and
-        gated calibration; with the new 15° floor they are excluded and the
-        remaining well-detected stars still pass.
+    def test_altitude_floor_excludes_low_altitude_anchors(self):
+        """Low-altitude anchors carry no signal: even a correct fisheye model
+        extrapolates poorly there (measured 46-406px on the known-good
+        reference model), and the detection mask's trim zone hides the lowest
+        ones entirely. The 40° floor excludes them so the well-modelled
+        high-altitude anchors decide the verdict.
 
-        Setup: 3 bright stars above 15° (all detected) + 3 stars at 11-13°
-        (none detected because in dead zone).  Old 10° floor → 3/6 anchors
-        hit < min_hits=5 → reject.  New 15° floor → only 3 anchors remain,
-        < min_hits=5 → check skipped → accept.
+        Setup: 3 detected stars above 40° + 3 low stars that are never
+        detected.  With the 40° floor only 3 anchors remain < min_hits=5 →
+        check skipped → accept.  With an explicit low floor all 6 are
+        checked, only 3 hit → reject.
         """
         model = self._zenith_model()
 
-        # 3 well-detected stars above 15°
-        positions_high = [(65.0, 0.0), (50.0, 120.0), (40.0, 240.0)]
-        # 3 stars in the 10-14° dead zone — never in detections
-        positions_dead = [(13.0, 60.0), (11.5, 180.0), (10.5, 300.0)]
+        # 3 well-detected stars above the 40° floor
+        positions_high = [(65.0, 0.0), (50.0, 120.0), (42.0, 240.0)]
+        # 3 low stars — never in detections
+        positions_dead = [(25.0, 60.0), (13.0, 180.0), (10.5, 300.0)]
 
         ah = self._above_horizon(model, positions_high + positions_dead)
         det = self._detect_from_projection(model, positions_high, jitter=1.0)
 
-        # New default 15° floor: 3 high-alt anchors < min_hits=5 → skipped → ok
+        # Default 40° floor: 3 high-alt anchors < min_hits=5 → skipped → ok
         ok_new, msg_new = validate_bright_anchors(model, ah, det)
-        assert ok_new, f"15° floor: expected skip, got reject ({msg_new})"
+        assert ok_new, f"40° floor: expected skip, got reject ({msg_new})"
         assert 'skipping' in msg_new
 
         # Old 10° floor: 6 anchors checked, only 3 hit → 3 < min_hits=5 → reject
         ok_old, _msg_old = validate_bright_anchors(
             model, ah, det, min_alt_deg=10.0,
         )
-        assert not ok_old, "10° floor should reject when dead-zone stars are missed"
+        assert not ok_old, "10° floor should reject when low anchors are missed"
 
     def test_empty_detections_rejects(self):
         model = self._zenith_model()
@@ -311,11 +316,126 @@ class TestValidateLensPolynomial:
         ok, _msg = validate_lens_polynomial(m)
         assert not ok
 
-    def test_range_boundaries(self):
-        """A3_MIN and A3_MAX themselves are accepted."""
-        ok_min, _ = validate_lens_polynomial(FisheyeModel(a3=A3_MIN))
-        ok_max, _ = validate_lens_polynomial(FisheyeModel(a3=A3_MAX))
+    def test_pinned_at_bounds_rejected(self):
+        """Values AT the optimiser bounds are rejected as pinned — the fit
+        fought the clamp (a wrong-basin model shipped with a3=19.99999997,
+        inside the range but pinned)."""
+        ok_min, msg_min = validate_lens_polynomial(FisheyeModel(a3=A3_MIN))
+        ok_max, msg_max = validate_lens_polynomial(FisheyeModel(a3=A3_MAX))
+        assert not ok_min and 'pinned' in msg_min
+        assert not ok_max and 'pinned' in msg_max
+
+    def test_shipped_wrong_basin_a3_rejected(self):
+        """The exact a3 of the 2026-06-23 incident model must be rejected."""
+        ok, msg = validate_lens_polynomial(FisheyeModel(a3=19.99999999975631))
+        assert not ok
+        assert 'pinned' in msg
+
+    def test_just_inside_pin_epsilon_accepted(self):
+        ok_min, _ = validate_lens_polynomial(FisheyeModel(a3=A3_MIN + 1.0))
+        ok_max, _ = validate_lens_polynomial(FisheyeModel(a3=A3_MAX - 1.0))
         assert ok_min and ok_max
+
+
+# ===================================================================
+# validate_a1_scale — plate scale vs measured sky circle
+# ===================================================================
+
+# Parameters of the 2026-06-23 incident model (wrong-basin fit that shipped)
+# and its frame geometry: 2628px frame, fisheye circle filling it, so the
+# trimmed sky radius is ~0.85 * 1314.
+_INCIDENT_A1 = 480.5981324229242
+_INCIDENT_SKY_R = 1314.0 * 0.85
+
+
+class TestValidateA1Scale:
+    def test_incident_model_rejected(self):
+        """a1 at ~0.57x the sky-circle-implied scale must be rejected."""
+        ok, msg = validate_a1_scale(FisheyeModel(a1=_INCIDENT_A1), _INCIDENT_SKY_R)
+        assert not ok
+        assert 'plate scale' in msg or 'wrong' in msg
+
+    def test_known_good_model_accepted(self):
+        """The reference rig's known-good a1 (ratio ~1.09) must pass."""
+        ok, msg = validate_a1_scale(FisheyeModel(a1=1277.18), 1563.0)
+        assert ok, msg
+
+    def test_unknown_sky_r_skips(self):
+        ok, msg = validate_a1_scale(FisheyeModel(a1=100.0), None)
+        assert ok
+        assert 'skipped' in msg
+
+    def test_double_scale_rejected(self):
+        ok, _ = validate_a1_scale(FisheyeModel(a1=2400.0), 1563.0)
+        assert not ok
+
+
+# ===================================================================
+# validate_pole — measured celestial pole as an admission gate
+# ===================================================================
+
+def _pole(x=1718.0, y=646.0, east_left=True):
+    return PoleEstimate(x=x, y=y, east_left=east_left, sign=-1,
+                        n_frames=12, span_minutes=60.0, drift_px=3.3,
+                        flux=3600.0, sign_votes=(300, 1700))
+
+
+def _reference_model() -> FisheyeModel:
+    """The known-good multi-image model of the reference rig."""
+    return FisheyeModel(
+        cx=1532.277480022239, cy=1748.2333782530266,
+        a1=1277.1768448604173, a3=-47.565326396085396, a5=-58.919100634659344,
+        roll=1.2213944731235367, axis_alt=84.49275734968984,
+        axis_az=280.49549589886345, east_left=True,
+    )
+
+
+class TestValidatePole:
+    LAT = 38.9717
+
+    def test_no_estimate_skips(self):
+        ok, msg = validate_pole(_reference_model(), self.LAT, None)
+        assert ok
+        assert 'skipped' in msg
+
+    def test_known_good_model_passes_measured_pole(self):
+        """The reference model carries ~70px of regional error at the pole —
+        the generous tolerance must still accept it."""
+        ok, msg = validate_pole(_reference_model(), self.LAT, _pole(),
+                                sky_r=1563.0)
+        assert ok, msg
+
+    def test_mirrored_model_rejected(self):
+        m = _reference_model()
+        m.east_left = False
+        ok, msg = validate_pole(m, self.LAT, _pole(), sky_r=1563.0)
+        assert not ok
+        assert 'east_left' in msg or 'mirror' in msg.lower()
+
+    def test_wrong_basin_position_rejected(self):
+        """The incident model (scaled to the reference frame) puts the pole
+        hundreds of pixels from its measured position."""
+        s = 3552.0 / 2628.0
+        m = FisheyeModel(
+            cx=1154.452083684348 * s, cy=1322.8234646056446 * s,
+            a1=_INCIDENT_A1 * s, a3=19.99999999975631 * s,
+            a5=-12.349397496767505 * s, roll=-0.20656450436385085,
+            axis_alt=78.18606880664784, axis_az=12.576781341950102,
+            east_left=True,  # mirror fixed so the *position* check is exercised
+        )
+        ok, msg = validate_pole(m, self.LAT, _pole(), sky_r=1563.0)
+        assert not ok
+        assert 'measured position' in msg
+
+    def test_inconclusive_sign_still_checks_position(self):
+        est = _pole(east_left=None)
+        m = _reference_model()
+        m.east_left = False   # mirror check must be skipped when sign unknown…
+        ok1, _ = validate_pole(_reference_model(), self.LAT, est, sky_r=1563.0)
+        assert ok1
+        # …but a mirrored model still fails on position (projects elsewhere).
+        ok2, _ = validate_pole(m, self.LAT, est, sky_r=1563.0)
+        assert not ok2
 
 
 # ===================================================================

@@ -33,7 +33,9 @@ from .fisheye import FisheyeModel
 from .catalogs import get_bright_stars
 from .coords import radec_to_altaz
 from .calibration import calibrate, CalibrationError
-from .multi_calibrate import refine_from_detections
+from .calibration_validate import validate_pole
+from .multi_calibrate import median_sky_r, refine_from_detections
+from .pole_finder import find_pole
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -57,6 +59,14 @@ MIN_FRAMES_BOOTSTRAP = 15
 REFINE_COOLDOWN_S = 120     # seconds between refinement attempts
 INITIAL_COOLDOWN_S = 180    # seconds between initial single-image cal attempts
 MAX_RESIDUAL_PX = 20.0      # max accepted median residual (pixels)
+
+# Basin escape: a wrong-basin model on disk seeds every refinement into its
+# own basin, whose polished result the sanity gates then reject — a permanent
+# loop (observed in production, 2026-06-24). After this many consecutive
+# rejections the seed itself is suspect: run one cold-start bootstrap instead
+# and let a gate-passing result replace the model outright.
+BASIN_ESCAPE_FAILURES = 3
+ESCAPE_COOLDOWN_S = 600     # bootstrap fits are expensive; don't spam them
 
 
 # ---------------------------------------------------------------------------
@@ -144,20 +154,35 @@ class _RefineWorker(QThread):
     failed = Signal(str)                   # error message
 
     def __init__(self, frames, seed_model, n_images: int, span_min: float,
-                 parent=None):
+                 lat: float = 0.0, parent=None):
         super().__init__(parent)
         self._frames = frames
         self._seed = seed_model
         self._n_images = n_images
         self._span_min = span_min
+        self._lat = lat
 
     def run(self):
         try:
+            # Model-free ground truth from the same buffer: the measured
+            # celestial pole (position + field-rotation direction). None is
+            # normal (short span / cloudy pole) and simply skips the checks.
+            pole = None
+            try:
+                pole = find_pole(self._frames, self._lat)
+            except Exception as e:
+                log.debug(f"Pole estimation failed (non-fatal): {e}")
+
             model = refine_from_detections(
                 self._frames,
                 self._seed,
                 max_residual_px=MAX_RESIDUAL_PX,
+                east_left_hint=pole.east_left if pole else None,
             )
+            pole_ok, pole_msg = validate_pole(
+                model, self._lat, pole, sky_r=median_sky_r(self._frames))
+            if not pole_ok:
+                raise CalibrationError(f"pole check failed: {pole_msg}")
             self.finished.emit(model, self._n_images, self._span_min)
         except Exception as e:
             self.failed.emit(str(e))
@@ -225,6 +250,15 @@ class CalibrationService(QObject):
         # see "calibration is running but skipping frames" without the noise.
         self._skipped_frames = 0
         self._last_skip_summary_t = 0.0
+        # Basin escape (see BASIN_ESCAPE_FAILURES). _escape_attempt marks the
+        # in-flight refinement as a seedless bootstrap whose result may
+        # replace the current model without the RMS-regression guard — the
+        # current model's own (possibly flattering) RMS is what's in doubt.
+        self._consecutive_refine_failures = 0
+        self._last_escape_time = 0.0
+        self._escape_attempt = False
+        self._lat = 0.0
+        self._lon = 0.0
         self._check_refine.connect(self._maybe_refine)
 
     # ------------------------------------------------------------------
@@ -249,6 +283,8 @@ class CalibrationService(QObject):
         """
         self._model = model
         self._model_generation += 1
+        self._consecutive_refine_failures = 0
+        self._escape_attempt = False
         new_q = model_quality(model, model.n_images, model.span_minutes)
         with self._lock:
             self._frames.clear()
@@ -271,6 +307,8 @@ class CalibrationService(QObject):
         """
         if lat == 0.0 and lon == 0.0:
             return
+        with self._lock:
+            self._lat, self._lon = lat, lon
 
         # ------ Always detect + accumulate detections -----------------
         # Both paths need the buffer: refinement (when a model exists) and the
@@ -320,6 +358,29 @@ class CalibrationService(QObject):
             if w and w.isRunning():
                 w.quit()
                 w.wait(3000)
+
+    def validate_against_pole(self, model: FisheyeModel) -> tuple:
+        """Check a candidate model against the buffer-measured celestial pole.
+
+        For manual paths (Calibrate Now, guided) whose results bypass the
+        refine worker. Returns (ok, message); ok=True when no pole estimate
+        is available — the pole is an optional constraint, never a gate on
+        its own absence.
+
+        Cheap enough for the GUI thread: only the pole-relevant fields are
+        copied (the per-frame catalog lists are large and not needed).
+        """
+        with self._lock:
+            frames = [{'dt': f['dt'], 'detected': list(f['detected']),
+                       'sky_cx': f.get('sky_cx'), 'sky_cy': f.get('sky_cy'),
+                       'sky_r': f.get('sky_r')} for f in self._frames]
+        try:
+            pole = find_pole(frames, self._lat)
+        except Exception as e:
+            log.debug(f"Pole estimation failed (non-fatal): {e}")
+            return True, "pole estimation unavailable"
+        return validate_pole(model, self._lat, pole,
+                             sky_r=median_sky_r(frames))
 
     @property
     def current_quality(self) -> str:
@@ -403,7 +464,12 @@ class CalibrationService(QObject):
         # --- Threshold checks ---
         # Cold start (no model) demands a long baseline to break the near-zenith
         # rotational degeneracy; refining an existing model only needs a few min.
-        cold_start = self._model is None
+        # Basin escape reuses the cold-start path: after repeated rejections the
+        # on-disk model is suspect and must not seed the fit.
+        escape = (self._model is not None
+                  and self._consecutive_refine_failures >= BASIN_ESCAPE_FAILURES
+                  and now - self._last_escape_time >= ESCAPE_COOLDOWN_S)
+        cold_start = self._model is None or escape
         min_frames = MIN_FRAMES_BOOTSTRAP if cold_start else MIN_FRAMES
         min_span = MIN_SPAN_BOOTSTRAP_MINUTES if cold_start else MIN_SPAN_MINUTES
         with self._lock:
@@ -419,9 +485,19 @@ class CalibrationService(QObject):
 
             frames_copy = copy.deepcopy(self._frames)
 
-        # self._model=None -> _RefineWorker bootstraps a coarse orientation seed
-        # (cold start). Otherwise it refines the existing model.
-        mode = "cold-start bootstrap" if cold_start else "refinement"
+        # seed=None -> _RefineWorker bootstraps a coarse orientation seed
+        # (cold start / basin escape). Otherwise it refines the existing model.
+        if escape:
+            self._last_escape_time = now
+            log.warning(
+                f"CalibrationService: {self._consecutive_refine_failures} "
+                "consecutive refinement rejections \u2014 the current model may be "
+                "a wrong-basin fit poisoning the seed. Attempting a seedless "
+                "re-calibration (basin escape)."
+            )
+        self._escape_attempt = escape
+        mode = ("basin escape" if escape
+                else "cold-start bootstrap" if cold_start else "refinement")
         log.info(f"CalibrationService: triggering {mode} "
                  f"({n} frames, {span_min:.1f} min span)")
         self.status_changed.emit(
@@ -430,7 +506,8 @@ class CalibrationService(QObject):
         self._refine_gen = self._model_generation  # snapshot for stale-result detection
 
         self._refine_worker = _RefineWorker(
-            frames_copy, self._model, n, span_min, parent=self,
+            frames_copy, None if cold_start else self._model, n, span_min,
+            lat=self._lat, parent=self,
         )
         self._refine_worker.finished.connect(self._on_refine_done)
         self._refine_worker.failed.connect(self._on_refine_failed)
@@ -461,6 +538,13 @@ class CalibrationService(QObject):
         # Discard if the user clicked Calibrate Now while the worker was running.
         if self._model_generation > 0:
             log.info("Discarding initial auto-calibration — model was replaced by manual calibration")
+            return
+        pole_ok, pole_msg = self.validate_against_pole(model)
+        if not pole_ok:
+            log.warning(f"Initial auto-calibration rejected: {pole_msg}")
+            self.status_changed.emit(
+                "Auto-calibration rejected by the pole check — accumulating "
+                "more frames.")
             return
         self._model = model
         model.n_images = 1
@@ -503,8 +587,18 @@ class CalibrationService(QObject):
 
         new_q = model_quality(model, n_images, span_min)
         # Cold-start bootstrap: any valid model is an upgrade from "no model".
+        # Basin escape: the result already passed every admission gate while
+        # the current model keeps failing them — its (possibly flattering) RMS
+        # must not veto the replacement.
         if self._model is None:
             improved = True
+        elif self._escape_attempt:
+            improved = True
+            log.warning(
+                "Basin escape succeeded — replacing the repeatedly-rejected "
+                f"model (RMS {self._model.rms_residual:.1f}px) with the "
+                f"re-calibrated one (RMS {model.rms_residual:.1f}px)."
+            )
         else:
             # Reject if the new model is more than 15% worse by RMS — a
             # quality-rank upgrade is not sufficient justification for
@@ -518,7 +612,9 @@ class CalibrationService(QObject):
                 )
             )
 
+        self._escape_attempt = False
         if improved:
+            self._consecutive_refine_failures = 0
             self._model = model
             self._quality = new_q
             self._save_model(model)
@@ -530,6 +626,9 @@ class CalibrationService(QObject):
             )
             self.quality_upgraded.emit(new_q, model)
         else:
+            # A completed, gate-passing refinement means the seed basin is
+            # healthy even if this particular fit wasn't better.
+            self._consecutive_refine_failures = 0
             log.info(
                 f"Refinement did not improve model "
                 f"(RMS={model.rms_residual:.2f}px vs "
@@ -541,8 +640,15 @@ class CalibrationService(QObject):
             )
 
     def _on_refine_failed(self, error: str) -> None:
+        self._escape_attempt = False
         if self._model:
-            log.warning(f"Calibration refinement failed: {error}")
+            # Only count failures of refinements seeded by the CURRENT model —
+            # a late failure from a superseded seed says nothing about it.
+            if self._refine_gen == self._model_generation:
+                self._consecutive_refine_failures += 1
+            log.warning(
+                f"Calibration refinement failed "
+                f"({self._consecutive_refine_failures} consecutive): {error}")
             # Restore previous status text
             self.status_changed.emit(
                 f"Calibrated: {self._model.n_matches} stars, "

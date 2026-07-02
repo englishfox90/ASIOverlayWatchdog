@@ -22,8 +22,13 @@ from qfluentwidgets import (
 
 from ..theme.tokens import Spacing
 
-# Snap radius (image pixels) within which a click locks onto a detected star.
-_SNAP_PX = 30.0
+# Snap radius within which a click locks onto a detected star. Expressed as a
+# fraction of the sky radius so it stays a constant *display* distance at any
+# frame resolution (a fixed 30 image-px was only ~7 display-px on 3552px
+# frames — most careful clicks missed the snap and carried 10-20px of error,
+# which alone exceeded the solver's RMS limit).
+_SNAP_SKY_FRACTION = 0.035
+_SNAP_MIN_PX = 30.0
 _MAX_DISPLAY = 760  # longest displayed image edge (px)
 
 
@@ -84,10 +89,14 @@ class GuidedCalibrationDialog(QDialog):
         self._prep = prep
         self._detections = prep.get('detections', [])
         self._candidates = prep.get('candidates', [])
-        self._anchors: List[dict] = []   # {px, py, ra, dec, name}
+        self._snap_px = max(_SNAP_MIN_PX,
+                            _SNAP_SKY_FRACTION * float(prep.get('sky_r', 0.0)))
+        self._anchors: List[dict] = []   # {px, py, ra, dec, name, snapped}
         self._pending: Optional[Tuple[float, float]] = None
-        # Result exposed to caller after accept().
-        self.anchors: List[Tuple[float, float, float, float]] = []
+        self._pending_snapped = False
+        # Result exposed to caller after accept():
+        # (px, py, ra_deg, dec_deg, name) per identified star.
+        self.anchors: List[Tuple[float, float, float, float, str]] = []
 
         self._build_ui(prep['image'])
         self._refresh()
@@ -170,13 +179,16 @@ class GuidedCalibrationDialog(QDialog):
     # ------------------------------------------------------------------
     def _on_image_click(self, ix: float, iy: float):
         """Snap the click to the nearest detected star (image coords)."""
-        best, best_d = None, _SNAP_PX
+        best, best_d = None, self._snap_px
         for d in self._detections:
             dist = math.hypot(d[0] - ix, d[1] - iy)
             if dist <= best_d:
                 best, best_d = (d[0], d[1]), dist
         self._pending = best if best is not None else (ix, iy)
-        snapped = "snapped to detection" if best is not None else "no nearby detection"
+        self._pending_snapped = best is not None
+        snapped = ("snapped to detected star" if best is not None
+                   else "no detected star nearby — the solve is much less "
+                        "accurate with unsnapped clicks")
         self._pending_lbl.setText(
             f"Selected ({self._pending[0]:.0f}, {self._pending[1]:.0f}) — {snapped}.")
         self._refresh()
@@ -190,8 +202,10 @@ class GuidedCalibrationDialog(QDialog):
             return
         self._anchors.append({
             'px': self._pending[0], 'py': self._pending[1],
-            'ra': c['ra_deg'], 'dec': c['dec_deg'], 'name': c['name']})
+            'ra': c['ra_deg'], 'dec': c['dec_deg'], 'name': c['name'],
+            'snapped': self._pending_snapped})
         self._pending = None
+        self._pending_snapped = False
         self._pending_lbl.setText("Star added.")
         self._refresh()
 
@@ -202,13 +216,16 @@ class GuidedCalibrationDialog(QDialog):
             self._refresh()
 
     def _on_solve(self):
-        self.anchors = [(a['px'], a['py'], a['ra'], a['dec']) for a in self._anchors]
+        self.anchors = [(a['px'], a['py'], a['ra'], a['dec'], a['name'])
+                        for a in self._anchors]
         self.accept()
 
     def _refresh(self):
         self._list.clear()
         for a in self._anchors:
-            self._list.addItem(f"{a['name']}  @ ({a['px']:.0f}, {a['py']:.0f})")
+            mark = "✓" if a.get('snapped') else "⚠ unsnapped"
+            self._list.addItem(
+                f"{a['name']}  @ ({a['px']:.0f}, {a['py']:.0f})  {mark}")
         markers = [(a['px'], a['py'], a['name']) for a in self._anchors]
         self._img.set_markers(markers, self._pending)
         n = len(self._anchors)

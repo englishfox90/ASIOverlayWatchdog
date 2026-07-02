@@ -4,7 +4,7 @@ import queue
 import random
 import threading
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 
 from PySide6.QtCore import QTimer
 
@@ -135,6 +135,7 @@ class _MainWindowOutputMixin:
         # is free for the next frame as soon as this method returns.
         # Queue tasks then share this one stable copy via shallow metadata.copy().
         self._cached_raw_image = pil_image.copy()
+        self._cached_raw_time = datetime.now(timezone.utc)
         meta_copy = metadata.copy()
         for _k in ('RAW_RGB_16BIT', 'RAW_RGB_NO_WB'):
             if meta_copy.get(_k) is not None:
@@ -195,6 +196,7 @@ class _MainWindowOutputMixin:
             # on_image_captured — don't clobber it with the overlaid output.
             if self.config.get('capture_mode', 'camera') == 'watch':
                 self._cached_raw_image = output_image.copy()
+                self._cached_raw_time = datetime.now(timezone.utc)
                 self._cached_raw_metadata = metadata
 
             # preview_image may carry the all-sky overlay (GUI only).

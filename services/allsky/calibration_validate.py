@@ -102,7 +102,7 @@ def validate_bright_anchors(
     top_n: int = 12,
     min_hits: int = 5,
     max_miss_px: float = 40.0,
-    min_alt_deg: float = 15.0,
+    min_alt_deg: float = 40.0,
     sky_r: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """Check the N brightest above-horizon catalog stars landed near detections.
@@ -112,6 +112,17 @@ def validate_bright_anchors(
     stars, while simultaneously missing the handful of bright anchors
     (Sirius, Vega, Capella, etc.) by huge margins. This check catches
     that failure mode cheaply.
+
+    Altitude floor: the pool is restricted to anchors above 40° because the
+    fisheye radial polynomial is extrapolating below that — measured on the
+    reference rig, the KNOWN-GOOD model misses low-altitude anchors by
+    46-406px (Sirius/Aldebaran/Betelgeuse at 20-30° alt) while nailing
+    high-altitude ones at 7-35px; wrong-basin fits miss high-altitude
+    anchors by 40-360px. Testing only the high-altitude region is what
+    makes good and bad fits separable (the old 15° floor rejected the
+    known-good production model — see allsky_single_image_failure_2026-06-13
+    and the 2026-07-01 sweep in ALLSKY_POLE_ANCHOR_PLAN.md). Whole-sky
+    correctness is covered by the a1-scale, lens-polynomial and pole gates.
 
     Obstruction tolerance: on obstructed installs (pier cameras with a
     telescope/mount in frame, dome-rim cuts, building horizons) a large
@@ -137,8 +148,9 @@ def validate_bright_anchors(
         max_miss_px: maximum pixel distance from projected catalog
                      position to nearest detected star to count as a hit
                      (at the reference resolution; scaled by sky_r when given).
-        min_alt_deg: skip anchors below this altitude (refraction / horizon
-                     obstructions make low anchors unreliable).
+        min_alt_deg: skip anchors below this altitude — below it even a
+                     correct model extrapolates poorly (see docstring), so
+                     low anchors carry no signal about fit correctness.
         sky_r: estimated sky-circle radius (px). When provided, max_miss_px is
                scaled to it so the check is resolution-independent.
 
@@ -201,6 +213,12 @@ def validate_bright_anchors(
 A3_MIN = -80.0
 A3_MAX =  20.0
 
+# An a3 sitting *at* an optimiser bound is as diagnostic as one outside it:
+# the fit fought the bound trying to bend the polynomial toward a wrong
+# orientation and was only stopped by the clamp (a wrong-basin model shipped
+# with a3=19.99999997 — inside the range, pinned at the bound).
+A3_PIN_EPS = 0.5
+
 # Conservative physical prior for a3 when the data can't constrain the radial
 # polynomial (no anchors / sparse clustered coverage). Real fisheyes sit in
 # roughly [-60, 0]; -30 is a neutral mid-range seed. Shared by the single-image,
@@ -240,7 +258,99 @@ def validate_lens_polynomial(model) -> Tuple[bool, str]:
             f"range [{A3_MIN:.0f}, {A3_MAX:.0f}] — optimiser likely compensating "
             "for a wrong orientation"
         )
+    if a3 > A3_MAX - A3_PIN_EPS or a3 < A3_MIN + A3_PIN_EPS:
+        return False, (
+            f"lens polynomial a3={a3:.2f} is pinned at its optimiser bound "
+            f"[{A3_MIN:.0f}, {A3_MAX:.0f}] — the fit fought the clamp, which "
+            "means it was bending the polynomial toward a wrong orientation"
+        )
     return True, f"lens polynomial a3={a3:.1f} within plausible range"
+
+
+# ---------------------------------------------------------------------------
+# Physical scale check: a1 vs the measured sky circle
+# ---------------------------------------------------------------------------
+
+# The linear coefficient a1 IS the plate scale (px/rad); the sky-circle fit is
+# an independent measurement of the same physical quantity. They must agree.
+# Measured on the reference rig: a known-good model sits at ratio ~1.09; the
+# wrong-basin model that shipped sat at 0.57 (sky compressed to half size).
+# Lens focal scale never changes on a rig, so a wide band is safe.
+A1_SCALE_BAND = (0.7, 1.5)
+
+
+def validate_a1_scale(model, sky_r: Optional[float]) -> Tuple[bool, str]:
+    """Reject models whose plate scale contradicts the measured sky circle.
+
+    A wrong-basin fit routinely converges with a1 at ~half the value the sky
+    circle implies (the dense star field offers coincidental matches at any
+    scale). The sky-circle estimate is model-free, so this is a hard physical
+    cross-check. Skipped (ok=True) when sky_r is unknown.
+    """
+    if not sky_r or sky_r <= 0:
+        return True, "sky radius unknown — a1 scale check skipped"
+    expected = a1_from_sky_radius(sky_r)
+    ratio = float(getattr(model, 'a1', 0.0)) / expected
+    if A1_SCALE_BAND[0] <= ratio <= A1_SCALE_BAND[1]:
+        return True, f"a1 scale ratio {ratio:.2f} consistent with sky circle"
+    return False, (
+        f"a1={model.a1:.0f} is {ratio:.2f}x the sky-circle-implied scale "
+        f"(~{expected:.0f}) — outside [{A1_SCALE_BAND[0]}, {A1_SCALE_BAND[1]}]; "
+        "the fit landed at the wrong plate scale"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pole-anchor check (see pole_finder.py and ALLSKY_POLE_ANCHOR_PLAN.md)
+# ---------------------------------------------------------------------------
+
+# Generous by design: even a good model can carry 50-70px of regional error at
+# the pole (measured on the reference rig), while wrong-basin fits miss it by
+# 400-1400px. The measurement itself is good to ~15px.
+POLE_TOL_REF_PX = 140.0
+
+
+def validate_pole(
+    model,
+    lat_deg: float,
+    pole,
+    sky_r: Optional[float] = None,
+) -> Tuple[bool, str]:
+    """Check the model projects the celestial pole where it was measured.
+
+    pole: a pole_finder.PoleEstimate (duck-typed: .x, .y, .east_left). The
+    caller only invokes this when a pole estimate exists — the pole is an
+    optional extra constraint, never a requirement.
+
+    Two independent kills for wrong-basin fits:
+      1. mirror: model.east_left must agree with the measured field-rotation
+         direction (when the sign vote was decisive);
+      2. position: the projected pole (alt=|lat|, az=0 north / 180 south)
+         must land within POLE_TOL_REF_PX (scaled) of the measured pole.
+    """
+    if pole is None:
+        return True, "no pole estimate — check skipped"
+
+    if pole.east_left is not None and bool(model.east_left) != bool(pole.east_left):
+        return False, (
+            f"model east_left={model.east_left} contradicts the measured "
+            f"field-rotation direction (east_left={pole.east_left}) — "
+            "mirrored fit"
+        )
+
+    alt = abs(float(lat_deg))
+    az = 0.0 if lat_deg >= 0 else 180.0
+    xy = model.altaz_to_pixel(alt, az)
+    if xy is None:
+        return False, "model projects the celestial pole off-image"
+    tol = POLE_TOL_REF_PX * tol_scale(sky_r)
+    d = float(np.hypot(xy[0] - pole.x, xy[1] - pole.y))
+    if d <= tol:
+        return True, f"pole projected {d:.0f}px from measured (tol {tol:.0f}px)"
+    return False, (
+        f"model places the celestial pole {d:.0f}px from its measured position "
+        f"({pole.x:.0f}, {pole.y:.0f}) — limit {tol:.0f}px; wrong-basin fit"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -65,6 +65,7 @@ from .calibration_validate import (
     REG_A3,
     REG_A5,
     a1_from_sky_radius,
+    validate_a1_scale,
     validate_bright_anchors,
     validate_lens_polynomial,
     tol_scale,
@@ -90,14 +91,18 @@ from .calibration_validate import (
 # Ridge weights REG_A3 / REG_A5 are shared with the guided fit (calibration_validate).
 
 
-def _median_sky_r(frames) -> float:
+def median_sky_r(frames) -> float:
     """Median trimmed sky radius across frames, or 0.0 if unknown.
 
     Used to scale match tolerances to the frame resolution (F10). Frames built
     by dev scripts may omit 'sky_r'; 0.0 makes tol_scale() neutral.
+    Public: also used by CalibrationService for the pole gate.
     """
     rs = [f.get('sky_r') for f in frames if f.get('sky_r')]
     return float(np.median(rs)) if rs else 0.0
+
+
+_median_sky_r = median_sky_r  # re-exported for existing callers
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -114,7 +119,11 @@ _BOOT_MAX_CAT = 150      # brightest catalog stars used for scoring
 _BOOT_TOP_K = 6          # coarse candidates handed to the joint fit
 
 
-def _coarse_orientation_candidates(frames: List[dict], k: int = _BOOT_TOP_K):
+def _coarse_orientation_candidates(
+    frames: List[dict],
+    k: int = _BOOT_TOP_K,
+    east_left_hint: Optional[bool] = None,
+):
     """Return up to k coarse orientation seeds, best-first, from a cross-frame grid.
 
     A single obstructed frame can't determine the full 8-parameter pose (the
@@ -128,6 +137,10 @@ def _coarse_orientation_candidates(frames: List[dict], k: int = _BOOT_TOP_K):
     candidates: the caller joint-fits each and keeps the one that passes the
     bright-anchor gate (a false basin won't). cx/cy come from the reliable
     sky-circle estimate, a1 from the sky radius; the joint fit refines the rest.
+
+    east_left_hint: when the field-rotation direction has been measured
+    (pole_finder), the wrong mirror half of the grid is skipped entirely —
+    the mirrored basin is the main wrong-basin failure mode.
     """
     from scipy.spatial import cKDTree
 
@@ -163,8 +176,9 @@ def _coarse_orientation_candidates(frames: List[dict], k: int = _BOOT_TOP_K):
     if not prepared:
         raise CalibrationError("Bootstrap: no frames with enough detections.")
 
+    mirrors = (True, False) if east_left_hint is None else (bool(east_left_hint),)
     scored = []  # (n_match, east_left, axis_alt, axis_az, roll_deg)
-    for east_left in (True, False):
+    for east_left in mirrors:
         for axis_alt in ORIENT_AXIS_ALT:
             for axis_az in ORIENT_AXIS_AZ:
                 for roll_deg in ORIENT_ROLL_DEG:
@@ -206,6 +220,7 @@ def refine_from_detections(
     min_matches_per_image: int = 4,
     min_total_matches: int = 20,
     max_residual_px: float = 20.0,
+    east_left_hint: Optional[bool] = None,
 ) -> FisheyeModel:
     """
     Joint calibration from pre-processed frame data.
@@ -222,6 +237,8 @@ def refine_from_detections(
         min_matches_per_image: discard frames with fewer matches.
         min_total_matches: fail if total matches below this.
         max_residual_px: maximum accepted median residual (pixels).
+        east_left_hint: measured mirror convention (pole_finder); restricts
+            the cold-start orientation search to the correct mirror.
 
     Returns:
         Refined FisheyeModel.
@@ -246,7 +263,7 @@ def refine_from_detections(
     # that survives on coincidental alignments, so match count is the
     # discriminator (returning merely the first that passes can lock onto a
     # degenerate basin that happens to clear the gate). ---
-    candidates = _coarse_orientation_candidates(frames)
+    candidates = _coarse_orientation_candidates(frames, east_left_hint=east_left_hint)
     passed = []   # (n_matches, model)
     last_err = None
     for i, seed in enumerate(candidates):
@@ -322,9 +339,10 @@ def _fit_and_validate(
     # Sanity checks — multi-image fits over a short span (minutes) can
     # converge to non-physical basins where roll + polynomial + axis_alt
     # collude to satisfy all frames simultaneously without matching the
-    # real sky. Guard with lens-polynomial physics + bright-anchor hit rate
-    # on the most recent frames.
+    # real sky. Guard with lens-polynomial physics + plate-scale consistency
+    # + bright-anchor hit rate on the most recent frames.
     poly_ok, poly_msg = validate_lens_polynomial(model)
+    scale_ok, scale_msg = validate_a1_scale(model, _median_sky_r(frames))
 
     # Validate bright anchors on the 3 most recent frames — require majority
     # (at least 2 of 3) to pass. Single-frame validation was fragile: one
@@ -345,9 +363,10 @@ def _fit_and_validate(
         anch_msg = (f"only {n_ok}/{len(recent)} recent frames pass anchor check: "
                     + "; ".join(fail_msgs[:2]))
 
-    if not (poly_ok and anch_ok):
+    if not (poly_ok and scale_ok and anch_ok):
         reason = "; ".join(
-            m for ok, m in ((poly_ok, poly_msg), (anch_ok, anch_msg)) if not ok
+            m for ok, m in ((poly_ok, poly_msg), (scale_ok, scale_msg),
+                            (anch_ok, anch_msg)) if not ok
         )
         raise CalibrationError(f"Refinement failed sanity check: {reason}")
 

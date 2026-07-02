@@ -34,6 +34,7 @@ from .calibration import (
 from .star_centroid import detect_stars, estimate_sky_circle
 from .catalogs import get_bright_stars
 from .calibration_validate import (
+    validate_a1_scale,
     validate_bright_anchors,
     validate_lens_polynomial,
     tol_scale,
@@ -582,11 +583,13 @@ def triangle_calibrate(
         )
 
     poly_ok, poly_msg = validate_lens_polynomial(model)
+    scale_ok, scale_msg = validate_a1_scale(model, sky_radius)
     anch_ok, anch_msg = validate_bright_anchors(
         model, above_horizon, detected, sky_r=sky_radius)
-    if not (poly_ok and anch_ok):
+    if not (poly_ok and scale_ok and anch_ok):
         reason = "; ".join(
-            m for ok, m in ((poly_ok, poly_msg), (anch_ok, anch_msg)) if not ok
+            m for ok, m in ((poly_ok, poly_msg), (scale_ok, scale_msg),
+                            (anch_ok, anch_msg)) if not ok
         )
         raise CalibrationError(f"Triangle match failed sanity check: {reason}")
 

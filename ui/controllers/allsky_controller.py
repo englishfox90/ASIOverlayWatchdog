@@ -17,6 +17,28 @@ from services.logger import app_logger as log
 if TYPE_CHECKING:
     from ui.main_window import MainWindow
 
+# Frames wider/taller than this ratio almost certainly crop the fisheye
+# circle — the all-sky feature assumes the full sky circle is in frame
+# (square-ish sensor + fisheye lens). Warn, don't block: a wide sensor whose
+# lens image circle fits the short edge can still calibrate.
+_MAX_SQUARE_ASPECT = 1.2
+
+
+def _aspect_warning(image) -> Optional[str]:
+    """Human-readable warning when a frame is far from square, else None."""
+    w = int(getattr(image, 'width', 0) or 0)
+    h = int(getattr(image, 'height', 0) or 0)
+    if not w or not h:
+        return None
+    if max(w, h) / min(w, h) <= _MAX_SQUARE_ASPECT:
+        return None
+    return (
+        f"frame is {w}x{h} — the all-sky feature is designed for a fisheye "
+        "lens on a square (or near-square) sensor with the whole sky circle "
+        "in frame. A wide sensor usually crops the circle, and calibration "
+        "will not work correctly."
+    )
+
 
 def _short_cal_error(error_msg: str) -> str:
     """Summarise a calibration error into a one-line UI status.
@@ -26,6 +48,10 @@ def _short_cal_error(error_msg: str) -> str:
     noisy for the small status label on the AllSky panel.
     """
     lower = error_msg.lower()
+    if 'pole' in lower:
+        return ("Calibration rejected — it disagrees with the measured "
+                "celestial-pole position. Let capture run longer, then retry. "
+                "(See logs)")
     if 'bright-anchor' in lower or 'bright anchors' in lower:
         return ("Calibration rejected — star alignment was off. "
                 "Try again on a clearer night or check lat/lon. (See logs)")
@@ -118,6 +144,7 @@ class AllSkyController(QObject):
         self._mw = main_window
         self._worker: Optional[CalibrationWorker] = None
         self._model = None
+        self._aspect_note: Optional[str] = None  # non-square-frame warning
 
         # Background calibration accumulation service
         from services.allsky.calibration_service import CalibrationService
@@ -168,9 +195,13 @@ class AllSkyController(QObject):
         # manual resize here would just double-resize the watch-mode frame,
         # which is already at output resolution.
 
+        self._aspect_note = _aspect_warning(image)
+        if self._aspect_note:
+            log.warning(f"Calibrate Now: {self._aspect_note}")
+
         lat = float(self._mw.config.get('weather', {}).get('latitude', 0) or 0)
         lon = float(self._mw.config.get('weather', {}).get('longitude', 0) or 0)
-        dt = datetime.now(timezone.utc)
+        dt = self._frame_capture_time()
 
         if lat == 0.0 and lon == 0.0:
             log.warning("Calibrate Now: lat/lon not configured (both zero)")
@@ -199,6 +230,10 @@ class AllSkyController(QObject):
             self.status_changed.emit("No image available — start capture first.")
             return None
 
+        self._aspect_note = _aspect_warning(image)
+        if self._aspect_note:
+            log.warning(f"Guided calibration: {self._aspect_note}")
+
         lat = float(self._mw.config.get('weather', {}).get('latitude', 0) or 0)
         lon = float(self._mw.config.get('weather', {}).get('longitude', 0) or 0)
         if lat == 0.0 and lon == 0.0:
@@ -206,7 +241,7 @@ class AllSkyController(QObject):
                 "Set latitude/longitude in Output > Weather Settings first.")
             return None
 
-        dt = datetime.now(timezone.utc)
+        dt = self._frame_capture_time()
         from services.allsky.star_centroid import detect_stars, estimate_sky_circle
         from services.allsky.catalogs import get_bright_stars
         from services.allsky.coords import radec_to_altaz
@@ -292,6 +327,15 @@ class AllSkyController(QObject):
     def _on_calibration_done(self, model) -> None:
         from services.app_config import get_calibration_path
 
+        # Pole check: the background service measures the celestial pole from
+        # accumulated frames; a manual result that contradicts it is a
+        # wrong-basin fit and must not reach disk (a saved wrong-basin model
+        # poisons every subsequent refinement).
+        pole_ok, pole_msg = self._cal_service.validate_against_pole(model)
+        if not pole_ok:
+            self._on_calibration_failed(f"pole check failed: {pole_msg}")
+            return
+
         self._model = model
         info = self.get_calibration_info()
 
@@ -326,7 +370,10 @@ class AllSkyController(QObject):
 
     def _on_calibration_failed(self, error_msg: str) -> None:
         log.warning(f"All-sky calibration failed: {error_msg}")
-        self.status_changed.emit(_short_cal_error(error_msg))
+        msg = _short_cal_error(error_msg)
+        if self._aspect_note:
+            msg += " Note: " + self._aspect_note
+        self.status_changed.emit(msg)
 
     def _update_status(self) -> None:
         """Load existing model and emit current status."""
@@ -388,6 +435,16 @@ class AllSkyController(QObject):
             return cached, "cached raw frame"
 
         return None, ""
+
+    def _frame_capture_time(self) -> datetime:
+        """UTC capture time of the cached frame (falls back to now).
+
+        The sky rotates ~0.25°/min, so solving against a stale frame with a
+        'now' timestamp shifts every star; the mismatch previously inflated
+        guided-calibration residuals past the acceptance limit.
+        """
+        cached = getattr(self._mw, '_cached_raw_time', None)
+        return cached or datetime.now(timezone.utc)
 
     def _notify_discord(self, info: dict) -> None:
         try:

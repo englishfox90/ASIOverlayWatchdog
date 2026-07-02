@@ -38,6 +38,7 @@ from .calibration_validate import (
     A3_MIN,
     A3_SEED_DEFAULT,
     score_matches_with_spread,
+    validate_a1_scale,
     validate_bright_anchors,
     validate_lens_polynomial,
     warn_sky_coverage,
@@ -175,18 +176,24 @@ def calibrate(
         )
 
     # --- Step 6: Sanity-check the fit ---
-    # Two independent guards — both must pass, or we fall through to the
+    # Three independent guards — all must pass, or we fall through to the
     # triangle-hash fallback:
-    #   (a) lens polynomial within physical range — rejects cases where the
-    #       optimiser bent the radial curve to fit a wrong orientation.
-    #   (b) the brightest N anchors actually land on detected stars —
+    #   (a) lens polynomial within physical range (and not pinned at a bound)
+    #       — rejects cases where the optimiser bent the radial curve to fit
+    #       a wrong orientation.
+    #   (b) a1 consistent with the measured sky circle — rejects fits that
+    #       converged at the wrong plate scale.
+    #   (c) the brightest N anchors actually land on detected stars —
     #       rejects spurious density-noise fits that look fine on average
     #       but miss Sirius/Vega/etc. by 100+ px.
     poly_ok, poly_msg = validate_lens_polynomial(model)
+    scale_ok, scale_msg = validate_a1_scale(model, _sky_r)
     anch_ok, anch_msg = validate_bright_anchors(
         model, above_horizon, detected, sky_r=_sky_r)
-    if not (poly_ok and anch_ok):
-        reason = "; ".join(m for ok, m in ((poly_ok, poly_msg), (anch_ok, anch_msg)) if not ok)
+    if not (poly_ok and scale_ok and anch_ok):
+        reason = "; ".join(m for ok, m in ((poly_ok, poly_msg),
+                                           (scale_ok, scale_msg),
+                                           (anch_ok, anch_msg)) if not ok)
         log.warning(
             f"Grid calibration failed sanity check: {reason}. "
             "Falling through to triangle-hash fallback."
@@ -204,7 +211,7 @@ def calibrate(
                 f"Grid fit failed sanity check ({reason}); "
                 f"triangle-hash fallback also failed: {e}"
             )
-    log.info(f"Sanity checks passed: {poly_msg}; {anch_msg}")
+    log.info(f"Sanity checks passed: {poly_msg}; {scale_msg}; {anch_msg}")
 
     warn_sky_coverage(model)
 

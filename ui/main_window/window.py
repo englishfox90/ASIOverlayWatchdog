@@ -76,6 +76,7 @@ class MainWindow(
         self.is_loading_config = False  # Prevent saves during load
         self._cached_raw_image = None      # Last raw frame for instant reprocess
         self._cached_raw_metadata = None
+        self._cached_raw_time = None       # UTC capture time of the cached frame
 
         self.camera_controller = None
         self.watch_controller = None

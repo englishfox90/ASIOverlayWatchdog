@@ -250,7 +250,10 @@ class AllSkySettingsPanel(QScrollArea):
         self._layout.addWidget(title)
         desc = CaptionLabel(
             "Overlay constellation lines, DSO labels, and planet positions on each frame.\n"
-            "Requires fisheye lens calibration before first use."
+            "Requires fisheye lens calibration before first use.\n"
+            "Designed for all-sky cameras: a fisheye lens on a square (or near-square) "
+            "sensor, with the full sky circle visible in frame. Regular lenses, or "
+            "wide sensors that crop the fisheye circle, will not calibrate correctly."
         )
         desc.setWordWrap(True)
         self._layout.addWidget(desc)

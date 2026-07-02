@@ -106,6 +106,118 @@ class TestRefineGuard:
 
 
 # ---------------------------------------------------------------------------
+# Basin escape (ALLSKY_POLE_ANCHOR_PLAN P3): a repeatedly-rejected seed model
+# triggers a seedless re-calibration whose result bypasses the RMS guard.
+# ---------------------------------------------------------------------------
+
+class TestBasinEscape:
+
+    def _service(self):
+        from services.allsky.calibration_service import CalibrationService
+        svc = CalibrationService()
+        svc._save_model = lambda m: None   # never touch the real cal file
+        return svc
+
+    def test_consecutive_failures_counted_and_reset_on_success(self):
+        svc = self._service()
+        svc._model = _model(rms=4.0, n_matches=11)
+        svc._quality = 'preliminary'
+        svc._refine_gen = svc._model_generation   # refinement of current model
+        svc._on_refine_failed("Refinement failed sanity check: …")
+        svc._on_refine_failed("Refinement failed sanity check: …")
+        assert svc._consecutive_refine_failures == 2
+
+        # A failure from a refinement seeded by a superseded model must NOT
+        # count against the current one.
+        svc._refine_gen = svc._model_generation - 1
+        svc._on_refine_failed("stale seed failure")
+        assert svc._consecutive_refine_failures == 2
+        svc._refine_gen = svc._model_generation
+
+        # A completed (gate-passing) refinement resets the counter even when
+        # it does not replace the model.
+        svc._refine_gen = svc._model_generation
+        svc._on_refine_done(_model(rms=9.0, n_matches=5), 5, 30.0)
+        assert svc._consecutive_refine_failures == 0
+
+    def test_failures_without_model_do_not_count(self):
+        """Cold-start attempts that fail are expected — no escape needed."""
+        svc = self._service()
+        svc._on_refine_failed("Cold-start bootstrap failed: …")
+        assert svc._consecutive_refine_failures == 0
+
+    def test_escape_result_bypasses_rms_guard(self):
+        """The wrong-basin incident model carried a flattering RMS (4.2px,
+        11 matches). An honest escape result (9px, 200 matches) must replace
+        it even though the normal guard would reject the RMS regression."""
+        svc = self._service()
+        bad = _model(rms=4.0, n_matches=11, n_images=1, span_minutes=0.0)
+        svc._model = bad
+        svc._quality = 'preliminary'
+        svc._escape_attempt = True
+        svc._refine_gen = svc._model_generation
+        honest = _model(rms=9.0, n_matches=200, n_images=20, span_minutes=60.0)
+        svc._on_refine_done(honest, 20, 60.0)
+        assert svc._model is honest
+        assert svc._consecutive_refine_failures == 0
+        assert svc._escape_attempt is False
+
+    def test_non_escape_regression_still_rejected(self):
+        """Without the escape flag, the 15% RMS guard still protects."""
+        svc = self._service()
+        good = _model(rms=4.0, n_matches=100)
+        svc._model = good
+        svc._quality = model_quality(good, good.n_images, good.span_minutes)
+        svc._refine_gen = svc._model_generation
+        worse = _model(rms=9.0, n_matches=200, n_images=20, span_minutes=60.0)
+        svc._on_refine_done(worse, 20, 60.0)
+        assert svc._model is good
+
+    def test_set_model_resets_escape_state(self):
+        svc = self._service()
+        svc._consecutive_refine_failures = 5
+        svc._escape_attempt = True
+        svc.set_model(_model(rms=5.0, n_matches=50))
+        assert svc._consecutive_refine_failures == 0
+        assert svc._escape_attempt is False
+
+    def test_validate_against_pole_empty_buffer_is_ok(self):
+        svc = self._service()
+        ok, msg = svc.validate_against_pole(_model(rms=5.0, n_matches=50))
+        assert ok
+
+
+# ---------------------------------------------------------------------------
+# Non-square-sensor warning (all-sky assumes fisheye circle fully in frame)
+# ---------------------------------------------------------------------------
+
+class _FakeImage:
+    def __init__(self, w, h):
+        self.width, self.height = w, h
+
+
+class TestAspectWarning:
+    def test_square_sensor_no_warning(self):
+        from ui.controllers.allsky_controller import _aspect_warning
+        assert _aspect_warning(_FakeImage(3552, 3552)) is None
+
+    def test_mild_rectangle_no_warning(self):
+        from ui.controllers.allsky_controller import _aspect_warning
+        assert _aspect_warning(_FakeImage(3552, 3079)) is None  # 1.15
+
+    def test_wide_sensor_warns(self):
+        from ui.controllers.allsky_controller import _aspect_warning
+        msg = _aspect_warning(_FakeImage(1920, 1080))
+        assert msg is not None
+        assert '1920x1080' in msg
+        assert 'square' in msg
+
+    def test_unknown_size_no_warning(self):
+        from ui.controllers.allsky_controller import _aspect_warning
+        assert _aspect_warning(object()) is None
+
+
+# ---------------------------------------------------------------------------
 # FisheyeModel resolution scaling (F5 + Phase 3.1)
 # ---------------------------------------------------------------------------
 
