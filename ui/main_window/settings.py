@@ -46,6 +46,9 @@ class _MainWindowSettingsMixin:
         if cfg.get('_action') == 'guided_calibrate':
             self._open_guided_calibration()
             return
+        if cfg.get('_action') == 'reset_calibration':
+            self.allsky_controller.reset_calibration()
+            return
         # Preserve calibration_file from existing config
         existing = self.config.get('allsky_overlay', {})
         cfg['calibration_file'] = existing.get('calibration_file', '')

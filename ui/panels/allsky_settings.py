@@ -16,6 +16,7 @@ from PySide6.QtGui import QColor
 from qfluentwidgets import (
     PushButton, SwitchButton, SpinBox,
     CardWidget, CaptionLabel, BodyLabel, SubtitleLabel,
+    MessageBox,
 )
 
 from ..theme.tokens import Colors, Typography, Spacing, Layout
@@ -282,6 +283,12 @@ class AllSkySettingsPanel(QScrollArea):
         self._guided_btn.clicked.connect(self._on_guided_clicked)
         vl.addWidget(self._guided_btn)
 
+        # Escape hatch for a bad saved calibration (a wrong model seeds every
+        # background refinement, so deleting it beats keeping it).
+        self._reset_btn = PushButton("Reset Calibration…", icon=mdi('delete'))
+        self._reset_btn.clicked.connect(self._on_reset_clicked)
+        vl.addWidget(self._reset_btn)
+
         self._layout.addWidget(card)
 
     def _build_master_toggle(self):
@@ -476,6 +483,23 @@ class AllSkySettingsPanel(QScrollArea):
     def _on_guided_clicked(self):
         """Signal main_window to open the guided-calibration dialog."""
         self.settings_changed.emit({'_action': 'guided_calibrate'})
+
+    def _on_reset_clicked(self):
+        """Confirm, then signal main_window to reset the calibration."""
+        box = MessageBox(
+            "Reset calibration?",
+            "This deletes the saved lens calibration. The overlay stops "
+            "rendering until a new calibration exists — created "
+            "automatically as frames accumulate, or via Guided Calibration."
+            "\n\nUse this if the overlay is badly misaligned and refuses to "
+            "improve: a bad saved calibration can hold back every automatic "
+            "refinement.",
+            self.window(),
+        )
+        box.yesButton.setText("Reset")
+        box.cancelButton.setText("Cancel")
+        if box.exec():
+            self.settings_changed.emit({'_action': 'reset_calibration'})
 
     def _on_setting_changed(self, *_):
         self.settings_changed.emit(self.get_config())

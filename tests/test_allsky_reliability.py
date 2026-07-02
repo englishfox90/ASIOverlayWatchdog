@@ -188,6 +188,107 @@ class TestBasinEscape:
 
 
 # ---------------------------------------------------------------------------
+# Calibration reset (user-initiated) — service + controller
+# ---------------------------------------------------------------------------
+
+class _FakeConfig:
+    def __init__(self):
+        self._data = {}
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def set(self, key, value):
+        self._data[key] = value
+
+    def save(self):
+        pass
+
+
+class _FakeMainWindow:
+    def __init__(self):
+        self.config = _FakeConfig()
+
+
+class TestCalibrationReset:
+
+    def _service(self):
+        from services.allsky.calibration_service import CalibrationService
+        svc = CalibrationService()
+        svc._save_model = lambda m: None
+        return svc
+
+    def test_clear_model_keeps_buffer_and_bumps_generation(self):
+        svc = self._service()
+        svc._model = _model(rms=5.0, n_matches=50)
+        svc._quality = 'good'
+        svc._consecutive_refine_failures = 4
+        svc._frames.append({'dt': None, 'detected': []})
+        gen = svc._model_generation
+        svc.clear_model()
+        assert svc.current_model is None
+        assert svc.current_quality == 'none'
+        assert svc._model_generation == gen + 1
+        assert svc._consecutive_refine_failures == 0
+        assert svc.frame_count == 1   # buffer kept for immediate bootstrap
+
+    def test_initial_result_accepted_after_reset(self):
+        """A reset must not permanently disable the fast single-image path —
+        the old `generation > 0` check discarded every post-reset result."""
+        svc = self._service()
+        svc._model = _model(rms=5.0, n_matches=50)
+        svc.set_model(svc._model)          # generation > 0 now
+        svc.clear_model()
+        svc._initial_gen = svc._model_generation   # worker launched post-reset
+        fresh = _model(rms=6.0, n_matches=40)
+        svc._on_initial_done(fresh)
+        assert svc.current_model is fresh
+
+    def test_initial_result_discarded_if_model_changed_mid_flight(self):
+        svc = self._service()
+        svc._initial_gen = svc._model_generation   # worker launched
+        manual = _model(rms=3.0, n_matches=80)
+        svc.set_model(manual)                       # user calibrated meanwhile
+        late = _model(rms=6.0, n_matches=40)
+        svc._on_initial_done(late)
+        assert svc.current_model is manual
+
+    def test_controller_reset_deletes_file_and_clears_state(self, tmp_path, monkeypatch):
+        import services.app_config as app_config
+        cal = tmp_path / "allsky_calibration.json"
+        cal.write_text("{}")
+        monkeypatch.setattr(app_config, 'get_calibration_path',
+                            lambda: str(cal))
+
+        from ui.controllers.allsky_controller import AllSkyController
+        mw = _FakeMainWindow()
+        mw.config.set('allsky_overlay', {'calibration_file': str(cal)})
+        ctrl = AllSkyController(mw)
+        ctrl._model = _model(rms=4.0, n_matches=11)
+        ctrl._cal_service._save_model = lambda m: None
+        ctrl._cal_service._model = _model(rms=4.0, n_matches=11)
+
+        ctrl.reset_calibration()
+
+        assert not cal.exists()
+        assert ctrl._model is None
+        assert ctrl._cal_service.current_model is None
+        assert mw.config.get('allsky_overlay')['calibration_file'] == ''
+
+    def test_controller_reset_with_no_file_still_clears_state(self, tmp_path, monkeypatch):
+        import services.app_config as app_config
+        cal = tmp_path / "missing.json"
+        monkeypatch.setattr(app_config, 'get_calibration_path',
+                            lambda: str(cal))
+
+        from ui.controllers.allsky_controller import AllSkyController
+        ctrl = AllSkyController(_FakeMainWindow())
+        ctrl._model = _model(rms=4.0, n_matches=11)
+        ctrl.reset_calibration()
+        assert ctrl._model is None
+
+
+# ---------------------------------------------------------------------------
 # Non-square-sensor warning (all-sky assumes fisheye circle fully in frame)
 # ---------------------------------------------------------------------------
 

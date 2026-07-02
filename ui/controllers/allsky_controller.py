@@ -295,6 +295,50 @@ class AllSkyController(QObject):
         self._worker.failed.connect(self._on_calibration_failed)
         self._worker.start()
 
+    def reset_calibration(self) -> None:
+        """Delete the saved calibration and forget the in-memory model.
+
+        The remedy for a poisoned (wrong-basin) model: without it the
+        background service returns to a clean cold-start bootstrap instead
+        of refining a bad seed forever. The service keeps its frame buffer
+        so auto-calibration can restart immediately; any in-flight worker
+        result is invalidated by the service's generation counter.
+        """
+        if self._worker and self._worker.isRunning():
+            self.status_changed.emit(
+                "Cannot reset while a calibration is running — wait for it "
+                "to finish.")
+            return
+
+        import os
+        from services.app_config import get_calibration_path
+        cal_path = get_calibration_path()
+        try:
+            if os.path.isfile(cal_path):
+                os.remove(cal_path)
+        except OSError as e:
+            log.error(f"Calibration reset: could not delete {cal_path}: {e}")
+            self.status_changed.emit(
+                f"Reset failed — could not delete the calibration file: {e}")
+            return
+
+        self._model = None
+        self._cal_service.clear_model()
+
+        # Clear the config pointer so the overlay renderer stops immediately;
+        # the next successful calibration re-sets it.
+        allsky_cfg = dict(self._mw.config.get('allsky_overlay', {}))
+        allsky_cfg['calibration_file'] = ''
+        self._mw.config.set('allsky_overlay', allsky_cfg)
+        self._mw.config.save()
+
+        log.info(f"All-sky calibration reset by user (deleted {cal_path})")
+        self.status_changed.emit(
+            "Calibration reset — auto-calibration will start over as frames "
+            "accumulate, or use Guided Calibration.")
+        self.quality_changed.emit('none')
+        self.settings_changed.emit()
+
     @property
     def calibration_service(self):
         """The background calibration accumulation service."""

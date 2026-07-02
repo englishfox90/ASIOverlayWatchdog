@@ -245,6 +245,7 @@ class CalibrationService(QObject):
         self._initial_worker: Optional[_InitialCalWorker] = None
         self._pending_initial = None   # (image, dt, lat, lon) awaiting cal
         self._refine_gen = -1          # generation when last refine was launched
+        self._initial_gen = -1         # generation when last initial cal launched
         # F9: per-frame skips stay at DEBUG (log spam on cloudy nights); a
         # WARNING summary is emitted at most once per cooldown so the user can
         # see "calibration is running but skipping frames" without the noise.
@@ -275,6 +276,23 @@ class CalibrationService(QObject):
             )
             log.info(f"CalibrationService loaded model: {model}, "
                      f"quality={self._quality}")
+
+    def clear_model(self) -> None:
+        """Forget the current model (user-initiated reset).
+
+        In-flight worker results are invalidated via the generation counter.
+        The frame buffer is kept: the accumulated detections are still valid
+        sky data, so a cold-start bootstrap can begin immediately instead of
+        waiting another 35 minutes.
+        """
+        self._model = None
+        self._model_generation += 1
+        self._consecutive_refine_failures = 0
+        self._escape_attempt = False
+        if self._quality != CalibrationQuality.NONE:
+            self._quality = CalibrationQuality.NONE
+        log.info("CalibrationService: model cleared (user reset); "
+                 f"{self.frame_count} buffered frame(s) kept")
 
     def set_model(self, model: FisheyeModel) -> None:
         """
@@ -523,6 +541,7 @@ class CalibrationService(QObject):
 
         image, dt, lat, lon = self._pending_initial
         self._last_initial_attempt_time = time.monotonic()
+        self._initial_gen = self._model_generation  # stale-result snapshot
         log.info("CalibrationService: starting initial single-image calibration")
         self.status_changed.emit("Auto-calibrating\u2026")
 
@@ -535,9 +554,12 @@ class CalibrationService(QObject):
 
     def _on_initial_done(self, model: FisheyeModel) -> None:
         self._pending_initial = None
-        # Discard if the user clicked Calibrate Now while the worker was running.
-        if self._model_generation > 0:
-            log.info("Discarding initial auto-calibration — model was replaced by manual calibration")
+        # Discard if the model changed while the worker was running (manual
+        # Calibrate Now, guided result, or a reset). Snapshot comparison, not
+        # `generation > 0`: the latter would also discard every legitimate
+        # auto-calibration attempted after a user reset.
+        if self._initial_gen != self._model_generation:
+            log.info("Discarding initial auto-calibration — model was replaced while calibrating")
             return
         pole_ok, pole_msg = self.validate_against_pole(model)
         if not pole_ok:
