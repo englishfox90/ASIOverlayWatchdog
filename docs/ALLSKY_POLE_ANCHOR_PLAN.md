@@ -188,10 +188,44 @@ fixed the same night:
 
 Open observations (not yet acted on):
 - `estimate_sky_circle` returned r=1250 on the field frame vs the ~1563 reference
-  trimmed radius at the same resolution (~20% under; centre was within 4px). That
-  tightens every tol_scale-derived limit and under-seeds a1. Suspected cause: the
-  horizon circle extends past the frame edge on this rig plus heavy obstruction.
-  Worth a dedicated look if calibrations keep landing near the RMS limit.
+  trimmed radius at the same resolution (~20% under; centre ~165px off the true
+  optical centre per two independent anchor consensuses — its earlier apparent
+  agreement with the April model was frame-centre coincidence). Cause: the horizon
+  circle extends past the frame edge on this rig plus heavy obstruction, so the
+  estimator fits the clipped illuminated blob. Guided is now immune (freed centre);
+  the automatic paths are not — see next work item.
 - The grid search's a1 candidates cap at 0.99·min_half/(π/2) ≈ 963px on this rig
   while the true a1 ≈ 1250+ — the single-image grid can never reach the true
   basin here (known June-13 finding; triangle/guided/multi are the viable paths).
+
+### P7 — model-derived scale references for the automatic paths (planned 2026-07-03)
+
+The per-frame `estimate_sky_circle` output plays four roles in the background
+service and Calibrate Now; they deserve different treatment:
+
+| Role | Where | Keep estimator? |
+|---|---|---|
+| Star-detection mask | `calibration_service._detect_frame`, `calibrate()` step 1 | **Yes** — it measures the actually-illuminated region, which is what a mask should be. |
+| Match-tolerance scaling | `median_sky_r` → `tol_scale` in refine/pole paths | No — derive from the trusted model. |
+| a1-plausibility gate reference | `validate_a1_scale(model, sky_r)` on refine accept | No — this is the dangerous one. |
+| Bootstrap a1 seed | `multi_calibrate.py` (`a1_from_sky_radius`) | No when a gated model exists; estimator on true cold start. |
+
+Motivating numbers (field rig, 2026-07-02/03): estimator r = 1250–1344 across
+attempts → gate expected a1 ≈ 940–1010 vs true a1 ≈ 1260, ratio ~1.3. One
+noisy-low estimate (r ≈ 1150) pushes the ratio past the 1.5 bound and the gate
+**rejects a correct refinement** → consecutive-failure counter → pointless basin
+escapes → model pinned at Preliminary. Not poisoning, but a livelock against
+quality upgrades.
+
+Design:
+- `sky_r_from_model(model)` = `model.a1 · (π/2) · (1 − SKY_TRIM_FRACTION)`,
+  scaled to the frame via `model.image_width/height` — the exact inverse of
+  `a1_from_sky_radius`, so the two stay consistent by construction.
+- Use it for tol_scale, the a1-gate reference, and the bootstrap seed **only
+  when the current model passed the full admission gate set** (poly, a1, pole,
+  anchors). "Lens scale never changes on a rig" is the invariant being encoded.
+- The basin-escape / seedless-bootstrap path must keep using the raw estimator —
+  a distrusted model must not define the references used to judge its successor.
+- Prerequisite evidence before implementing: one full night of refinement logs
+  from the healthy 2026-07-02 model (do refinements match? does the a1 gate
+  reject any? how much does the estimator wobble frame-to-frame?).
