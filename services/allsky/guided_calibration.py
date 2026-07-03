@@ -52,7 +52,13 @@ MIN_ANCHORS = 4
 # With this many anchors the optical centre joins the fit (bounded near the
 # sky-circle estimate). A slightly-off circle fit otherwise puts an RMS floor
 # under even perfect identifications, pushing correct solves past the limit.
-FREE_CENTRE_MIN_ANCHORS = 6
+# 5 (not 6): on the field rig the circle estimate sits ~165px from the true
+# centre, and a frozen-centre 5-anchor solve of five verified-correct clicks
+# bottomed out at 27.5px (2026-07-02 23:43 attempt). Freed, the same anchors
+# solved at 7.5px and matched the independent 7-anchor consensus to a few px,
+# while a deliberate mis-ID still failed loudly (40.6px) — 10 observations
+# against 8 parameters plus the ridge priors and admission gates held.
+FREE_CENTRE_MIN_ANCHORS = 5
 
 # Progressive centre leash (fractions of sky radius, each axis). The first
 # stage always runs; wider stages run only while the fit still fails the RMS

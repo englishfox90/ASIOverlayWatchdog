@@ -123,8 +123,8 @@ class GuidedCalibrationDialog(QDialog):
 
         self._hint = BodyLabel(
             "Click a bright star (snaps to the nearest detected star), "
-            "choose which star it is, then Add. Identify at least 4, "
-            "spread across the sky, then Solve.")
+            "choose which star it is, then Add. Identify at least 4 — "
+            "5 or more, spread across the sky, solves best — then Solve.")
         self._hint.setWordWrap(True)
         side.addWidget(self._hint)
 
