@@ -14,7 +14,9 @@ from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QLabel
+from PySide6.QtWidgets import (
+    QCompleter, QDialog, QHBoxLayout, QVBoxLayout, QLabel,
+)
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, EditableComboBox, ListWidget,
     PushButton, PrimaryPushButton,
@@ -129,13 +131,23 @@ class GuidedCalibrationDialog(QDialog):
         self._pending_lbl = CaptionLabel("No star selected.")
         side.addWidget(self._pending_lbl)
 
-        # Editable so the user can type a name to filter the long star list.
         self._combo = EditableComboBox()
         self._combo.setPlaceholderText("Search for a star by name…")
         for c in self._candidates:
             self._combo.addItem(f"{c['name']}  (mag {c['vmag']:.1f}, "
                                 f"alt {c['alt']:.0f}°)", userData=c)
         self._combo.setCurrentIndex(-1)
+        # EditableComboBox does no filtering by itself — its text handler
+        # only exact-matches the FULL item string (which ends in "(mag …)"),
+        # so typed star names never matched and the list had to be scrolled.
+        # A contains-mode completer provides the intended type-to-search.
+        completer = QCompleter(
+            [self._combo.itemText(i) for i in range(self._combo.count())],
+            self._combo)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setMaxVisibleItems(12)
+        self._combo.setCompleter(completer)
         side.addWidget(self._combo)
 
         self._add_btn = PushButton("Add this star")
@@ -197,8 +209,15 @@ class GuidedCalibrationDialog(QDialog):
         if self._pending is None:
             self._pending_lbl.setText("Click a star in the image first.")
             return
-        c = self._combo.currentData()
+        c = self._combo.currentData() or self._match_typed_star()
         if not c:
+            self._pending_lbl.setText(
+                "Choose which star this is — type a name to search the list.")
+            return
+        if any(a['name'] == c['name'] for a in self._anchors):
+            self._pending_lbl.setText(
+                f"{c['name']} is already identified — each star can only be "
+                "used once.")
             return
         self._anchors.append({
             'px': self._pending[0], 'py': self._pending[1],
@@ -206,8 +225,26 @@ class GuidedCalibrationDialog(QDialog):
             'snapped': self._pending_snapped})
         self._pending = None
         self._pending_snapped = False
-        self._pending_lbl.setText("Star added.")
+        self._combo.setText("")
+        self._pending_lbl.setText(f"{c['name']} added.")
         self._refresh()
+
+    def _match_typed_star(self):
+        """Resolve free-typed text to a candidate star.
+
+        Pressing Enter in an EditableComboBox appends the raw text as a new
+        (data-less) item instead of selecting a match, so 'vega' + Add used
+        to do nothing, silently. Accept the typed text when it names exactly
+        one candidate (or matches one exactly), case-insensitive.
+        """
+        text = self._combo.text().strip().lower()
+        if not text:
+            return None
+        hits = [c for c in self._candidates if text in c['name'].lower()]
+        exact = [c for c in hits if c['name'].lower() == text]
+        if exact:
+            return exact[0]
+        return hits[0] if len(hits) == 1 else None
 
     def _on_remove(self):
         i = self._list.currentRow()
