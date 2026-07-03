@@ -12,7 +12,7 @@ hooks are AllSkyController.prepare_guided_calibration / start_guided_calibration
 import math
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtCore import Qt, QPoint, QRect
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QCompleter, QDialog, QHBoxLayout, QVBoxLayout, QLabel,
@@ -33,6 +33,13 @@ _SNAP_SKY_FRACTION = 0.035
 _SNAP_MIN_PX = 30.0
 _MAX_DISPLAY = 760  # longest displayed image edge (px)
 
+# Hover loupe: the preview shows ~4-5 raw pixels per display pixel, too
+# coarse to tell close stars apart (Mizar vs Alioth). The loupe shows a
+# native-resolution crop around the cursor.
+_LOUPE_SIZE = 200     # loupe box edge on screen (px)
+_LOUPE_NATIVE = 150   # raw image pixels shown across the box (~1.3x native)
+_LOUPE_OFFSET = 24    # gap between cursor and loupe box (px)
+
 
 class _ClickableImage(QLabel):
     """Image label that reports clicks in ORIGINAL image coordinates."""
@@ -45,10 +52,24 @@ class _ClickableImage(QLabel):
         self._pending: Optional[Tuple[float, float]] = None
         self.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
+        self._full: Optional[QPixmap] = None   # native-resolution frame
+        self._snap_r = 0.0                     # snap radius (image px)
+        self.setMouseTracking(True)
+        self._loupe = QLabel(self)
+        self._loupe.setFixedSize(_LOUPE_SIZE, _LOUPE_SIZE)
+        self._loupe.setStyleSheet(
+            "border: 1px solid #999; background-color: black;")
+        self._loupe.hide()
+
     def set_base_pixmap(self, pix: QPixmap, scale: float):
         self._base = pix
         self._scale = scale
         self._redraw()
+
+    def set_full_pixmap(self, pix: QPixmap, snap_radius_px: float):
+        """Native-resolution frame + snap radius for the hover loupe."""
+        self._full = pix
+        self._snap_r = float(snap_radius_px)
 
     def set_markers(self, markers, pending):
         self._markers = markers
@@ -81,6 +102,52 @@ class _ClickableImage(QLabel):
             self._on_click(ev.position().x() / self._scale,
                            ev.position().y() / self._scale)
 
+    def mouseMoveEvent(self, ev):
+        if self._scale > 0:
+            self._update_loupe(ev.position().x() / self._scale,
+                               ev.position().y() / self._scale,
+                               ev.position().toPoint())
+
+    def leaveEvent(self, ev):
+        self._loupe.hide()
+        super().leaveEvent(ev)
+
+    def _update_loupe(self, ix: float, iy: float, cursor: QPoint):
+        """Show a native-resolution crop around image coords (ix, iy)."""
+        if self._full is None:
+            return
+        half = _LOUPE_NATIVE // 2
+        crop = self._full.copy(
+            QRect(int(ix) - half, int(iy) - half, _LOUPE_NATIVE, _LOUPE_NATIVE))
+        crop = crop.scaled(_LOUPE_SIZE, _LOUPE_SIZE,
+                           Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        mag = _LOUPE_SIZE / float(_LOUPE_NATIVE)
+        c = _LOUPE_SIZE // 2
+        p = QPainter(crop)
+        try:
+            p.setPen(QPen(QColor(255, 210, 60), 1))
+            p.drawLine(c - 14, c, c - 4, c)
+            p.drawLine(c + 4, c, c + 14, c)
+            p.drawLine(c, c - 14, c, c - 4)
+            p.drawLine(c, c + 4, c, c + 14)
+            if self._snap_r > 0:
+                r = int(self._snap_r * mag)
+                p.setPen(QPen(QColor(60, 220, 60, 160), 1))
+                p.drawEllipse(QPoint(c, c), r, r)
+        finally:
+            p.end()
+        self._loupe.setPixmap(crop)
+        # Keep the loupe beside the cursor but inside the label.
+        lx = cursor.x() + _LOUPE_OFFSET
+        ly = cursor.y() + _LOUPE_OFFSET
+        if lx + _LOUPE_SIZE > self.width():
+            lx = cursor.x() - _LOUPE_SIZE - _LOUPE_OFFSET
+        if ly + _LOUPE_SIZE > self.height():
+            ly = cursor.y() - _LOUPE_SIZE - _LOUPE_OFFSET
+        self._loupe.move(max(0, lx), max(0, ly))
+        self._loupe.show()
+        self._loupe.raise_()
+
 
 class GuidedCalibrationDialog(QDialog):
     """Collect user-identified star anchors for guided calibration."""
@@ -112,8 +179,9 @@ class GuidedCalibrationDialog(QDialog):
 
         # Left: clickable image.
         self._img = _ClickableImage(self._on_image_click)
-        pix, scale = self._pil_to_pixmap(pil_image)
+        pix, scale, full = self._pil_to_pixmap(pil_image)
         self._img.set_base_pixmap(pix, scale)
+        self._img.set_full_pixmap(full, self._snap_px)
         root.addWidget(self._img)
 
         # Right: controls.
@@ -122,9 +190,10 @@ class GuidedCalibrationDialog(QDialog):
         root.addLayout(side)
 
         self._hint = BodyLabel(
-            "Click a bright star (snaps to the nearest detected star), "
-            "choose which star it is, then Add. Identify at least 4 — "
-            "5 or more, spread across the sky, solves best — then Solve.")
+            "Hover to magnify. Click a bright star (snaps to the nearest "
+            "detected star), choose which star it is, then Add. Identify at "
+            "least 4 — 5 or more, spread across the sky, solves best — then "
+            "Solve.")
         self._hint.setWordWrap(True)
         side.addWidget(self._hint)
 
@@ -177,16 +246,18 @@ class GuidedCalibrationDialog(QDialog):
         row.addWidget(self._solve_btn)
         side.addLayout(row)
 
-    def _pil_to_pixmap(self, pil_image) -> Tuple[QPixmap, float]:
+    def _pil_to_pixmap(self, pil_image) -> Tuple[QPixmap, float, QPixmap]:
+        """Return (display pixmap, display scale, native-res pixmap)."""
         img = pil_image.convert('RGB')
         w, h = img.size
         scale = min(1.0, _MAX_DISPLAY / float(max(w, h)))
         data = img.tobytes('raw', 'RGB')
         qimg = QImage(data, w, h, 3 * w, QImage.Format_RGB888).copy()
+        full = QPixmap.fromImage(qimg)
         if scale < 1.0:
             qimg = qimg.scaled(int(w * scale), int(h * scale),
                                Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        return QPixmap.fromImage(qimg), scale
+        return QPixmap.fromImage(qimg), scale, full
 
     # ------------------------------------------------------------------
     def _on_image_click(self, ix: float, iy: float):
