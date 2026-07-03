@@ -145,3 +145,53 @@ below 40° is covered by the a1-scale, lens-polynomial and pole gates.
 Delete `%LOCALAPPDATA%\PFRSentinel\allsky_calibration.json` on the affected rig — a
 missing model is strictly better than the poisoned one; guided or bootstrap will
 re-create it once the fixes land.
+
+## Field test 2026-07-02 (first clear sky after the fixes) — findings & follow-ups
+
+The user reset calibration and attempted auto + guided calibration on the real rig.
+No model was admitted (good: the gates held), but three defects surfaced and were
+fixed the same night:
+
+1. **Triangle fallback crash (auto-cal).** The grid search converged to a wrong
+   basin and the new pinned-a3 gate correctly rejected it; the triangle fallback
+   then found the correct basin (east_left=True, 40 matches, prob 1.0) but
+   `_iterative_fit` died at iteration 0 — scipy's "Initial guess is outside of
+   provided bounds". Root cause: `triangle_match._extract_orientation` admits
+   axis_alt ≥ 45 while the fit bounds start at 60, and roll/axis_az come back
+   unwrapped. Fix: wrap the angles and clamp the seed into the fit bounds each
+   iteration (`calibration.py::_iterative_fit`). Regression:
+   `TestFitSeedFeasibility`.
+2. **Camera had physically moved since the April reference model** (roll +21°,
+   axis tilt ~16°, centre ~0.15·sky_r away). The guided free-centre leash
+   (±5% sky_r) pinned at its corner — correct anchors could not fit better than
+   14.5px. Fix: progressive leash 5% → 10% → 15%, wider stages only while the
+   fit still fails the limit (`_CENTRE_RANGE_FRACTIONS`). The same anchors then
+   solved at 1.8px. Implication: `sample_images/multi_calibration.json` is no
+   longer ground truth for the *current* physical rig — it remains valid for the
+   archived sample frames only.
+3. **Guided anchors are user data and fail like it.** One mis-identification
+   ("Alkaid" clicked on Mizar — 9px from Mizar through the consensus model) and
+   one sloppy unsnapped click (Polaris, ~58px off) took an otherwise-perfect
+   7-anchor set to RMS 54.7px, and the per-star residual report smears the error
+   across all anchors (worst residual ≠ the bad anchor when the fit compromises).
+   Fixes in `guided_calibration.py`:
+   - full anchor input (name, pixel, RA/Dec, dt, sky circle) logged at INFO —
+     failures are now replayable from the log alone;
+   - outlier rescue: worst-first single (then pair) exclusions; a passing subset
+     is the consensus model, excluded clicks are audited against the bright-star
+     catalog through it and reinstated under the corrected identity when they sit
+     on a different star (≤0.05·sky_r). Outcome reported via `guided_note`,
+     surfaced in the controller status message. The field anchor set now solves
+     at 7.0px, all 7 anchors, note "'Alkaid' is actually Mizar".
+   Regressions: `test_bad_anchor_excluded_and_named`,
+   `test_misidentified_anchor_reassigned`.
+
+Open observations (not yet acted on):
+- `estimate_sky_circle` returned r=1250 on the field frame vs the ~1563 reference
+  trimmed radius at the same resolution (~20% under; centre was within 4px). That
+  tightens every tol_scale-derived limit and under-seeds a1. Suspected cause: the
+  horizon circle extends past the frame edge on this rig plus heavy obstruction.
+  Worth a dedicated look if calibrations keep landing near the RMS limit.
+- The grid search's a1 candidates cap at 0.99·min_half/(π/2) ≈ 963px on this rig
+  while the true a1 ≈ 1250+ — the single-image grid can never reach the true
+  basin here (known June-13 finding; triangle/guided/multi are the viable paths).

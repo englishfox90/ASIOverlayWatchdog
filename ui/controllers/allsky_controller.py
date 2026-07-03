@@ -404,6 +404,11 @@ class AllSkyController(QObject):
 
         msg = (f"Calibrated: {model.n_matches} stars, "
                f"RMS={model.rms_residual:.2f}px ({quality})")
+        # Guided-solve rescue note (excluded/reassigned anchors) — the user
+        # must see which of their identifications didn't fit.
+        note = getattr(model, 'guided_note', None)
+        if note:
+            msg += f" — {note}"
         self.status_changed.emit(msg)
         self.quality_changed.emit(quality)
         self.calibration_done.emit(info)

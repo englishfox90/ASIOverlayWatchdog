@@ -12,9 +12,17 @@ the model over time.
 This module owns ONLY the solve: given anchors + observer + sky circle, produce
 a FisheyeModel. UI/threading live in ui/controllers/allsky_controller.py.
 
+The solve is outlier-tolerant: when the full anchor set fails the RMS limit,
+one or two anchors are excluded (worst-first) and, where the excluded click
+sits on a different catalog star through the consensus model, the anchor is
+reinstated under the corrected identity. Field data 2026-07-02: a Big Dipper
+handle mix-up ("Alkaid" clicked on Mizar) plus one sloppy click took an
+otherwise-perfect 7-anchor set from RMS 55px to a passing solve.
+
 The projection ground truth is FisheyeModel.altaz_to_pixel() — never reimplement
 the formula here (see docs/ALLSKY_CALIBRATION_PLAN.md).
 """
+import itertools
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
@@ -45,7 +53,20 @@ MIN_ANCHORS = 4
 # sky-circle estimate). A slightly-off circle fit otherwise puts an RMS floor
 # under even perfect identifications, pushing correct solves past the limit.
 FREE_CENTRE_MIN_ANCHORS = 6
-_CENTRE_RANGE_FRACTION = 0.05   # of sky radius, each axis
+
+# Progressive centre leash (fractions of sky radius, each axis). The first
+# stage always runs; wider stages run only while the fit still fails the RMS
+# limit, so a well-estimated circle keeps the tight leash. Field data
+# 2026-07-02: after the camera was physically re-mounted the true centre sat
+# ~0.15·sky_r from the circle estimate — a fixed 5% leash pinned the fit at
+# the range corner (RMS 14.5px) where 15% solved the same anchors at 1.8px.
+_CENTRE_RANGE_FRACTIONS = (0.05, 0.10, 0.15)
+
+# Outlier rescue: an excluded anchor may be reinstated as the catalog star
+# its click actually lands on, if that star is within this fraction of the
+# sky radius (matches the click-snap scale) and at least this bright.
+_REASSIGN_RADIUS_FRACTION = 0.05
+_REASSIGN_MAX_MAG = 3.5
 
 # a3 prior for the fit. Milder than the auto path's conservative default: exact
 # anchors constrain a3 well, so this is just a gentle starting point.
@@ -119,30 +140,28 @@ def calibrate_from_anchors(
     a1_seed = a1_from_sky_radius(sky_radius)
     cx, cy = float(sky_cx), float(sky_cy)
     rms_limit = max_rms_px * tol_scale(sky_radius)
-    centre_range = (_CENTRE_RANGE_FRACTION * float(sky_radius)
-                    if len(anchors) >= FREE_CENTRE_MIN_ANCHORS else 0.0)
 
-    # Stage 1: refine EVERY top-k coarse candidate (fixed centre — lets the
-    # orientation settle without the centre absorbing roll/axis errors) and
-    # keep the best final RMS. The coarse grid has near-degenerate cells
-    # (at axis_alt=90 many az/roll combos score alike), so trusting only the
-    # single best cell drops the refine into a wrong basin on near-ties.
-    # With a handful of anchors each refine is milliseconds.
-    candidates = _coarse_search(alts, azs, px, cx, cy, a1_seed)
-    model, rms = None, float('inf')
-    for cand in candidates:
-        m, r = _refine(alts, azs, px, cx, cy, a1_seed, cand)
-        if r < rms:
-            model, rms = m, r
-    if centre_range > 0.0:
-        # Stage 2: free the centre from the settled orientation. Only accept
-        # the freed fit when it actually improves.
-        settled = (0.0, model.east_left, model.axis_alt, model.axis_az,
-                   float(np.degrees(model.roll)))
-        model2, rms2 = _refine(alts, azs, px, cx, cy, model.a1,
-                               settled, centre_range)
-        if rms2 < rms:
-            model, rms = model2, rms2
+    # Full input record at INFO — a failed attempt must be replayable from
+    # the log alone (we lost a night's diagnosis to unlogged click pixels).
+    log.info(
+        f"Guided solve input: dt={dt.isoformat()}, "
+        f"sky_circle=({cx:.0f}, {cy:.0f}, r={float(sky_radius):.0f}), "
+        f"rms_limit={rms_limit:.1f}px, anchors: "
+        + "; ".join(f"{n}@({a[0]:.1f},{a[1]:.1f}) ra={a[2]:.4f} dec={a[3]:.4f}"
+                    for n, a in zip(names, anchors))
+    )
+
+    model, rms = _solve_anchor_set(alts, azs, px, cx, cy, a1_seed,
+                                   sky_radius, rms_limit)
+
+    note = None
+    used = list(range(len(anchors)))
+    if rms > rms_limit and len(anchors) > MIN_ANCHORS:
+        rescue = _rescue_outliers(
+            model, names, alts, azs, px, cx, cy, a1_seed, sky_radius,
+            rms_limit, anchors, lat_deg, lon_deg, dt)
+        if rescue is not None:
+            model, rms, note, used, names, alts, azs = rescue
 
     if rms > rms_limit:
         raise CalibrationError(
@@ -153,6 +172,7 @@ def calibrate_from_anchors(
             "remove or re-click it and solve again."
         )
 
+    idx = np.array(used)
     poly_ok, poly_msg = validate_lens_polynomial(model)
     scale_ok, scale_msg = validate_a1_scale(model, sky_radius)
     if not (poly_ok and scale_ok):
@@ -160,17 +180,21 @@ def calibrate_from_anchors(
                                            (scale_ok, scale_msg)) if not ok)
         raise CalibrationError(
             f"Guided calibration converged to an implausible model ({reason}). "
-            f"Per-star residuals: {_residual_report(model, alts, azs, px, names)}."
+            f"Per-star residuals: "
+            f"{_residual_report(model, alts[idx], azs[idx], px[idx], [names[i] for i in used])}."
         )
 
     model.image_width = int(image_width)
     model.image_height = int(image_height)
-    model.n_matches = len(anchors)
+    model.n_matches = len(used)
     model.rms_residual = float(rms)
     model.calibrated_at = datetime.now(timezone.utc).isoformat()
+    if note:
+        model.guided_note = note   # session-only; surfaced in the status msg
+        log.warning(f"Guided calibration rescue: {note}")
     log.info(
-        f"Guided calibration: {len(anchors)} anchors, RMS={rms:.2f}px, "
-        f"east_left={model.east_left}, a1={model.a1:.1f}, "
+        f"Guided calibration: {len(used)}/{len(anchors)} anchors, "
+        f"RMS={rms:.2f}px, east_left={model.east_left}, a1={model.a1:.1f}, "
         f"axis_alt={model.axis_alt:.1f}, axis_az={model.axis_az:.1f}"
     )
     return model
@@ -179,6 +203,159 @@ def calibrate_from_anchors(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+def _solve_anchor_set(alts, azs, px, cx, cy, a1_seed, sky_radius, rms_limit):
+    """Solve one anchor set: coarse orientation search, per-candidate refine,
+    then progressive centre freeing.
+
+    Stage 1 refines EVERY top-k coarse candidate (fixed centre — lets the
+    orientation settle without the centre absorbing roll/axis errors) and
+    keeps the best final RMS. The coarse grid has near-degenerate cells
+    (at axis_alt=90 many az/roll combos score alike), so trusting only the
+    single best cell drops the refine into a wrong basin on near-ties.
+
+    Stage 2 (>=FREE_CENTRE_MIN_ANCHORS) frees the centre from the settled
+    orientation, widening the leash only while the fit still fails the
+    limit, and only ever accepting an improvement.
+    """
+    candidates = _coarse_search(alts, azs, px, cx, cy, a1_seed)
+    model, rms = None, float('inf')
+    for cand in candidates:
+        m, r = _refine(alts, azs, px, cx, cy, a1_seed, cand)
+        if r < rms:
+            model, rms = m, r
+    if len(alts) >= FREE_CENTRE_MIN_ANCHORS:
+        for stage, frac in enumerate(_CENTRE_RANGE_FRACTIONS):
+            if stage and rms <= rms_limit:
+                break
+            settled = (0.0, model.east_left, model.axis_alt, model.axis_az,
+                       float(np.degrees(model.roll)))
+            m2, r2 = _refine(alts, azs, px, cx, cy, model.a1, settled,
+                             frac * float(sky_radius))
+            if r2 < rms:
+                model, rms = m2, r2
+    return model, rms
+
+
+def _rescue_outliers(full_model, names, alts, azs, px, cx, cy, a1_seed,
+                     sky_radius, rms_limit, anchors, lat_deg, lon_deg, dt):
+    """Recover from one or two bad anchors in a failed full solve.
+
+    Try every single-anchor exclusion (then pairs from the worst three when
+    enough anchors remain) and keep the subset with the best passing RMS —
+    the suspect ranking comes from the failed full model, which may itself
+    sit in a wrong basin, so first-passing is not good enough. A passing
+    subset gives a trustworthy consensus model; each excluded click is then
+    audited against the catalog through it — if the click sits on a
+    *different* bright star, the anchor is reinstated under that identity
+    and the full set re-solved (a mis-identification, the common case, loses
+    no data). Otherwise the anchor stays excluded (a mis-click).
+
+    Returns (model, rms, note, used_indices, names, alts, azs) or None if
+    no subset passes.
+    """
+    n = len(alts)
+    pxs, pys, vis = full_model.altaz_array_to_pixels(alts, azs)
+    res = np.where(vis, np.hypot(pxs - px[:, 0], pys - px[:, 1]), np.inf)
+    order = [int(i) for i in np.argsort(-res)]
+
+    def try_drop(drop):
+        keep = [k for k in range(n) if k not in drop]
+        if len(keep) < MIN_ANCHORS:
+            return None
+        # A MIN_ANCHORS-sized subset barely overdetermines the pose (8
+        # observations vs 6 free parameters), so its RMS gate has little
+        # power — demand a clearly better fit before trusting it.
+        limit = rms_limit if len(keep) > MIN_ANCHORS else 0.5 * rms_limit
+        idx = np.array(keep)
+        m, r = _solve_anchor_set(alts[idx], azs[idx], px[idx], cx, cy,
+                                 a1_seed, sky_radius, limit)
+        return (r, drop, keep, m) if r <= limit else None
+
+    passing = [t for t in (try_drop((i,)) for i in order) if t is not None]
+    if not passing and n >= MIN_ANCHORS + 2:
+        passing = [t for t in (try_drop(d) for d in
+                               itertools.combinations(order[:3], 2))
+                   if t is not None]
+    if not passing:
+        return None
+    r, drop, keep, m = min(passing, key=lambda t: t[0])
+
+    # Audit each excluded click against the consensus model: does it sit on
+    # a different catalog star than the user named? Identities already held
+    # by kept anchors (or claimed by a previous hit) are off-limits so a
+    # rescue can never assign two anchors to the same star.
+    taken = [(float(anchors[k][2]), float(anchors[k][3])) for k in keep]
+    hits = {}
+    for i in drop:
+        hit = _nearest_catalog_star(
+            m, float(px[i, 0]), float(px[i, 1]), lat_deg, lon_deg, dt,
+            sky_radius,
+            exclude_radecs=taken + [(float(anchors[i][2]),
+                                     float(anchors[i][3]))])
+        if hit is not None:
+            hits[i] = hit
+            taken.append((hit[1], hit[2]))
+
+    if hits and len(hits) == len(drop):
+        alts2, azs2 = alts.copy(), azs.copy()
+        names2 = list(names)
+        for i, (star_name, ra, dec, dist) in hits.items():
+            alt, az = radec_to_altaz(ra, dec, lat_deg, lon_deg, dt)
+            alts2[i], azs2[i] = float(alt), float(az)
+            names2[i] = star_name
+        m2, r2 = _solve_anchor_set(alts2, azs2, px, cx, cy, a1_seed,
+                                   sky_radius, rms_limit)
+        if r2 <= rms_limit:
+            swaps = ", ".join(
+                f"'{names[i]}' is actually {hits[i][0]} "
+                f"({hits[i][3]:.0f}px from its catalog position)"
+                for i in drop)
+            note = (f"Corrected identification: {swaps}. "
+                    f"All {n} anchors used.")
+            return m2, r2, note, list(range(n)), names2, alts2, azs2
+
+    dropped_txt = ", ".join(f"'{names[i]}'" for i in drop)
+    hint = "".join(
+        f" The '{names[i]}' click sits near {hits[i][0]} — if that is "
+        f"what you clicked, re-identify it."
+        for i in drop if i in hits)
+    note = (f"Solved from {len(keep)} of {n} anchors — {dropped_txt} "
+            f"did not fit the consensus and was excluded (mis-click or "
+            f"mis-identification).{hint}")
+    return m, r, note, keep, list(names), alts, azs
+
+
+def _nearest_catalog_star(model, x, y, lat_deg, lon_deg, dt, sky_radius,
+                          exclude_radecs):
+    """Nearest bright catalog star to pixel (x, y) through `model`.
+
+    Returns (name, ra_deg, dec_deg, dist_px) when the nearest star not in
+    `exclude_radecs` (the anchor's original identity plus every identity
+    already assigned to another anchor) lies within the reassignment
+    radius; None otherwise.
+    """
+    from .catalogs import get_bright_stars
+    best = None
+    for s in get_bright_stars(max_mag=_REASSIGN_MAX_MAG):
+        if any(abs(s['ra_deg'] - ra) < 1e-3 and abs(s['dec_deg'] - dec) < 1e-3
+               for ra, dec in exclude_radecs):
+            continue
+        alt, az = radec_to_altaz(s['ra_deg'], s['dec_deg'],
+                                 lat_deg, lon_deg, dt)
+        if float(alt) <= 0.0:
+            continue
+        xy = model.altaz_to_pixel(float(alt), float(az))
+        if xy is None:
+            continue
+        d = float(np.hypot(xy[0] - x, xy[1] - y))
+        if best is None or d < best[3]:
+            best = (s.get('name') or f"HR{s.get('hr', '?')}",
+                    float(s['ra_deg']), float(s['dec_deg']), d)
+    if best is not None and best[3] <= _REASSIGN_RADIUS_FRACTION * float(sky_radius):
+        return best
+    return None
+
 
 def _reproj_sq(model: FisheyeModel, alts, azs, px) -> float:
     """Sum of squared pixel reprojection errors over the anchors (vectorised)."""

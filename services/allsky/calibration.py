@@ -495,11 +495,27 @@ def _iterative_fit(
     if abs(model.a3) < 1e-6:
         model.a3 = A3_SEED_DEFAULT
 
+    # a3/a5 bounds tightened to physical range for fisheye lenses. Wide-open
+    # bounds let the optimiser bend the polynomial to fit a handful of
+    # zenith-region stars while abandoning far-from-axis ones; the residual
+    # RMS looks fine but the sky is rotated wrong.
+    fit_lo = np.array([50.0, 50.0, 50.0, A3_MIN, -1500.0, -np.pi, 60.0, 0.0])
+    fit_hi = np.array([4000.0, 4000.0, 2000.0, A3_MAX, 500.0, np.pi, 90.0, 360.0])
+
     for iteration in range(8):
         params = np.array([
             model.cx, model.cy, model.a1, model.a3, model.a5,
             model.roll, model.axis_alt, model.axis_az,
         ])
+        # A seed from a grid/triangle hypothesis can sit outside the fit
+        # bounds — the triangle orientation extraction admits axis_alt >= 45
+        # and returns roll/axis_az unwrapped — and least_squares('trf')
+        # rejects an infeasible x0 outright ("Initial guess is outside of
+        # provided bounds"), aborting refinement of an otherwise-correct
+        # hypothesis. Wrap the angles and clamp instead.
+        params[5] = (params[5] + np.pi) % (2.0 * np.pi) - np.pi
+        params[7] = params[7] % 360.0
+        params = np.clip(params, fit_lo, fit_hi)
 
         def residuals(p):
             m = _params_to_model(p, east_left)
@@ -513,16 +529,9 @@ def _iterative_fit(
             return res
 
         try:
-            # a3/a5 bounds tightened to physical range for fisheye lenses.
-            # Wide-open bounds let the optimiser bend the polynomial to fit
-            # a handful of zenith-region stars while abandoning far-from-axis
-            # ones; the residual RMS looks fine but the sky is rotated wrong.
             result = _least_squares(
                 residuals, params,
-                bounds=(
-                    [50,   50,   50,   A3_MIN, -1500.0, -np.pi, 60.0,   0.0],
-                    [4000, 4000, 2000, A3_MAX,   500.0,  np.pi, 90.0, 360.0],
-                ),
+                bounds=(fit_lo, fit_hi),
                 method='trf',
                 max_nfev=8000,
                 ftol=1e-5,

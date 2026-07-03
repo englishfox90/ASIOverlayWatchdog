@@ -328,13 +328,13 @@ class TestGuidedCalibration:
         assert abs(m.cx - 1137.0) < 20.0
         assert abs(m.cy - 1306.0) < 20.0
 
-    def test_bad_anchor_named_in_error(self):
-        """A mis-clicked anchor must be identifiable from the error message
-        (per-anchor residuals, worst first), not just 'you're wrong'."""
+    def test_bad_anchor_excluded_and_named(self):
+        """One mis-clicked anchor among six must not sink the solve: the
+        rescue path excludes it (or reassigns it), names it in the note,
+        and still recovers the true model from the rest."""
         pytest.importorskip('scipy')
         from datetime import datetime, timezone
         from services.allsky.guided_calibration import calibrate_from_anchors
-        from services.allsky.calibration import CalibrationError
 
         true_model = self._true_model()
         lat, lon = 31.33, -100.46
@@ -346,11 +346,128 @@ class TestGuidedCalibration:
         x, y, ra, dec, name = named[2]
         named[2] = (x + 200.0, y, ra, dec, name)
 
+        m = calibrate_from_anchors(named, lat, lon, dt, 1137.0, 1306.0, 968.0)
+        note = getattr(m, 'guided_note', '')
+        assert "Star2" in note
+        assert m.rms_residual < 5.0, f"RMS {m.rms_residual:.1f}px"
+        assert abs(m.a1 - 643.0) < 25
+
+    def test_unrescuable_set_still_raises_with_residuals(self):
+        """When too many anchors are bad for any subset to reach consensus,
+        the solve must still fail loudly with per-anchor residuals — the
+        rescue must not accept a garbage fit."""
+        pytest.importorskip('scipy')
+        from datetime import datetime, timezone
+        from services.allsky.guided_calibration import calibrate_from_anchors
+        from services.allsky.calibration import CalibrationError
+
+        true_model = self._true_model()
+        lat, lon = 31.33, -100.46
+        dt = datetime(2026, 6, 22, 6, 0, tzinfo=timezone.utc)
+        base = self._anchors(true_model, lat, lon, dt, n=5)
+        named = [(x, y, ra, dec, f"Star{i}") for i, (x, y, ra, dec)
+                 in enumerate(base)]
+        # Two badly corrupted clicks out of five: any 4-anchor subset keeps
+        # at least one, so no exclusion can reach a clean consensus.
+        x, y, ra, dec, name = named[1]
+        named[1] = (x + 300.0, y - 250.0, ra, dec, name)
+        x, y, ra, dec, name = named[3]
+        named[3] = (x - 280.0, y + 320.0, ra, dec, name)
+
         with pytest.raises(CalibrationError) as exc:
             calibrate_from_anchors(named, lat, lon, dt, 1137.0, 1306.0, 968.0)
         msg = str(exc.value)
-        assert "Star2" in msg
-        assert "px" in msg
+        assert "px" in msg and "Star" in msg
+
+    def test_misidentified_anchor_reassigned(self):
+        """A correct click under a wrong star name (e.g. Mizar clicked but
+        labeled Alkaid — the 2026-07-02 field failure) must be reassigned to
+        the star the click actually sits on, using all anchors."""
+        pytest.importorskip('scipy')
+        from datetime import datetime, timezone
+        from services.allsky.catalogs import get_bright_stars
+        from services.allsky.coords import radec_to_altaz
+        from services.allsky.guided_calibration import calibrate_from_anchors
+
+        true_model = self._true_model()
+        lat, lon = 31.33, -100.46
+        dt = datetime(2026, 6, 22, 6, 0, tzinfo=timezone.utc)
+
+        cands = []
+        for s in get_bright_stars(max_mag=2.5):
+            alt, az = radec_to_altaz(s['ra_deg'], s['dec_deg'], lat, lon, dt)
+            if float(alt) < 25:
+                continue
+            xy = true_model.altaz_to_pixel(float(alt), float(az))
+            if xy is None:
+                continue
+            cands.append((xy[0], xy[1], s['ra_deg'], s['dec_deg'],
+                          s.get('name') or 'unnamed', float(az)))
+        cands.sort(key=lambda t: t[5])
+        idx = np.linspace(0, len(cands) - 1, 8).round().astype(int)
+        picked = [cands[i] for i in dict.fromkeys(idx.tolist())]
+        assert len(picked) >= 8
+        anchors = [(x, y, ra, dec, nm) for x, y, ra, dec, nm, _az
+                   in picked[:7]]
+        wrong = picked[7]
+        # Anchor 2 keeps its true click pixel but is labeled as `wrong`.
+        x, y, _ra, _dec, name = anchors[2]
+        anchors[2] = (x, y, wrong[2], wrong[3], wrong[4])
+
+        m = calibrate_from_anchors(anchors, lat, lon, dt,
+                                   1137.0, 1306.0, 968.0)
+        note = getattr(m, 'guided_note', '')
+        assert "actually" in note and wrong[4] in note
+        assert m.n_matches == 7      # reassigned, not dropped
+        assert m.rms_residual < 3.0, f"RMS {m.rms_residual:.1f}px"
+        assert abs(m.a1 - 643.0) < 25
+
+
+class TestFitSeedFeasibility:
+    """A grid/triangle hypothesis can seed _iterative_fit outside its bounds
+    (the triangle orientation extraction admits axis_alt >= 45; roll/axis_az
+    come back unwrapped). least_squares('trf') rejects an infeasible x0
+    outright, which used to abort refinement of a correct hypothesis
+    (2026-07-02 field failure: 'Initial guess is outside of provided
+    bounds'). The seed must be wrapped/clamped instead."""
+
+    def test_out_of_bounds_seed_is_clamped_not_fatal(self):
+        pytest.importorskip('scipy')
+        from datetime import datetime, timezone
+        from services.allsky.calibration import _iterative_fit
+
+        true_model = FisheyeModel(
+            cx=1137.0, cy=1306.0, a1=643.0, a3=1.3, a5=-7.7,
+            roll=-0.321, axis_alt=82.5, axis_az=16.9, east_left=True)
+
+        rng = np.random.default_rng(7)
+        detected, catalog, matches = [], [], []
+        for i in range(40):
+            alt = float(rng.uniform(20, 85))
+            az = float(rng.uniform(0, 360))
+            xy = true_model.altaz_to_pixel(alt, az)
+            if xy is None:
+                continue
+            star = {'name': f'S{i}', 'vmag': 1.0 + 0.05 * i,
+                    'ra_deg': 0.0, 'dec_deg': 0.0}
+            detected.append((xy[0], xy[1], 1000.0))
+            catalog.append((star, alt, az))
+            matches.append(((xy[0], xy[1]), star, (alt, az)))
+        assert len(matches) >= 15
+
+        # Same orientation as truth, expressed infeasibly: roll a full turn
+        # low, axis_az a full turn high, axis_alt below the 60-deg bound.
+        seed = FisheyeModel(
+            cx=1137.0, cy=1306.0, a1=643.0, a3=1.3, a5=-7.7,
+            roll=-0.321 - 2 * np.pi, axis_alt=55.0, axis_az=376.9,
+            east_left=True)
+        model, rms = _iterative_fit(
+            matches, seed, 31.33, -100.46,
+            datetime(2026, 6, 22, 6, 0, tzinfo=timezone.utc),
+            catalog, detected, min_matches=10, max_residual=15.0)
+
+        assert 60.0 <= model.axis_alt <= 90.0
+        assert rms < 5.0, f"refinement did not run/converge: RMS {rms:.1f}px"
 
 
 class TestCalibrationError:
