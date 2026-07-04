@@ -230,9 +230,16 @@ class LibraryController(QObject):
                     self._pending_frame_id = None
                 if fid is None:
                     break
-                data = self.read_full(fid)
-                if data is not None:
-                    self.frame_ready.emit(fid, data)
+                try:
+                    data = self.read_full(fid)
+                    if data is not None:
+                        self.frame_ready.emit(fid, data)
+                except Exception as e:
+                    # Mirrors _load_sessions's guard: a closed/corrupt DB
+                    # (e.g. mid-shutdown) must not kill this worker thread —
+                    # main.py's threading.excepthook would report that as an
+                    # unhandled crash to PostHog.
+                    app_logger.error(f"Library frame load failed for id={fid}: {e}")
 
     # -- lifecycle ----------------------------------------------------------
 

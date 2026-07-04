@@ -80,7 +80,7 @@ class Scrubber(QWidget):
         for idx, data in (filmstrip_items or []):
             pix = QPixmap()
             if pix.loadFromData(data):
-                self._film.append((idx, pix))
+                self._film.append((idx, _scale_thumb(pix)))
         self._reset_live_film()
 
         # Open on the latest frame, not the middle — a night is usually opened to
@@ -118,6 +118,7 @@ class Scrubber(QWidget):
         pix = QPixmap()
         if not pix.loadFromData(data):
             return
+        pix = _scale_thumb(pix)
         if self._film_anchor is None:
             self._film_anchor = index
         if index - self._film_anchor >= self._film_step:
@@ -297,19 +298,16 @@ class Scrubber(QWidget):
         if not self._film:
             return
         # Each thumbnail is centred on its own frame's index position, so it sits
-        # directly above the band colour and playhead for that frame.
-        cell_w = (w / len(self._film)) * 0.92
-        half = cell_w / 2
+        # directly above the band colour and playhead for that frame. Pixmaps are
+        # pre-scaled to _STRIP_H at insertion (set_data / add_live_thumb) — never
+        # rescale here, a per-paint SmoothTransformation on every cell is what
+        # made hours of live-follow cost ~300ms/repaint.
         for idx, pix in self._film:
             cx = self._frac_to_x(self._index_frac(idx))
+            half = pix.width() / 2
             cx = max(_PAD_X + half, min(_PAD_X + w - half, cx))  # keep edges in view
-            # Letterbox (KeepAspectRatio, centered) so square and rectangular
-            # frames both show un-cropped and un-stretched — pier cameras vary.
-            scaled = pix.scaled(int(cell_w), _STRIP_H, Qt.KeepAspectRatio,
-                                Qt.SmoothTransformation)
-            ox = cx - scaled.width() / 2
-            oy = _STRIP_TOP + (_STRIP_H - scaled.height()) / 2
-            painter.drawPixmap(QPointF(ox, oy), scaled)
+            ox = cx - half
+            painter.drawPixmap(QPointF(ox, _STRIP_TOP), pix)
 
     def _paint_band(self, painter, w):
         painter.fillRect(QRectF(_PAD_X, _BAND_TOP, w, _BAND_H), QColor(Colors.gray_3))
@@ -369,6 +367,17 @@ class Scrubber(QWidget):
             else:
                 rect = QRectF(x - 30, y - 10, 60, 12)
                 painter.drawText(rect, Qt.AlignHCenter | Qt.AlignVCenter, label)
+
+
+def _scale_thumb(pix):
+    """Scale a decoded frame to the filmstrip's fixed strip height, once.
+
+    Aspect ratio is preserved (no crop/stretch — pier cameras vary in shape),
+    only the height is pinned to _STRIP_H. Done once at insertion (not per
+    paintEvent) so the retained pixmap is the small on-screen size, not a
+    full ~2MB ARGB decode, and painting never re-resamples.
+    """
+    return pix.scaledToHeight(_STRIP_H, Qt.SmoothTransformation)
 
 
 def _pin_tooltip(event):

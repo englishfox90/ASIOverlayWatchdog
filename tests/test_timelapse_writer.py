@@ -151,6 +151,7 @@ def test_persistent_crash_does_not_spawn_video_per_frame(crash_writer):
 
     for _ in range(20):
         writer.add_frame(img)
+        writer.flush()  # frames are processed on the pump's worker thread
 
     # One start attempt; every subsequent frame is blocked by the backoff.
     assert len(popen_calls) == 1
@@ -166,12 +167,14 @@ def test_backoff_expiry_allows_one_retry(crash_writer):
 
     for _ in range(5):
         writer.add_frame(img)
+        writer.flush()
     assert len(popen_calls) == 1
 
     # Advance the clock past the first backoff (base = 15s).
     _Clock._now = _Clock._now + timedelta(seconds=writer._RESTART_BACKOFF_BASE + 1)
     for _ in range(5):
         writer.add_frame(img)
+        writer.flush()
 
     assert len(popen_calls) == 2  # one retry, then blocked again with longer backoff
 
@@ -183,10 +186,12 @@ def test_orphan_file_removed_on_failed_start(crash_writer):
     img = _frame()
 
     writer.add_frame(img)           # starts ffmpeg, which writes its orphan header
+    writer.flush()
     created = popen_calls[0]
     assert os.path.exists(created)  # the fake ffmpeg created it
 
     writer.add_frame(img)           # detects the crash → cleans up the orphan
+    writer.flush()
     assert not os.path.exists(created)
 
 
@@ -199,6 +204,7 @@ def test_unexpected_exit_logs_ffmpeg_stderr(crash_writer, monkeypatch):
 
     img = _frame()
     writer.add_frame(img)  # start (spawns stderr drain thread)
+    writer.flush()
 
     # Give the daemon drain thread a moment to consume the fake stderr line.
     for _ in range(50):
@@ -207,6 +213,7 @@ def test_unexpected_exit_logs_ffmpeg_stderr(crash_writer, monkeypatch):
         time.sleep(0.01)
 
     writer.add_frame(img)  # detect crash → should log the captured stderr
+    writer.flush()
 
     assert any('height not divisible by 2' in m for m in errors), errors
 
@@ -356,6 +363,7 @@ def test_broken_pipe_reaps_and_applies_backoff(monkeypatch, temp_dir):
 
     for _ in range(20):
         writer.add_frame(img)
+        writer.flush()
 
     assert len(popen_calls) == 1            # exactly one start, then backoff
     # The reap now runs off the lock on a background thread — poll for it.
@@ -399,6 +407,10 @@ def test_stop_races_add_frame(monkeypatch, temp_dir):
     writer.stop()
     stop_evt.set()
     t.join(timeout=2)
+    # Quiesce the pump: frames fed after stop() returned (the flag is scoped)
+    # are still being processed asynchronously and could start a session while
+    # the temp_dir fixture is tearing down.
+    writer.flush()
 
     assert not errors, errors
     # The scoped shutdown flag means the writer is reusable, so a final live
@@ -417,7 +429,8 @@ def test_writer_is_reusable_after_stop(monkeypatch, temp_dir):
         monkeypatch, temp_dir, _HealthyProcess, datetime(2026, 1, 1, 22, 0, 0))
     img = _frame()
 
-    assert writer.add_frame(img) is True       # session 1 records
+    assert writer.add_frame(img) is True       # session 1 accepted for processing
+    writer.flush()
     assert len(popen_calls) == 1
 
     writer.stop()
@@ -426,6 +439,7 @@ def test_writer_is_reusable_after_stop(monkeypatch, temp_dir):
     # Fresh capture session — must record again, not be silently dead.
     writer.configure({'enabled': True, 'window_mode': 'always', 'output_dir': temp_dir})
     assert writer.add_frame(img) is True
+    writer.flush()
     assert len(popen_calls) == 2
 
 
@@ -450,6 +464,101 @@ def test_out_of_window_skips_rgb_conversion(monkeypatch, temp_dir):
     assert writer.add_frame(_SpyImage()) is False
     assert converted == []                     # conversion skipped entirely
     assert popen_calls == []                    # no session started
+
+
+def test_add_frame_does_not_block_on_a_held_lock(monkeypatch, temp_dir):
+    """GUI-thread safety: if the pump worker is wedged inside self._lock (a
+    blocking write to a hung ffmpeg), add_frame must drop the frame after a
+    bounded wait instead of parking the caller on lock acquisition —
+    otherwise the original event-loop hang comes back one step removed."""
+    from datetime import datetime
+    writer, popen_calls, procs = _wire_writer(
+        monkeypatch, temp_dir, _HealthyProcess, datetime(2026, 1, 1, 22, 0, 0))
+    img = _frame()
+
+    writer._lock.acquire()   # simulate the worker wedged inside the lock
+    try:
+        t0 = time.perf_counter()
+        result = writer.add_frame(img)
+        elapsed = time.perf_counter() - t0
+    finally:
+        writer._lock.release()
+
+    assert result is False
+    assert elapsed < 1.0, elapsed
+    assert popen_calls == []                   # frame dropped, nothing enqueued
+
+
+def test_backoff_window_skips_rgb_conversion(crash_writer):
+    """Mirrors test_out_of_window_skips_rgb_conversion for the OTHER cheap
+    gate: during crash-loop backoff, add_frame must reject BEFORE the image
+    ever reaches the pump — not just before the worker converts it."""
+    writer, popen_calls, _ = crash_writer
+
+    writer.add_frame(_frame())   # starts ffmpeg, which crashes immediately
+    writer.flush()
+    writer.add_frame(_frame())   # next frame detects the crash → enters backoff
+    writer.flush()
+    assert writer._restart_blocked_until is not None   # now in backoff
+
+    converted = []
+
+    class _SpyImage:
+        width = 640
+        height = 480
+
+        def convert(self, mode):
+            converted.append(mode)
+            raise AssertionError("convert must not run during backoff")
+
+    assert writer.add_frame(_SpyImage()) is False
+    writer.flush()
+    assert converted == []                # conversion skipped entirely
+    assert len(popen_calls) == 1          # no new start attempted during backoff
+
+
+def test_missing_ffmpeg_does_not_reprobe_within_cooldown(monkeypatch, temp_dir):
+    """#3 efficiency — with ffmpeg absent, every in-window frame used to
+    re-probe (shutil.which + a winget glob + a subprocess spawn) and log a
+    WARNING every single frame. The cooldown must collapse both to one probe
+    and one warning per window, then allow exactly one more once it elapses."""
+    from datetime import datetime, timedelta
+
+    monkeypatch.setattr(_Clock, '_now', datetime(2026, 1, 1, 22, 0, 0), raising=False)
+
+    class FakeDatetime(datetime):
+        pass
+    monkeypatch.setattr(FakeDatetime, 'now', staticmethod(lambda tz=None: _Clock._now))
+    monkeypatch.setattr(tw_mod, 'datetime', FakeDatetime)
+
+    probe_calls = []
+
+    def fake_probe():
+        probe_calls.append(1)
+        return False
+    monkeypatch.setattr(tw_mod, 'is_ffmpeg_available', fake_probe)
+
+    warnings = []
+    monkeypatch.setattr(tw_mod.app_logger, 'warning', lambda msg: warnings.append(msg))
+
+    writer = TimelapseWriter()
+    writer.configure({'enabled': True, 'window_mode': 'always', 'output_dir': temp_dir})
+    img = _frame()
+
+    for _ in range(5):
+        writer.add_frame(img)
+        writer.flush()
+
+    assert len(probe_calls) == 1
+    assert len(warnings) == 1
+
+    # Advance past the cooldown — exactly one more probe/warning is allowed.
+    _Clock._now = _Clock._now + timedelta(seconds=writer._FFMPEG_PROBE_COOLDOWN + 1)
+    writer.add_frame(img)
+    writer.flush()
+
+    assert len(probe_calls) == 2
+    assert len(warnings) == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -491,13 +600,15 @@ def test_resolution_change_finalizes_off_thread(monkeypatch, temp_dir):
     big = Image.new('RGB', (800, 600), (10, 10, 10))
 
     writer.add_frame(small)                 # start session #1
+    writer.flush()
     assert len(procs) == 1
 
     t0 = time.perf_counter()
     writer.add_frame(big)                    # resolution change → finalize #1 off-thread
+    writer.flush()                           # wait for the pump worker's detach+restart
     elapsed = time.perf_counter() - t0
 
-    assert elapsed < 0.3, elapsed            # did NOT block on the 0.5s wait
+    assert elapsed < 0.3, elapsed            # pump worker did NOT block on the 0.5s wait
     assert len(procs) == 2                   # new session started promptly
 
     time.sleep(0.7)                          # let the background finalizer run
@@ -556,9 +667,11 @@ def test_orphan_removed_for_short_stub(monkeypatch, temp_dir):
 
     for _ in range(3):
         writer.add_frame(img)               # 3 frames written
+        writer.flush()
     created = popen_calls[0]
     assert os.path.exists(created)
 
     writer.add_frame(img)                    # poll() now reports exit → cleanup
+    writer.flush()
     assert not os.path.exists(created)
     assert writer._restart_failures == 1

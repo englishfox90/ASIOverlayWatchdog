@@ -46,6 +46,7 @@ class HeadlessRunner:
         self._last_error = None          # Most recent capture error (for /status health)
         self._last_webserver_retry = 0.0  # Throttles web-server bind re-attempts
         self._shutdown_event = threading.Event()
+        self._auto_stop_timer = None
         
         # Register signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -95,8 +96,12 @@ class HeadlessRunner:
             
             if self.auto_stop and self.auto_stop > 0:
                 self._log(f"Auto-stop scheduled in {self.auto_stop} seconds")
-                # Schedule auto-stop
-                threading.Timer(self.auto_stop, self.stop).start()
+                # Schedule auto-stop. Keep the reference and daemonize it: an
+                # un-cancelled, non-daemon Timer otherwise blocks interpreter
+                # exit on an early Ctrl+C for up to the remaining duration.
+                self._auto_stop_timer = threading.Timer(self.auto_stop, self.stop)
+                self._auto_stop_timer.daemon = True
+                self._auto_stop_timer.start()
             else:
                 self._log("Running until Ctrl+C or kill signal...")
             
@@ -113,10 +118,13 @@ class HeadlessRunner:
             self._cleanup()
     
     def stop(self):
-        """Stop headless capture"""
+        """Stop headless capture. Idempotent — safe to call from both the
+        signal handler and the auto-stop Timer (or either one twice)."""
         self._log("Stopping capture...")
         self.running = False
         self._shutdown_event.set()
+        if self._auto_stop_timer is not None:
+            self._auto_stop_timer.cancel()
     
     def _load_config(self):
         """Load and validate configuration"""

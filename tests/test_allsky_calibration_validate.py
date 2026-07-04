@@ -439,6 +439,102 @@ class TestValidatePole:
 
 
 # ===================================================================
+# validate_pole — cross-resolution rescale (ALLSKY_POLE_ANCHOR_PLAN P1)
+#
+# Manual ("Calibrate Now") and guided calibration fit their model against
+# the pre-resize raw cached frame, while the background service's pole
+# estimate comes from the buffer it accumulates from — fed the post-resize
+# preview image whenever resize_percent < 100. Comparing
+# model.altaz_to_pixel() (raw-frame pixels) against pole.x/y (resized-frame
+# pixels) with no rescale made a correct model look ~900px off against a
+# ~70px tolerance and permanently blocked calibration on such rigs.
+# ===================================================================
+
+class TestValidatePoleCrossResolution:
+    LAT = 38.9717
+    _RAW_W = 3552
+    _RAW_H = 3552
+
+    def test_correct_model_passes_pole_measured_on_resized_frame(self):
+        """A model calibrated at raw resolution must still pass when the pole
+        was measured on a 50%-resized buffer frame — the model is rescaled
+        into the pole's frame before comparison."""
+        model = _reference_model()
+        model.image_width = self._RAW_W
+        model.image_height = self._RAW_H
+
+        half_pole = _pole(x=1718.0 * 0.5, y=646.0 * 0.5)
+        ok, msg = validate_pole(
+            model, self.LAT, half_pole, sky_r=1563.0 * 0.5,
+            pole_image_width=self._RAW_W // 2, pole_image_height=self._RAW_H // 2,
+        )
+        assert ok, msg
+
+    def test_correct_model_fails_without_rescale(self):
+        """Sanity check that the scenario above actually exercises the fix:
+        the same model/pole pair, compared with NO resolution info (the old
+        behaviour), must fail — proving the pass above comes from the
+        rescale, not from generous tolerance."""
+        model = _reference_model()
+        model.image_width = self._RAW_W
+        model.image_height = self._RAW_H
+
+        half_pole = _pole(x=1718.0 * 0.5, y=646.0 * 0.5)
+        ok, msg = validate_pole(model, self.LAT, half_pole, sky_r=1563.0 * 0.5)
+        assert not ok, (
+            "expected the unscaled (buggy) comparison to fail — if it now "
+            "passes, the cross-resolution scenario is no longer meaningful"
+        )
+
+    def test_wrong_basin_model_still_rejected_across_resolutions(self):
+        """The rescale must not weaken the gate: a wrong-basin fit still
+        misses the pole by far more than tolerance after being correctly
+        scaled into the pole's (resized) frame."""
+        m = FisheyeModel(
+            cx=1154.452083684348, cy=1322.8234646056446,
+            a1=_INCIDENT_A1, a3=19.99999999975631,
+            a5=-12.349397496767505, roll=-0.20656450436385085,
+            axis_alt=78.18606880664784, axis_az=12.576781341950102,
+            east_left=True, image_width=2628, image_height=2628,
+        )
+        half_pole = _pole(x=1718.0 * 0.5, y=646.0 * 0.5)
+        ok, msg = validate_pole(
+            m, self.LAT, half_pole, sky_r=1563.0 * 0.5,
+            pole_image_width=1314, pole_image_height=1314,
+        )
+        assert not ok
+        assert 'measured position' in msg
+
+    def test_missing_resolution_keeps_old_unscaled_behaviour(self):
+        """When either side's resolution is unknown, the comparison must be
+        the old unscaled one — never guess at a scale factor."""
+        model = _reference_model()
+        model.image_width = self._RAW_W
+        model.image_height = self._RAW_H
+
+        # pole_image_width/height omitted -> no rescale, matches
+        # test_known_good_model_passes_measured_pole (same-resolution case).
+        ok, msg = validate_pole(model, self.LAT, _pole(), sky_r=1563.0)
+        assert ok, msg
+
+    def test_aspect_ratio_mismatch_skips_rescale(self):
+        """A cropped (not resized) frame can't be rescaled by one factor —
+        the gate must fall back to the unscaled comparison rather than
+        silently distort the model."""
+        model = _reference_model()
+        model.image_width = self._RAW_W
+        model.image_height = self._RAW_H
+
+        ok, msg = validate_pole(
+            model, self.LAT, _pole(), sky_r=1563.0,
+            pole_image_width=1200, pole_image_height=3552,  # cropped, not resized
+        )
+        # Same outcome as the no-metadata case: unscaled comparison.
+        ok_baseline, _ = validate_pole(model, self.LAT, _pole(), sky_r=1563.0)
+        assert ok == ok_baseline
+
+
+# ===================================================================
 # warn_sky_coverage (smoke test — just make sure it doesn't raise)
 # ===================================================================
 

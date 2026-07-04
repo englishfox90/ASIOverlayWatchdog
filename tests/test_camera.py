@@ -712,9 +712,18 @@ class TestResolveCameraIndexRefusesToSwap:
         ctrl = self._build_controller()
         # Pretend the user's saved camera is ASI676MC but only the ASI462MM
         # is on the bus. The controller MUST raise — not connect to ASI462MM.
-        with patch('zwoasi.init'), \
-                patch('zwoasi.get_num_cameras', return_value=1), \
-                patch('zwoasi.list_cameras', return_value=['ZWO ASI462MM']), \
+        # The real zwoasi package runs init() at import time (see its
+        # __init__.py bottom: `try: init() except ZWO_Error: ...`) and on a
+        # machine where find_library() resolves to something LoadLibrary
+        # can't open, that raises OSError/FileNotFoundError instead of the
+        # caught ZWO_Error — crashing collection. Inject a fake module into
+        # sys.modules instead (same technique test_frame_buffers.py uses for
+        # optional cv2) so `import zwoasi as asi` in the resolver never
+        # touches the real package.
+        fake_asi = MagicMock()
+        fake_asi.get_num_cameras.return_value = 1
+        fake_asi.list_cameras.return_value = ['ZWO ASI462MM']
+        with patch.dict(sys.modules, {'zwoasi': fake_asi}), \
                 patch('os.path.exists', return_value=True):
             with pytest.raises(Exception, match="ZWO ASI676MC.*not found"):
                 ctrl._resolve_camera_index(
@@ -726,10 +735,10 @@ class TestResolveCameraIndexRefusesToSwap:
     def test_found_saved_camera_still_works(self):
         """Regression guard: the no-swap fix mustn't break the happy path."""
         ctrl = self._build_controller()
-        with patch('zwoasi.init'), \
-                patch('zwoasi.get_num_cameras', return_value=2), \
-                patch('zwoasi.list_cameras',
-                      return_value=['ZWO ASI676MC', 'ZWO ASI462MM']), \
+        fake_asi = MagicMock()
+        fake_asi.get_num_cameras.return_value = 2
+        fake_asi.list_cameras.return_value = ['ZWO ASI676MC', 'ZWO ASI462MM']
+        with patch.dict(sys.modules, {'zwoasi': fake_asi}), \
                 patch('os.path.exists', return_value=True):
             idx = ctrl._resolve_camera_index(
                 sdk_path='fake.dll',

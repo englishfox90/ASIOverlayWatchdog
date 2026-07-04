@@ -422,6 +422,81 @@ class TestGuidedCalibration:
         assert m.rms_residual < 3.0, f"RMS {m.rms_residual:.1f}px"
         assert abs(m.a1 - 643.0) < 25
 
+    def test_min_anchors_matches_fisheye_model_floor(self):
+        """Regression guard: MIN_ANCHORS must never sit below
+        FisheyeModel.is_valid()'s n_matches floor. A guided solve that clears
+        MIN_ANCHORS but not is_valid() gets saved to disk, reported as a
+        success ('Calibrated: N stars'), yet the overlay never renders and
+        the panel reads 'Not calibrated' after a restart — exactly the
+        2026-07 field bug this constant fixes."""
+        from services.allsky.guided_calibration import MIN_ANCHORS
+        probe = FisheyeModel(n_matches=MIN_ANCHORS, a1=1.0)
+        assert probe.is_valid(), (
+            f"MIN_ANCHORS={MIN_ANCHORS} produces a model FisheyeModel.is_valid() "
+            "rejects — raise MIN_ANCHORS to match fisheye.py's floor"
+        )
+        probe_below = FisheyeModel(n_matches=MIN_ANCHORS - 1, a1=1.0)
+        assert not probe_below.is_valid()
+
+    def test_bad_anchor_among_five_refuses_four_anchor_rescue(self):
+        """One bad anchor among exactly five (the new minimum) must not
+        rescue down to four: FisheyeModel.is_valid() requires n_matches >= 5,
+        so a 4-anchor rescue used to produce a model that reported success
+        but silently failed to render and read back as 'Not calibrated'
+        after restart. With five anchors the rescue path must not even be
+        attempted (see the `len(anchors) > MIN_ANCHORS` guard in
+        calibrate_from_anchors) — the solve must fail loudly instead."""
+        pytest.importorskip('scipy')
+        from datetime import datetime, timezone
+        from services.allsky.guided_calibration import calibrate_from_anchors
+        from services.allsky.calibration import CalibrationError
+
+        true_model = self._true_model()
+        lat, lon = 31.33, -100.46
+        dt = datetime(2026, 6, 22, 6, 0, tzinfo=timezone.utc)
+        base = self._anchors(true_model, lat, lon, dt, n=5)
+        named = [(x, y, ra, dec, f"Star{i}") for i, (x, y, ra, dec)
+                 in enumerate(base)]
+        # Corrupt one click by 200px — the same magnitude that a 6-anchor
+        # set successfully rescues in test_bad_anchor_excluded_and_named.
+        x, y, ra, dec, name = named[2]
+        named[2] = (x + 200.0, y, ra, dec, name)
+
+        with pytest.raises(CalibrationError) as exc:
+            calibrate_from_anchors(named, lat, lon, dt, 1137.0, 1306.0, 968.0)
+        assert "px" in str(exc.value)
+
+    def test_rescue_never_returns_fewer_than_five_used_anchors(self):
+        """Two bad anchors among seven: pair-exclusion rescue may drop to
+        five (the floor) but never below it. Whatever model comes back must
+        satisfy FisheyeModel.is_valid()."""
+        pytest.importorskip('scipy')
+        from datetime import datetime, timezone
+        from services.allsky.guided_calibration import calibrate_from_anchors
+        from services.allsky.calibration import CalibrationError
+
+        true_model = self._true_model()
+        lat, lon = 31.33, -100.46
+        dt = datetime(2026, 6, 22, 6, 0, tzinfo=timezone.utc)
+        base = self._anchors(true_model, lat, lon, dt, n=7)
+        named = [(x, y, ra, dec, f"Star{i}") for i, (x, y, ra, dec)
+                 in enumerate(base)]
+        x, y, ra, dec, name = named[1]
+        named[1] = (x + 300.0, y - 250.0, ra, dec, name)
+        x, y, ra, dec, name = named[4]
+        named[4] = (x - 280.0, y + 320.0, ra, dec, name)
+
+        try:
+            m = calibrate_from_anchors(named, lat, lon, dt, 1137.0, 1306.0, 968.0)
+        except CalibrationError:
+            # Failing loudly is also an acceptable outcome — the only thing
+            # that must never happen is a saved model below the anchor floor.
+            return
+        assert m.n_matches >= 5, (
+            f"rescue returned n_matches={m.n_matches} below the 5-anchor floor"
+        )
+        assert m.is_valid()
+
 
 class TestFitSeedFeasibility:
     """A grid/triangle hypothesis can seed _iterative_fit outside its bounds

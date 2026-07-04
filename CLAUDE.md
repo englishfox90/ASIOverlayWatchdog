@@ -51,7 +51,7 @@ PFRSentinel/
 ├── installer/                  # Inno Setup packaging
 ├── main.py                     # Entry point
 ├── app_config.py               # %APPDATA%\PFRSentinel path resolver, handles migration
-└── version.py                  # VERSION, BUILD_DATE
+└── version.py                  # __version__
 ```
 
 ## Architecture patterns

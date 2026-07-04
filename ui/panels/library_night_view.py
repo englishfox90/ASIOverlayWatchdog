@@ -59,6 +59,8 @@ class NightView(QWidget):
         self._speed = _SPEEDS[0]
         self._pending_hero_id = None
         self._live_edge_id = None  # frame whose hero bytes also feed the filmstrip
+        self._loading = False      # True between begin_load() and set_frames()
+        self._pending_live = {}    # id -> record archived while _loading (replayed after)
 
         self._timer = QTimer(self)
         self._timer.setInterval(_TICK_MS)
@@ -248,6 +250,8 @@ class NightView(QWidget):
         self._id_index = {}
         self._meteors = []
         self._live_edge_id = None
+        self._loading = True
+        self._pending_live = {}
         self.title_label.setText(f"Night · {session.get('key', '')}")
         self._update_issue_badge(session)
         self.hero_image.setText("Loading night…")
@@ -259,12 +263,19 @@ class NightView(QWidget):
         if payload.get("session") is not self._session and \
                 payload.get("session", {}).get("key") != (self._session or {}).get("key"):
             return  # a newer night was opened before this load returned
+        self._loading = False
         self._frames = payload.get("frames", [])
         self._id_index = {row["id"]: i for i, row in enumerate(self._frames)}
         self._meteors = payload.get("meteors", [])
 
         if not self._frames:
             self.hero_image.setText("No frames archived for this night.")
+            # Frames can be pruned between listing and clicking the card. Clear
+            # the previous night's filmstrip/band/pins and event list rather
+            # than leaving them visible and interactive over an empty night.
+            self.scrubber.set_data([], [], [])
+            self._render_event_list([])
+            self._pending_live = {}
             return
 
         events = E.build_timeline(
@@ -273,21 +284,43 @@ class NightView(QWidget):
         self.scrubber.set_data(self._frames, payload.get("filmstrip", []), events)
         self._render_event_list(events)
         self._on_index_changed(self.scrubber.current_index())
+        self._flush_pending_live()
+
+    def _flush_pending_live(self):
+        """Replay frames archived while this night's load was in flight.
+
+        ``append_frame`` buffers into ``_pending_live`` while ``_loading`` is
+        True (begin_load cleared ``_frames``, so appending directly would be
+        dropped by the empty-frames guard). Replay oldest-first, deduped
+        against what the load itself already picked up.
+        """
+        pending, self._pending_live = self._pending_live, {}
+        for record in sorted(pending.values(), key=lambda r: r.get("captured_at", 0)):
+            if record.get("id") not in self._id_index:
+                self.append_frame(record)
 
     def append_frame(self, record):
         """Add a just-archived frame to the open night, live.
 
-        No-op unless a night is loaded and the frame belongs to it. If the
+        No-op unless a night is open and the frame belongs to it. If a load is
+        in flight (``begin_load`` cleared ``_frames``), buffer instead of
+        dropping — ``set_frames`` replays the buffer once the load lands, so a
+        frame archived in that window isn't silently lost. Once loaded: if the
         playhead is parked on the last frame (and not playing) it follows the
         live edge onto the new frame; otherwise the timeline simply grows under
         a stationary playhead so a user mid-scrub isn't yanked away.
         """
-        if self._session is None or not self._frames:
+        if self._session is None:
             return
         if S.night_key(record.get("captured_at", 0)) != self._session.get("key"):
             return
         rid = record.get("id")
-        if rid is None or rid in self._id_index:
+        if rid is None:
+            return
+        if self._loading:
+            self._pending_live[rid] = record
+            return
+        if not self._frames or rid in self._id_index:
             return
 
         following = (not self._timer.isActive() and

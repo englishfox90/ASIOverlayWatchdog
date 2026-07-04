@@ -20,6 +20,11 @@ try:
 except ImportError:
     ASTROPY_AVAILABLE = False
 
+try:
+    from ml.image_preprocess import resize_for_model
+except ImportError:  # run as a script: ml/ is on path, not the project root
+    from image_preprocess import resize_for_model
+
 
 # Sky condition classes. Collapsed from the original 5-class scheme to 3: the
 # open-roof pier set is overwhelmingly "Clear" (you only image on clear nights),
@@ -187,14 +192,6 @@ class SkyDataset(Dataset):
         image = np.arcsinh(image * stretch) / np.arcsinh(stretch)
 
         # Resize using block averaging
-        image = self.resize_image(image, self.image_size)
+        image = resize_for_model(image, self.image_size)
 
         return image.astype(np.float32)
-
-    def resize_image(self, img: np.ndarray, size: int) -> np.ndarray:
-        """Center-crop to square then block-average (shared with inference)."""
-        try:
-            from ml.image_preprocess import resize_for_model
-        except ImportError:  # run as a script: ml/ is on path, not the project root
-            from image_preprocess import resize_for_model
-        return resize_for_model(img, size)

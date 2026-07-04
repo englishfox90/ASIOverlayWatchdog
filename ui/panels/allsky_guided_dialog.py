@@ -23,6 +23,7 @@ from qfluentwidgets import (
 )
 
 from ..theme.tokens import Spacing
+from services.allsky.guided_calibration import MIN_ANCHORS
 
 # Snap radius within which a click locks onto a detected star. Expressed as a
 # fraction of the sky radius so it stays a constant *display* distance at any
@@ -192,8 +193,9 @@ class GuidedCalibrationDialog(QDialog):
         self._hint = BodyLabel(
             "Hover to magnify. Click a bright star (snaps to the nearest "
             "detected star), choose which star it is, then Add. Identify at "
-            "least 4 — 5 or more, spread across the sky, solves best — then "
-            "Solve.")
+            "least 5, spread across the sky — 6 or more lets the solver "
+            "recover automatically if one turns out to be misidentified — "
+            "then Solve.")
         self._hint.setWordWrap(True)
         side.addWidget(self._hint)
 
@@ -337,5 +339,6 @@ class GuidedCalibrationDialog(QDialog):
         markers = [(a['px'], a['py'], a['name']) for a in self._anchors]
         self._img.set_markers(markers, self._pending)
         n = len(self._anchors)
-        self._solve_btn.setEnabled(n >= 4)
-        self._solve_btn.setText(f"Solve ({n}/4)" if n < 4 else f"Solve ({n} stars)")
+        self._solve_btn.setEnabled(n >= MIN_ANCHORS)
+        self._solve_btn.setText(
+            f"Solve ({n}/{MIN_ANCHORS})" if n < MIN_ANCHORS else f"Solve ({n} stars)")

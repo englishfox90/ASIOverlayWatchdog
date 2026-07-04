@@ -102,8 +102,6 @@ def median_sky_r(frames) -> float:
     return float(np.median(rs)) if rs else 0.0
 
 
-_median_sky_r = median_sky_r  # re-exported for existing callers
-
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -154,7 +152,7 @@ def _coarse_orientation_candidates(
 
     cx = float(np.median([f.get('sky_cx', 0.0) for f in sample]))
     cy = float(np.median([f.get('sky_cy', 0.0) for f in sample]))
-    sky_r = _median_sky_r(sample)
+    sky_r = median_sky_r(sample)
     a1 = a1_from_sky_radius(sky_r) if sky_r else 600.0
     # Generous tolerance: coarse grid points (5° alt / 15° roll apart) place
     # stars only approximately, so matching must be forgiving to score the
@@ -300,7 +298,7 @@ def _fit_and_validate(
     max_residual_px: float,
 ) -> FisheyeModel:
     """Joint-fit from a seed and enforce the residual + sanity gates."""
-    _ts = tol_scale(_median_sky_r(frames))
+    _ts = tol_scale(median_sky_r(frames))
     all_matches = _build_all_matches(frames, seed_model, tol_px=50.0 * _ts,
                                      min_per_image=min_matches_per_image)
     total = sum(len(m) for m in all_matches)
@@ -342,7 +340,7 @@ def _fit_and_validate(
     # real sky. Guard with lens-polynomial physics + plate-scale consistency
     # + bright-anchor hit rate on the most recent frames.
     poly_ok, poly_msg = validate_lens_polynomial(model)
-    scale_ok, scale_msg = validate_a1_scale(model, _median_sky_r(frames))
+    scale_ok, scale_msg = validate_a1_scale(model, median_sky_r(frames))
 
     # Validate bright anchors on the 3 most recent frames — require majority
     # (at least 2 of 3) to pass. Single-frame validation was fragile: one
@@ -462,7 +460,7 @@ def multi_calibrate(
     # ------------------------------------------------------------------
     # Step 3: Initial matching for all frames using the seed model
     # ------------------------------------------------------------------
-    _ts = tol_scale(_median_sky_r(frames))
+    _ts = tol_scale(median_sky_r(frames))
     all_matches = _build_all_matches(frames, seed_model, tol_px=50.0 * _ts,
                                      min_per_image=min_matches_per_image)
     total = sum(len(m) for m in all_matches)

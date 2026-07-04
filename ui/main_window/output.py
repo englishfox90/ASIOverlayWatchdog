@@ -543,11 +543,18 @@ class _MainWindowOutputMixin:
         # describing the same frame on bursts (W9).
         push_metadata = metadata if metadata is not None else getattr(self, 'preview_metadata', None)
 
+        # Snapshot to a local: this runs on the OutputDispatch worker thread
+        # while the GUI thread's _stop_web_server() can set self.web_server to
+        # None at any point. Binding once here (mirrors web_output's
+        # _serve_image) closes the check-then-use race between the "running"
+        # check and update_image() below.
+        web_server = self.web_server
+
         # Web and Discord are independent sinks — keep them in separate
         # try/except blocks so a failed web encode/push can't skip the Discord
         # post (and vice-versa) (W7).
         try:
-            if self.web_server and self.web_server.running:
+            if web_server and web_server.running:
                 img_bytes = io.BytesIO()
 
                 output_config = self.config.get('output', {})
@@ -561,7 +568,7 @@ class _MainWindowOutputMixin:
                     processed_img.save(img_bytes, format='PNG', optimize=True)
                     content_type = 'image/png'
 
-                self.web_server.update_image(
+                web_server.update_image(
                     image_path,
                     img_bytes.getvalue(),
                     metadata=push_metadata,

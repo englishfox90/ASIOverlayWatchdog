@@ -18,6 +18,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from services.logger import app_logger
+
 # Check for ONNX runtime (lightweight inference)
 try:
     import onnxruntime as ort
@@ -32,6 +34,11 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+try:
+    from ml.image_preprocess import resize_for_model
+except ImportError:  # run as a script: ml/ is on path, not the project root
+    from image_preprocess import resize_for_model
 
 
 @dataclass
@@ -172,8 +179,9 @@ class RoofClassifier:
             
             self.model = ort.InferenceSession(str(self.model_path))
             self.model_type = 'onnx'
-            print(f"Loaded ONNX model from: {self.model_path}")
-            
+            app_logger.info(f"Loaded ONNX model from: {self.model_path}")
+
+
         elif suffix == '.pth':
             if not TORCH_AVAILABLE:
                 raise ImportError("PyTorch not installed. Run: pip install torch")
@@ -184,8 +192,9 @@ class RoofClassifier:
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.model.eval()
             self.model_type = 'pytorch'
-            print(f"Loaded PyTorch model from: {self.model_path}")
-            
+            app_logger.info(f"Loaded PyTorch model from: {self.model_path}")
+
+
         else:
             raise ValueError(f"Unsupported model format: {suffix}")
     
@@ -225,8 +234,8 @@ class RoofClassifier:
         image = image.astype(np.float32)
         
         # Resize
-        image = self._resize_image(image, self.image_size)
-        
+        image = resize_for_model(image, self.image_size)
+
         # Normalize to [0, 1]
         p1, p99 = np.percentile(image, [1, 99])
         if p99 > p1:
@@ -237,16 +246,8 @@ class RoofClassifier:
         image = image[np.newaxis, np.newaxis, :, :]
         
         return image
-    
-    def _resize_image(self, img: np.ndarray, size: int) -> np.ndarray:
-        """Center-crop to square then block-average (shared with training)."""
-        try:
-            from ml.image_preprocess import resize_for_model
-        except ImportError:  # run as a script: ml/ is on path, not the project root
-            from image_preprocess import resize_for_model
-        return resize_for_model(img, size)
-    
-    def extract_metadata(self, image: np.ndarray, 
+
+    def extract_metadata(self, image: np.ndarray,
                          is_astronomical_night: bool = None,
                          hour: int = None) -> np.ndarray:
         """

@@ -145,15 +145,19 @@ class _MainWindowLifecycleMixin:
             except Exception:
                 pass
 
-        if self.image_library:
-            try:
-                self.image_library.stop()
-            except Exception:
-                pass
-
+        # Controller first: its worker threads read via image_library, so
+        # joining them before the library closes its SQLite connection avoids
+        # an in-flight read hitting a closed DB (sqlite3.ProgrammingError on
+        # a background thread, reported as an unhandled crash).
         if self.library_controller:
             try:
                 self.library_controller.shutdown()
+            except Exception:
+                pass
+
+        if self.image_library:
+            try:
+                self.image_library.stop()
             except Exception:
                 pass
 

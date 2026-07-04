@@ -35,6 +35,11 @@ except ImportError:
     sys.exit(1)
 
 try:
+    from ml.image_preprocess import resize_for_model
+except ImportError:  # run as a script: ml/ is on path, not the project root
+    from image_preprocess import resize_for_model
+
+try:
     from astropy.io import fits
     ASTROPY_AVAILABLE = True
 except ImportError:
@@ -121,21 +126,14 @@ class RoofDataset(Dataset):
             
             # Resize using simple averaging
             data = data.astype(np.float32)
-            data = self.resize_image(data, self.image_size)
-            
+            data = resize_for_model(data, self.image_size)
+
             return data
         except Exception as e:
             print(f"Warning: Failed to load {fits_path}: {e}")
             return np.zeros((self.image_size, self.image_size), dtype=np.float32)
-    
-    def resize_image(self, img: np.ndarray, size: int) -> np.ndarray:
-        """Center-crop to square then block-average (shared with inference)."""
-        try:
-            from ml.image_preprocess import resize_for_model
-        except ImportError:  # run as a script: ml/ is on path, not the project root
-            from image_preprocess import resize_for_model
-        return resize_for_model(img, size)
-    
+
+
     def normalize(self, image: np.ndarray) -> np.ndarray:
         """Normalize image to [0, 1] with percentile clipping."""
         p1, p99 = np.percentile(image, [1, 99])

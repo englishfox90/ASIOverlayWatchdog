@@ -17,6 +17,7 @@ import numpy as np
 from .logger import app_logger
 from .ffmpeg_utils import is_ffmpeg_available, get_ffmpeg_path
 from .timelapse_finalizer import finalize_session, finalize_in_background, reap_in_background
+from .timelapse_frame_pump import FramePump
 
 
 def _to_local_naive(dt: datetime) -> datetime:
@@ -52,6 +53,12 @@ class TimelapseWriter:
     # per captured frame. Frames received during the cooldown are dropped.
     _RESTART_BACKOFF_BASE = 15      # seconds before the first retry
     _RESTART_BACKOFF_CAP = 300      # seconds (5 min) ceiling
+    # How long a cached is_ffmpeg_available() result (and its "not found"
+    # warning) stays valid. With ffmpeg absent, every in-window frame used to
+    # re-probe (shutil.which + a winget glob + a subprocess spawn) and log a
+    # WARNING — thousands of times a night. A cooldown collapses that to one
+    # probe and one warning per window.
+    _FFMPEG_PROBE_COOLDOWN = 60     # seconds
 
     def __init__(self):
         self._process: Optional[subprocess.Popen] = None
@@ -67,14 +74,23 @@ class TimelapseWriter:
         self._last_enabled: bool = False               # for configure change logging
         self._stderr_thread: Optional[threading.Thread] = None
         # Last few ffmpeg stderr lines, so an unexpected exit can report the
-        # actual encoder error instead of just a numeric exit code.
+        # actual encoder error instead of just a numeric exit code. Replaced
+        # (not cleared) per session — see _start_session.
         self._stderr_tail: deque = deque(maxlen=12)
         # Crash-loop guard state.
         self._restart_failures: int = 0
         self._restart_blocked_until: Optional[datetime] = None
+        # is_ffmpeg_available() probe cache — see _FFMPEG_PROBE_COOLDOWN.
+        self._ffmpeg_available_cache: Optional[bool] = None
+        self._ffmpeg_checked_at: Optional[datetime] = None
+        self._ffmpeg_last_warned_at: Optional[datetime] = None
         # Optional callback(path, frame_count, elapsed_seconds) called after
         # each session finalizes. Set by TimelapseController for Discord posts.
         self.on_session_finished = None
+        # Conversion + session management + the blocking stdin write all run
+        # on this worker thread, off whichever thread calls add_frame() (the
+        # GUI thread, via the Qt signal chain) — see add_frame()/_process_frame().
+        self._pump = FramePump(self._process_frame, maxsize=2, name="timelapse-frame-pump")
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
@@ -90,55 +106,90 @@ class TimelapseWriter:
 
     def add_frame(self, image: Image.Image) -> bool:
         """
-        Attempt to add a frame to the current timelapse session.
+        Offer a frame to the current timelapse session.
 
-        Handles window detection, day rollover, ffmpeg startup and
-        resolution changes internally. Returns True if a frame was
-        actually written.
+        Called on the GUI thread via the Qt signal chain, so this must never
+        block: it only runs the cheap gates (config, window, crash-loop
+        backoff) and then hands the PIL image to the frame pump's worker
+        thread, which does the multi-MB RGB conversion and the blocking
+        ffmpeg stdin write. Returns True if the frame was accepted for
+        processing, not whether it was ultimately written — the old
+        "actually written" return value doesn't exist once writing is
+        asynchronous, and no caller inspects it (TimelapseController ignores
+        it; tests use flush() to await the outcome instead).
 
         All session-state mutation happens under ``self._lock``; any session
         that needs finalizing (window close, resolution change, midnight
         rollover) is detached under the lock and handed to a background
         finalizer once the lock is released, so the long ffmpeg drain never
-        stalls the frame-delivery thread and never races ``stop()``.
+        stalls the pump worker and never races ``stop()``.
         """
         if not self._config.get('enabled', False):
             return False
 
         now = datetime.now()
 
-        # Cheap gate first: the window check reads only _config, so run it BEFORE
-        # the multi-MB RGB convert + serialize. For all of daytime — and during
-        # backoff or shutdown — a captured frame must not pay for a conversion it
-        # would discard one line later. Detach a running session if the window
-        # has just closed.
+        # Cheap gates only: reads _config/_restart_blocked_until, no conversion.
+        # For all of daytime — and during backoff or shutdown — a captured
+        # frame must not even reach the worker, let alone pay for a convert it
+        # would discard. Detach a running session if the window has just closed.
+        #
+        # Bounded acquire, never `with self._lock`: the pump worker holds this
+        # lock across the blocking stdin write, so a wedged encoder (alive but
+        # not consuming, pipe buffer full) would park the GUI thread here
+        # indefinitely — the exact event-loop hang this rework removes, one
+        # step removed. A lock busy for 250ms+ means a wedged encoder or an
+        # in-progress rollover/finalize; a dropped timelapse frame is invisible.
+        if not self._lock.acquire(timeout=0.25):
+            app_logger.debug("Timelapse: writer busy (wedged encoder or finalize in progress), dropping frame")
+            return False
         pending_finalize = None
         try:
-            with self._lock:
-                if self._shutting_down:
-                    return False
-                if not self._is_in_window(now):
-                    pending_finalize = self._detach_session_locked()
-                    return False
+            if self._shutting_down:
+                return False
+            if not self._is_in_window(now):
+                pending_finalize = self._detach_session_locked()
+                return False
+            if self._restart_blocked_until and now < self._restart_blocked_until:
+                return False
         finally:
+            self._lock.release()
             self._finalize_async(pending_finalize)
 
-        # In-window: now pay for the conversion — OFF the lock, it's the heavy bit.
+        self._pump.submit(image)
+        return True
+
+    def flush(self, timeout: Optional[float] = 2.0) -> bool:
+        """Block until every frame handed to add_frame() has been processed.
+
+        Test-visible: production code never needs to await the pump. Returns
+        True if the pump drained within ``timeout`` seconds.
+        """
+        return self._pump.flush(timeout=timeout)
+
+    def _process_frame(self, image: Image.Image) -> None:
+        """Consume one frame off the pump's worker thread.
+
+        Does the RGB conversion (off ``self._lock`` — it's the heavy bit),
+        then session start/rollover, crash detection, and the blocking stdin
+        write under the lock, exactly as add_frame() used to do inline on the
+        caller's thread.
+        """
+        now = datetime.now()
         try:
             frame_size = (image.width, image.height)
             frame_bytes = np.array(image.convert('RGB'), dtype=np.uint8).tobytes()
         except Exception as e:
             app_logger.error(f"Timelapse: frame convert error: {e}")
-            return False
+            return
 
         pending_finalize = None
-        wrote = False
         try:
             with self._lock:
                 # State may have changed while the lock was released for the
                 # conversion (e.g. a concurrent stop()).
                 if self._shutting_down:
-                    return False
+                    return
 
                 # Detect unexpected ffmpeg exit and decide whether to restart.
                 if self._process is not None and self._process.poll() is not None:
@@ -157,12 +208,12 @@ class TimelapseWriter:
                     # out the backoff before trying again instead of minting one
                     # broken video file per captured frame.
                     if self._restart_blocked_until and now < self._restart_blocked_until:
-                        return False
+                        return
                     pending_finalize = self._detach_session_locked()
                     self._start_session(frame_size, now)
                 elif frame_size != self._frame_size:
                     app_logger.info(
-                        f"Timelapse: resolution changed {self._frame_size} → "
+                        f"Timelapse: resolution changed {self._frame_size} -> "
                         f"{frame_size}, restarting session"
                     )
                     pending_finalize = self._detach_session_locked()
@@ -179,7 +230,6 @@ class TimelapseWriter:
                             self._restart_blocked_until = None
                         if self._frame_count % 100 == 0:
                             app_logger.debug(f"Timelapse: {self._frame_count} frames recorded")
-                        wrote = True
                     except BrokenPipeError:
                         # The pipe broke mid-write. The old code nulled the
                         # process without kill()/wait() and skipped the backoff,
@@ -191,8 +241,6 @@ class TimelapseWriter:
             app_logger.error(f"Timelapse: add_frame error: {e}")
         finally:
             self._finalize_async(pending_finalize)
-
-        return wrote
 
     def _finalize_async(self, spec: Optional[dict]):
         """Hand a detached session to the background finalizer (no-op if None)."""
@@ -263,7 +311,7 @@ class TimelapseWriter:
         died_frames = self._frame_count
         died_path = self._session_path
         stderr_tail = " | ".join(self._stderr_tail)
-        detail = f" — ffmpeg said: {stderr_tail}" if stderr_tail else ""
+        detail = f" - ffmpeg said: {stderr_tail}" if stderr_tail else ""
         failed_start = died_frames < self._HEALTHY_FRAME_THRESHOLD
 
         if failed_start:
@@ -283,7 +331,7 @@ class TimelapseWriter:
             self._restart_blocked_until = now + timedelta(seconds=backoff)
             app_logger.error(
                 f"Timelapse: ffmpeg exited on startup (code {exit_code}, "
-                f"{died_frames} frames){detail} — retrying in {backoff}s "
+                f"{died_frames} frames){detail} - retrying in {backoff}s "
                 f"(failure #{self._restart_failures})"
             )
         else:
@@ -291,22 +339,32 @@ class TimelapseWriter:
             self._restart_blocked_until = None
             app_logger.error(
                 f"Timelapse: ffmpeg exited unexpectedly (code {exit_code}, "
-                f"{died_frames} frames){detail} — restarting session"
+                f"{died_frames} frames){detail} - restarting session"
             )
 
     def stop(self):
         """Stop any active session gracefully (capture stop OR app shutdown).
 
-        Sets the shutdown flag and detaches the session under the lock, then
-        finalizes synchronously — a stop wants to block until ffmpeg has
-        flushed the final video. The flag is scoped to the duration of this
-        call: the writer is long-lived and reused across capture sessions
-        (the controller calls stop() on every capture stop), so it must clear
-        the flag before returning or add_frame() would early-return forever and
-        no further timelapse would ever record until the app restarts.
+        Sets the shutdown flag FIRST, before touching the pump: every
+        add_frame() call after this point (including from a producer already
+        mid-flight) rejects at its cheap gate instead of enqueueing, and every
+        in-flight/queued frame's _process_frame() bails at its own
+        shutting_down check under the lock — so the pump's queue is already
+        stale busywork by the time we drain it. drain() then gives the worker
+        a bounded ~3s to finish that busywork (or a frame it was already
+        writing) and discards anything left, so a wedged encoder can never
+        hang shutdown indefinitely. Only then do we detach and finalize
+        synchronously — a stop wants to block until ffmpeg has flushed the
+        final video. The flag is scoped to the duration of this call: the
+        writer is long-lived and reused across capture sessions (the
+        controller calls stop() on every capture stop), so it must clear the
+        flag before returning or add_frame() would early-return forever and no
+        further timelapse would ever record until the app restarts.
         """
         with self._lock:
             self._shutting_down = True
+        self._pump.drain(timeout=3.0)
+        with self._lock:
             spec = self._detach_session_locked()
         try:
             if spec is not None:
@@ -343,8 +401,11 @@ class TimelapseWriter:
         Caller holds ``self._lock`` and has already detached any prior session
         via ``_detach_session_locked`` — so ``self._process`` is None here.
         """
-        if not is_ffmpeg_available():
-            app_logger.warning("Timelapse: ffmpeg not found — cannot start session")
+        if not self._ffmpeg_available_cached(now):
+            if (self._ffmpeg_last_warned_at is None or
+                    (now - self._ffmpeg_last_warned_at).total_seconds() >= self._FFMPEG_PROBE_COOLDOWN):
+                app_logger.warning("Timelapse: ffmpeg not found - cannot start session")
+                self._ffmpeg_last_warned_at = now
             return
 
         output_path = self._build_output_path(now)
@@ -354,7 +415,7 @@ class TimelapseWriter:
         crf = self._config.get('video_crf', 23)
         fps = self._config.get('playback_fps', 24)
         preset = self._config.get('video_preset', 'fast')
-        app_logger.info(f"Timelapse: starting session → {os.path.basename(output_path)}")
+        app_logger.info(f"Timelapse: starting session -> {os.path.basename(output_path)}")
         app_logger.debug(
             f"Timelapse: {frame_size[0]}x{frame_size[1]} @ {fps}fps  CRF={crf}  preset={preset}"
         )
@@ -391,10 +452,12 @@ class TimelapseWriter:
                 'frame_height': frame_size[1],
             })
 
-            # Fresh stderr ring buffer for this session — captures the encoder's
-            # last words so an unexpected exit can report the real cause.
-            self._stderr_tail.clear()
-            tail = self._stderr_tail
+            # Fresh deque per session (not .clear() on a shared one) — the
+            # previous session's _drain_stderr thread is still detached and
+            # reading its own process's stderr; if it shared this buffer, its
+            # trailing output would land in the NEW session's crash diagnostics.
+            tail = deque(maxlen=12)
+            self._stderr_tail = tail
 
             # Drain stderr in a background thread so it never blocks ffmpeg.
             # Filter out per-frame progress lines (frame=...) which ffmpeg emits
@@ -419,6 +482,19 @@ class TimelapseWriter:
             app_logger.error(f"Timelapse: failed to start ffmpeg: {e}")
             self._process = None
 
+    def _ffmpeg_available_cached(self, now: datetime) -> bool:
+        """Cache is_ffmpeg_available() for _FFMPEG_PROBE_COOLDOWN seconds.
+
+        Only called from _process_frame's session-start path (holding
+        self._lock, on the single pump worker thread), so no extra locking
+        needed here.
+        """
+        if (self._ffmpeg_checked_at is None or
+                (now - self._ffmpeg_checked_at).total_seconds() >= self._FFMPEG_PROBE_COOLDOWN):
+            self._ffmpeg_available_cache = is_ffmpeg_available()
+            self._ffmpeg_checked_at = now
+        return self._ffmpeg_available_cache
+
     # ------------------------------------------------------------------ #
     #  Window detection                                                    #
     # ------------------------------------------------------------------ #
@@ -439,7 +515,7 @@ class TimelapseWriter:
             if is_open != getattr(self, '_last_roof_open', None):
                 self._last_roof_open = is_open
                 app_logger.info(
-                    f"Timelapse [roof mode]: roof {'open — recording' if is_open else 'closed — pausing'}"
+                    f"Timelapse [roof mode]: roof {'open - recording' if is_open else 'closed - pausing'}"
                 )
             return is_open
 
@@ -457,7 +533,7 @@ class TimelapseWriter:
 
             if in_window != self._last_in_window:
                 self._last_in_window = in_window
-                w_str = (f"{window_start.strftime('%H:%M')} → "
+                w_str = (f"{window_start.strftime('%H:%M')} -> "
                          f"{window_end.strftime('%H:%M')}")
                 if in_window:
                     app_logger.info(f"Timelapse [{mode}]: entered recording window ({w_str})")

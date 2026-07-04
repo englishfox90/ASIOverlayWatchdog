@@ -4,7 +4,7 @@
 
 A modern astrophotography application with a Fluent Design UI (PySide6 + qfluentwidgets) that watches directories for new images or captures directly from ZWO ASI cameras, adding customizable metadata overlays with weather data and serving output through multiple channels.
 
-**Current Version:** 3.2.3
+**Current Version:** 3.6.8
 
 ---
 

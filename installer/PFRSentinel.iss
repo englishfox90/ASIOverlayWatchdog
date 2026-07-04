@@ -410,10 +410,13 @@ begin
   Log('PrepareToInstall: asking any running instance to exit (--shutdown)...');
   { Send quit and poll until the instance is gone (file locks released).
     --shutdown exits 0 when it signalled a live instance, 1 when none is
-    running; re-poll while it keeps reporting 0. Capped at ~10s so an old build
-    (which errors on the unknown flag, exit code <> 0) can't stall the installer. }
+    running; re-poll while it keeps reporting 0. Capped at ~100s (100 x 1s) —
+    graceful teardown can take ~75s (timelapse flush) and the shutdown watchdog
+    force-kills at 90s, so the poll must outlast the watchdog rather than
+    giving up first. An old build (which errors on the unknown flag, exit
+    code <> 0) still can't stall the installer beyond one failed attempt. }
   Tries := 0;
-  while (Tries < 10)
+  while (Tries < 100)
         and ShellExec('', ExePath, '--shutdown', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
         and (ResultCode = 0) do
   begin

@@ -34,10 +34,7 @@ class YouTubeUploadStateStore:
     # its timestamp (via ``update_progress``/``touch``) at least this often, or a
     # genuinely slow upload risks being reclaimed and started a SECOND time.
     # ``update_progress`` already stamps ``updated_at``; callers driving a long
-    # upload should ``touch(key)`` on each progress tick. NOTE: the current
-    # caller (``services/timelapse_publishers.py`` ``_progress``) only refreshes
-    # when the resumable URI changes, so a multi-hour upload could in principle
-    # trip this — fixing that requires a one-line ``touch`` there (cross-file).
+    # upload should ``touch(key)`` on each progress tick.
     STALE_IN_PROGRESS_SECONDS = 6 * 60 * 60
 
     def __init__(self, storage_dir: str | None = None):

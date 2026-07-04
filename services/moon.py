@@ -121,7 +121,7 @@ def compute_moon_context():
                     result['moonset'] = None
 
                 # Is the moon currently above the horizon?
-                local_tz_offset = time.timezone if time.daylight == 0 else time.altzone
+                local_tz_offset = time.altzone if time.localtime().tm_isdst > 0 else time.timezone
                 now_utc = now + timedelta(seconds=local_tz_offset)
                 moon_rise_naive = result.get('moonrise')
                 moon_set_naive = result.get('moonset')

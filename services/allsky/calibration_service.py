@@ -33,7 +33,7 @@ from .fisheye import FisheyeModel
 from .catalogs import get_bright_stars
 from .coords import radec_to_altaz
 from .calibration import calibrate, CalibrationError
-from .calibration_validate import validate_pole
+from .calibration_validate import median_frame_resolution, validate_pole
 from .multi_calibrate import median_sky_r, refine_from_detections
 from .pole_finder import find_pole
 
@@ -179,8 +179,10 @@ class _RefineWorker(QThread):
                 max_residual_px=MAX_RESIDUAL_PX,
                 east_left_hint=pole.east_left if pole else None,
             )
+            pole_w, pole_h = median_frame_resolution(self._frames)
             pole_ok, pole_msg = validate_pole(
-                model, self._lat, pole, sky_r=median_sky_r(self._frames))
+                model, self._lat, pole, sky_r=median_sky_r(self._frames),
+                pole_image_width=pole_w, pole_image_height=pole_h)
             if not pole_ok:
                 raise CalibrationError(f"pole check failed: {pole_msg}")
             self.finished.emit(model, self._n_images, self._span_min)
@@ -387,18 +389,29 @@ class CalibrationService(QObject):
 
         Cheap enough for the GUI thread: only the pole-relevant fields are
         copied (the per-frame catalog lists are large and not needed).
+
+        The buffer frames are fed post-resize (image_processor feeds the
+        preview-resolution frame, see ImageProcessorWorker), while manual and
+        guided calibration fit `model` against the pre-resize raw cached
+        frame — a different resolution whenever resize_percent < 100. The
+        buffer's median resolution is passed through so validate_pole can
+        rescale the model into the pole's frame before comparing pixels
+        (docs/ALLSKY_POLE_ANCHOR_PLAN.md P1); omitting it here silently
+        re-introduces the cross-resolution comparison bug.
         """
         with self._lock:
             frames = [{'dt': f['dt'], 'detected': list(f['detected']),
                        'sky_cx': f.get('sky_cx'), 'sky_cy': f.get('sky_cy'),
                        'sky_r': f.get('sky_r')} for f in self._frames]
+            pole_w, pole_h = median_frame_resolution(self._frames)
         try:
             pole = find_pole(frames, self._lat)
         except Exception as e:
             log.debug(f"Pole estimation failed (non-fatal): {e}")
             return True, "pole estimation unavailable"
         return validate_pole(model, self._lat, pole,
-                             sky_r=median_sky_r(frames))
+                             sky_r=median_sky_r(frames),
+                             pole_image_width=pole_w, pole_image_height=pole_h)
 
     @property
     def current_quality(self) -> str:

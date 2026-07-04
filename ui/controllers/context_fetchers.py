@@ -4,10 +4,10 @@ Context fetching utilities for calibration data.
 Fetches moon phase, roof state (from NINA), and weather data
 for inclusion in calibration JSON files.
 """
-from datetime import datetime, date, timedelta
-import time
+from datetime import datetime
 
 from services.logger import app_logger
+from services.config import Config
 
 # Moon math moved to services/moon.py so services can use it without importing
 # up into ui/controllers. Re-exported here for existing callers.

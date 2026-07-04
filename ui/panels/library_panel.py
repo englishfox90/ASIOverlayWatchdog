@@ -142,7 +142,12 @@ class LibraryPanel(QWidget):
             self._live_timer = QTimer(self)
             self._live_timer.setSingleShot(True)
             self._live_timer.timeout.connect(self._do_live_session_refresh)
-        self._live_timer.start(LIVE_SESSION_REFRESH_MS)
+        # Throttle, not debounce: at ~1 fps daytime cadence a restart-on-every-
+        # frame timer would never fire, leaving the visible list stale
+        # indefinitely. The first frame in a burst arms it; later frames in the
+        # same window are absorbed until it fires.
+        if not self._live_timer.isActive():
+            self._live_timer.start(LIVE_SESSION_REFRESH_MS)
 
     def _do_live_session_refresh(self):
         if self.stack.currentWidget() is self.session_list and self.isVisible():

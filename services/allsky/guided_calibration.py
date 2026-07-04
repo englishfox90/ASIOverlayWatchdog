@@ -46,8 +46,13 @@ from .calibration_validate import (
 
 # Minimum anchors. The pose has 6 free parameters here (cx/cy are fixed from the
 # sky circle), i.e. 3 anchors = 6 residuals exactly determine it; 4+ gives
-# overdetermination and a meaningful RMS. Require 4 for a trustworthy fit.
-MIN_ANCHORS = 4
+# overdetermination and a meaningful RMS. Require 5 — not 4 — because
+# FisheyeModel.is_valid() hard-requires n_matches >= 5 (fisheye.py); a 4-anchor
+# solve used to sail through this module's own checks, get saved to disk as
+# "Calibrated: 4 stars", and then read back as "Not calibrated" on the next
+# load (is_valid() rejects it, and the overlay never rendered in between
+# either). MIN_ANCHORS must never be lower than FisheyeModel's floor.
+MIN_ANCHORS = 5
 
 # With this many anchors the optical centre joins the fit (bounded near the
 # sky-circle estimate). A slightly-off circle fit otherwise puts an RMS floor
@@ -57,7 +62,10 @@ MIN_ANCHORS = 4
 # bottomed out at 27.5px (2026-07-02 23:43 attempt). Freed, the same anchors
 # solved at 7.5px and matched the independent 7-anchor consensus to a few px,
 # while a deliberate mis-ID still failed loudly (40.6px) — 10 observations
-# against 8 parameters plus the ridge priors and admission gates held.
+# against 8 parameters plus the ridge priors and admission gates held. Equal
+# to MIN_ANCHORS: the smallest solvable anchor set already frees the centre,
+# so there is no longer a frozen-centre tier at all — verified feasible
+# above (5 anchors = 10 observations vs. 8 free params with the centre freed).
 FREE_CENTRE_MIN_ANCHORS = 5
 
 # Progressive centre leash (fractions of sky radius, each axis). The first
@@ -269,8 +277,9 @@ def _rescue_outliers(full_model, names, alts, azs, px, cx, cy, a1_seed,
         keep = [k for k in range(n) if k not in drop]
         if len(keep) < MIN_ANCHORS:
             return None
-        # A MIN_ANCHORS-sized subset barely overdetermines the pose (8
-        # observations vs 6 free parameters), so its RMS gate has little
+        # A MIN_ANCHORS-sized subset barely overdetermines the pose (10
+        # observations vs 8 free parameters — the centre is freed at exactly
+        # this size, see FREE_CENTRE_MIN_ANCHORS), so its RMS gate has little
         # power — demand a clearly better fit before trusting it.
         limit = rms_limit if len(keep) > MIN_ANCHORS else 0.5 * rms_limit
         idx = np.array(keep)

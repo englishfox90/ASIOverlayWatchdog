@@ -17,6 +17,7 @@ Three concerns, one module:
    matched stars cover the sky.  A single-quadrant fit extrapolates
    poorly to the rest of the sky.
 """
+from dataclasses import replace
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -63,6 +64,24 @@ def a1_from_sky_radius(sky_radius: float) -> float:
     out first. Shared by the triangle, multi-image and guided calibrators.
     """
     return (float(sky_radius) / (1.0 - SKY_TRIM_FRACTION)) / (np.pi / 2.0)
+
+
+def median_frame_resolution(frames: List[dict]) -> Tuple[int, int]:
+    """Median (width, height) across frames with a known image_width/height.
+
+    Returns (0, 0) when no frame carries the metadata. Used by the pole-anchor
+    admission gate (validate_pole) to know what resolution the pole was
+    measured at, so a candidate model calibrated on a different-resolution
+    frame (e.g. manual/guided calibration against the pre-resize raw cached
+    frame, vs. the background service's post-resize preview buffer) can be
+    rescaled into the pole's frame before the pixel comparison — see
+    docs/ALLSKY_POLE_ANCHOR_PLAN.md P1.
+    """
+    ws = [f.get('image_width') for f in frames if f.get('image_width')]
+    hs = [f.get('image_height') for f in frames if f.get('image_height')]
+    if not ws or not hs:
+        return 0, 0
+    return int(np.median(ws)), int(np.median(hs))
 
 
 # ---------------------------------------------------------------------------
@@ -315,12 +334,28 @@ def validate_pole(
     lat_deg: float,
     pole,
     sky_r: Optional[float] = None,
+    pole_image_width: Optional[int] = None,
+    pole_image_height: Optional[int] = None,
 ) -> Tuple[bool, str]:
     """Check the model projects the celestial pole where it was measured.
 
     pole: a pole_finder.PoleEstimate (duck-typed: .x, .y, .east_left). The
     caller only invokes this when a pole estimate exists — the pole is an
     optional extra constraint, never a requirement.
+
+    pole_image_width/height: resolution of the frames the pole was measured
+    on (the CalibrationService buffer). A candidate model is not guaranteed
+    to be calibrated at that same resolution — manual ("Calibrate Now") and
+    guided calibration fit against the pre-resize raw cached frame, while the
+    buffer is fed the post-resize preview in camera mode with
+    resize_percent < 100 (see docs/ALLSKY_POLE_ANCHOR_PLAN.md P1). Comparing
+    model.altaz_to_pixel() output directly against pole.x/y in that case
+    compares pixels from two different resolutions. When both resolutions
+    are known, non-zero, and differ, the model is rescaled into the pole's
+    frame first — same cx/cy/a1/a3/a5 * (pole_width / model.image_width)
+    technique overlay_renderer.py uses at render time. Either resolution
+    unknown, or an aspect-ratio mismatch (a crop, not a resize) keeps the old
+    unscaled comparison — we don't guess at a scale factor we can't derive.
 
     Two independent kills for wrong-basin fits:
       1. mirror: model.east_left must agree with the measured field-rotation
@@ -338,9 +373,31 @@ def validate_pole(
             "mirrored fit"
         )
 
+    proj_model = model
+    m_w = int(getattr(model, 'image_width', 0) or 0)
+    m_h = int(getattr(model, 'image_height', 0) or 0)
+    if (pole_image_width and pole_image_height and m_w > 0 and m_h > 0
+            and (int(pole_image_width) != m_w or int(pole_image_height) != m_h)):
+        ar_model = m_w / m_h
+        ar_pole = pole_image_width / pole_image_height
+        if abs(ar_model - ar_pole) / max(ar_model, ar_pole) <= 0.02:
+            s = float(pole_image_width) / m_w
+            proj_model = replace(
+                model,
+                cx=model.cx * s, cy=model.cy * s,
+                a1=model.a1 * s, a3=model.a3 * s, a5=model.a5 * s,
+                image_width=int(pole_image_width), image_height=int(pole_image_height),
+            )
+        else:
+            log.debug(
+                f"validate_pole: model resolution {m_w}x{m_h} vs pole frame "
+                f"{pole_image_width}x{pole_image_height} — aspect mismatch, "
+                "skipping rescale (comparing unscaled)"
+            )
+
     alt = abs(float(lat_deg))
     az = 0.0 if lat_deg >= 0 else 180.0
-    xy = model.altaz_to_pixel(alt, az)
+    xy = proj_model.altaz_to_pixel(alt, az)
     if xy is None:
         return False, "model projects the celestial pole off-image"
     tol = POLE_TOL_REF_PX * tol_scale(sky_r)

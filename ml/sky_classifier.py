@@ -33,6 +33,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from services.logger import app_logger
+
 # Check for ONNX runtime (lightweight inference - preferred for production)
 try:
     import onnxruntime as ort
@@ -48,6 +50,11 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+try:
+    from ml.image_preprocess import resize_for_model
+except ImportError:  # run as a script: ml/ is on path, not the project root
+    from image_preprocess import resize_for_model
 
 
 # Sky condition classes (must match training — collapsed to 3, see sky_dataset.py)
@@ -188,8 +195,8 @@ class SkyClassifier:
                     self.image_size = ishape[2]
             except Exception:
                 pass
-            print(f"Loaded ONNX sky classifier from: {self.model_path} (image_size={self.image_size})")
-            
+            app_logger.info(f"Loaded ONNX sky classifier from: {self.model_path} (image_size={self.image_size})")
+
         elif suffix == '.pth':
             if not TORCH_AVAILABLE:
                 raise ImportError("PyTorch not installed. Run: pip install torch")
@@ -212,11 +219,9 @@ class SkyClassifier:
             self.model.eval()
             self.model_type = 'pytorch'
             n_params = sum(p.numel() for p in self.model.parameters())
-            print(f"Loaded PyTorch sky classifier from: {self.model_path} "
-                  f"(image_size={self.image_size}, {n_params:,} params)")
-        
-        print(f"Loaded sky classifier from: {self.model_path}")
-    
+            app_logger.info(f"Loaded PyTorch sky classifier from: {self.model_path} "
+                            f"(image_size={self.image_size}, {n_params:,} params)")
+
     @classmethod
     def load(cls, model_path: Union[str, Path], image_size: int = 256) -> 'SkyClassifier':
         """Load classifier from model file."""
@@ -244,21 +249,13 @@ class SkyClassifier:
         image = np.arcsinh(image * stretch) / np.arcsinh(stretch)
         
         # Resize
-        image = self._resize_image(image, self.image_size)
-        
+        image = resize_for_model(image, self.image_size)
+
         # Add batch and channel dimensions
         image = image[np.newaxis, np.newaxis, :, :]
-        
+
         return image
-    
-    def _resize_image(self, img: np.ndarray, size: int) -> np.ndarray:
-        """Center-crop to square then block-average (shared with training)."""
-        try:
-            from ml.image_preprocess import resize_for_model
-        except ImportError:  # run as a script: ml/ is on path, not the project root
-            from image_preprocess import resize_for_model
-        return resize_for_model(img, size)
-    
+
     def predict(self, image: np.ndarray, metadata: Optional[dict] = None) -> SkyPrediction:
         """
         Predict sky condition and celestial objects.
