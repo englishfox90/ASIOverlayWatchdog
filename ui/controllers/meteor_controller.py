@@ -26,8 +26,8 @@ from PIL import Image
 from PySide6.QtCore import QObject, Signal, QTimer
 
 from services.logger import app_logger
-from services.dev_mode_config import is_dev_mode_available
 from services.meteor.detection_scale import DetectionScale, make_scale
+from services.meteor.diagnostics import MeteorDiagnostics
 from services.meteor.frame_stack import FrameStack
 from services.meteor.noise import DiffNoiseEMA, noise_to_threshold
 from services.meteor.detector import detect_meteors, MeteorDetection, annotate_image
@@ -81,9 +81,12 @@ class MeteorController(QObject):
         # from the current one by definition. Detection-thread access only.
         self._held_full_res: Optional[Image.Image] = None
 
+        self._diag = MeteorDiagnostics()
+
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(5000)
         self._status_timer.timeout.connect(self._emit_status)
+        self._status_timer.timeout.connect(self._on_diag_tick)
         self._status_timer.start()
 
     # ------------------------------------------------------------------ #
@@ -97,16 +100,17 @@ class MeteorController(QObject):
         *detection_gray*: grayscale PIL Image at detection scale, pre-stretch.
         *full_res_clean*: full-resolution stretched clean PIL Image for thumbnails.
         """
-        if not is_dev_mode_available():
-            return
         cfg = self._get_config()
         if not cfg.get("enabled", False):
             return
+        self._diag.frame_received()
 
         # Roof gate — invalidate the whole pipeline when confirmed closed, so a
         # stale pre-closure candidate can't be released after reopening.
         ml_results = getattr(self._main_window, 'last_ml_results', None) or {}
-        if ml_results.get('roof_status') == 'Closed':
+        roof_closed = ml_results.get('roof_status') == 'Closed'
+        self._diag.roof_gate(roof_closed)
+        if roof_closed:
             if self._stack and self._detection_semaphore.acquire(blocking=False):
                 try:
                     self._stack.clear()
@@ -161,6 +165,7 @@ class MeteorController(QObject):
         self._frame_idx += 1
 
         if not self._stack.full:
+            self._diag.detection_skipped("warming")
             app_logger.debug(
                 f"Meteor: stack warming ({self._stack.count}/{self._stack.maxlen})")
             return
@@ -169,10 +174,12 @@ class MeteorController(QObject):
         # reported streak evicts naturally) but skip detection runs.
         cooldown = float(cfg.get("detection_cooldown", 30))
         if cooldown > 0 and (time.monotonic() - self._last_detection_ts) < cooldown:
+            self._diag.detection_skipped("cooldown")
             return
 
         # Non-blocking: drop frame if a detection thread is already running
         if not self._detection_semaphore.acquire(blocking=False):
+            self._diag.detection_skipped("busy")
             return
 
         transient = self._stack.transient_map()
@@ -236,11 +243,13 @@ class MeteorController(QObject):
                 max_nonline_prob=float(cfg.get("max_nonline_prob", 0.15)),
                 min_brightness=int(cfg.get("min_brightness", 20)),
             )
+            raw_count = len(detections)
 
             # Absolute length ceiling: a streak spanning most of the sky in one
             # exposure is a satellite/plane/ISS pass, not a verifiable meteor.
             max_len_det = float(cfg.get("max_length_frac", 0.5)) * transient.shape[1]
             detections = [d for d in detections if d.length <= max_len_det]
+            after_length_count = len(detections)
 
             # Scale detections back to full-res coords for thumbnails and zones
             if detections and scale and scale.factor < 1.0:
@@ -255,21 +264,35 @@ class MeteorController(QObject):
 
             if detections:
                 detections = self._apply_profile_filters(detections, full_res, cfg)
+            after_profile_count = len(detections)
 
             # Persistence filter: hold one frame, report as meteor if absent
             # next frame. Must run EVERY frame — an empty frame is what releases
             # the previous frame's held candidate as a meteor.
+            released_count = 0
+            plane_count = 0
             if self._filter:
                 prev_held_img = self._held_full_res
                 released, planes = self._filter.update(detections, frame_idx)
                 self._held_full_res = full_res if detections else None
+                plane_count = planes
                 if planes:
                     app_logger.debug(f"Meteor: {planes} plane track(s) suppressed")
                 if released:
+                    released_count = len(released)
                     self._report_detections(
                         released, prev_held_img or full_res, cfg)
             elif detections:
+                released_count = len(detections)
                 self._report_detections(detections, full_res, cfg)
+
+            hot_coverage = (float((hot_mask > 0).mean())
+                            if hot_mask is not None and hot_mask.size else 0.0)
+            self._diag.detection_run(
+                hot_coverage=hot_coverage, sigma=sigma, threshold=threshold,
+                raw=raw_count, after_length=after_length_count,
+                after_profile=after_profile_count,
+                released=released_count, planes=plane_count)
 
         except Exception as exc:
             app_logger.error(f"Meteor detection error: {exc}")
@@ -459,6 +482,8 @@ class MeteorController(QObject):
     # ------------------------------------------------------------------ #
 
     def on_capture_stopped(self):
+        self._diag.flush("capture stopped")
+        self._diag.reset()
         # Wait for an in-flight detection thread before tearing down — it
         # reads _filter/_noise_ema/_held_full_res and reports into
         # _recent_events; tearing down underneath it races.
@@ -526,6 +551,16 @@ class MeteorController(QObject):
     def _emit_status(self):
         self.status_updated.emit(self.get_status())
 
+    def _on_diag_tick(self):
+        """Periodic diagnostics heartbeat — GUI status-timer thread."""
+        if self._main_window is None:
+            return
+        try:
+            enabled = bool(self._get_config().get("enabled", False))
+        except AttributeError:
+            return
+        self._diag.maybe_heartbeat(enabled)
+
     # ------------------------------------------------------------------ #
     #  Helpers                                                             #
     # ------------------------------------------------------------------ #
@@ -556,8 +591,10 @@ class MeteorController(QObject):
                 f"Meteor: sky circle auto-detected — "
                 f"cx={cx:.0f}, cy={cy:.0f}, r={r:.0f}")
         except Exception as exc:
-            app_logger.debug(
-                f"Meteor: sky circle detection failed ({exc}), no mask applied")
+            app_logger.warning(
+                "Meteor: no sky circle (all-sky calibration absent, "
+                f"auto-detect failed: {exc}) — detection runs unmasked "
+                "over the full frame")
 
     def _get_exposure_sec(self) -> float:
         try:

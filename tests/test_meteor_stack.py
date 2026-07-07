@@ -78,6 +78,46 @@ class TestFrameStack:
         # Single-frame streak should NOT be masked
         assert hot[32, 30] == 0, "Single-frame streak must not appear in hot mask"
 
+    def test_hot_mask_ignores_uniform_background(self):
+        """Regression: linear detection frames sit at the sensor offset plus
+        sky background (~10-30 DN). An absolute threshold marked the ENTIRE
+        frame hot, blanking the transient map — zero detections in the field.
+        The mask must be background-relative."""
+        fs = FrameStack(maxlen=4)
+        for _ in range(4):
+            fs.push(_gray(fill=25))
+        hot = fs.hot_mask(threshold=5)
+        assert hot.max() == 0, (
+            "Uniform background above the absolute threshold must not be "
+            f"masked: {100 * (hot > 0).mean():.0f}% of frame marked hot")
+
+    def test_hot_mask_marks_equipment_edge_above_background(self):
+        fs = FrameStack(maxlen=4)
+        for _ in range(4):
+            frame = _gray(fill=25)
+            frame[40, :] = 120   # bright static equipment line in every frame
+            fs.push(frame)
+        hot = fs.hot_mask(threshold=5)
+        assert hot[40, 32] == 255, "Static bright edge should be masked"
+        assert hot[10, 32] == 0, "Plain background should not be masked"
+
+    def test_streak_survives_hot_mask_on_realistic_background(self):
+        """End-to-end field regression: one-frame streak over a ~25 DN
+        background must survive the hot-mask suppression step exactly as the
+        controller applies it (transient zeroed where hot)."""
+        fs = FrameStack(maxlen=4)
+        for _ in range(3):
+            fs.push(_gray(fill=25))
+        streak = _gray(fill=25)
+        streak[32, 10:54] = 120
+        fs.push(streak)
+        transient = fs.transient_map()
+        hot = fs.hot_mask(threshold=5)
+        masked = transient.copy()
+        masked[hot > 0] = 0
+        assert masked[32, 30] > 50, (
+            f"Streak must survive hot-mask suppression: value={masked[32, 30]}")
+
     def test_push_evicts_oldest_frame(self):
         fs = FrameStack(maxlen=3)
         for i in range(4):
