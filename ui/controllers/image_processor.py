@@ -228,18 +228,16 @@ class ImageProcessorWorker(QThread):
             _det_frame = None
             _meteor_cfg = config.get('meteor', {})
             if _meteor_cfg.get('enabled', False):
-                from services.dev_mode_config import is_dev_mode_available
-                if is_dev_mode_available():
-                    _det_long_side = int(_meteor_cfg.get('detection_long_side', 1280))
-                    _det_factor = min(1.0, _det_long_side / max(img.width, img.height))
-                    if _det_factor < 1.0:
-                        _det_frame = img.resize(
-                            (max(1, int(img.width * _det_factor)),
-                             max(1, int(img.height * _det_factor))),
-                            Image.Resampling.LANCZOS,
-                        ).convert('L')
-                    else:
-                        _det_frame = img.convert('L')
+                _det_long_side = int(_meteor_cfg.get('detection_long_side', 1280))
+                _det_factor = min(1.0, _det_long_side / max(img.width, img.height))
+                if _det_factor < 1.0:
+                    _det_frame = img.resize(
+                        (max(1, int(img.width * _det_factor)),
+                         max(1, int(img.height * _det_factor))),
+                        Image.Resampling.LANCZOS,
+                    ).convert('L')
+                else:
+                    _det_frame = img.convert('L')
 
             # Apply auto-stretch (MTF) if enabled
             # Use 16-bit raw data when available for higher precision stretching

@@ -30,6 +30,26 @@
 > Phase 6 (cleanup/graduation), corpus collection. Watch file sizes:
 > `meteor_controller.py` 594 / `image_processor.py` 597 vs the 600 target.
 
+> **Update (2026-07-07): field fix after two silent weeks.** Zero detections
+> in production traced to `hot_mask()` using an ABSOLUTE `pixel > 5` test:
+> the linear detection frame's floor sits at the sensor offset + sky
+> background (10–30 DN, auto-exposure mean ~100), so every pixel counted as
+> "hot" and the transient map was zeroed before Hough ever ran. `hot_mask()`
+> is now background-relative (pixel > per-frame median + threshold, still
+> ANDed over the stack) — regression tests in `test_meteor_stack.py` use a
+> realistic ~25 DN background, which the original synthetic tests (0 DN) did
+> not. Two decisions changed with Paul's sign-off:
+> - **The dev-mode gate is removed** (`meteor_controller.py`,
+>   `image_processor.py`) — the feature ships under the Beta badge like
+>   ML Models; `meteor.enabled` is the only gate. The Phase 6 exit criteria
+>   now govern removing the Beta badge instead.
+> - New `services/meteor/diagnostics.py` (`MeteorDiagnostics`) makes silent
+>   nights diagnosable from the log: periodic INFO heartbeat with per-stage
+>   candidate counts (raw → length → profile → released/planes), a one-shot
+>   "frames stopped — none since HH:MM:SS" line, roof-gate suspend/resume
+>   transitions, and a WARNING when hot-mask coverage exceeds 40% of the
+>   frame. Sky-circle resolution failure is now a WARNING (was debug).
+
 ---
 
 ## The Problem

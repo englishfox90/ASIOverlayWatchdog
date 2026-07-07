@@ -107,13 +107,19 @@ class FrameStack:
 
     def hot_mask(self, threshold: int = 5) -> np.ndarray:
         """
-        Binary mask (255 = hot pixel) for pixels that exceed *threshold*
-        in EVERY frame of the current stack.
+        Binary mask (255 = hot pixel) for pixels that exceed their frame's
+        own background (per-frame median) by *threshold* in EVERY frame of
+        the current stack.
 
         These are static artefacts (equipment edges, hot pixels) that should
-        be suppressed before Hough detection. No erosion is applied — thin
-        equipment lines (the primary target) are 1–2 px wide and erosion
-        would remove them from the mask entirely.
+        be suppressed before Hough detection. The test is background-RELATIVE:
+        the linear detection frame's floor sits at the sensor offset plus sky
+        background (typically 10–30 DN, and auto-exposure pushes the mean far
+        above that), so an absolute `pixel > threshold` test marks the entire
+        frame hot and blanks the transient map — no detection can ever fire.
+
+        No erosion is applied — thin equipment lines (the primary target)
+        are 1–2 px wide and erosion would remove them from the mask entirely.
 
         Returns a zero mask if the stack has fewer than 2 frames.
         """
@@ -121,4 +127,8 @@ class FrameStack:
             shape = self._frames[0].shape if self._frames else (1, 1)
             return np.zeros(shape, np.uint8)
         stacked = np.array(self._frames, dtype=np.uint8)
-        return (np.all(stacked > threshold, axis=0).astype(np.uint8) * 255)
+        backgrounds = np.median(
+            stacked.reshape(stacked.shape[0], -1), axis=1).astype(np.float32)
+        limits = backgrounds[:, None, None] + float(threshold)
+        hot = np.all(stacked.astype(np.float32) > limits, axis=0)
+        return hot.astype(np.uint8) * 255
