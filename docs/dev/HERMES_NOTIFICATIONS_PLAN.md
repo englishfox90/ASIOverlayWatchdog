@@ -116,11 +116,14 @@ Per-event flags (mirror Discord names): `post_errors`, `post_startup_shutdown`,
 
 ### Payload schema (JSON, dot-notation-templatable)
 
-Common envelope every event carries:
+Common envelope every event carries (`event_type` mirrors `event` — Hermes'
+native subscription filter matches on `event_type`, so a filtered subscription
+can take just `[error, lifecycle, roof_changed]`):
 
 ```json
 {
   "event": "roof_changed",
+  "event_type": "roof_changed",
   "level": "warning",
   "title": "Roof Closed",
   "body": "Roof is now Closed (confidence 94%)",

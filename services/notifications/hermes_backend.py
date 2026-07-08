@@ -75,6 +75,9 @@ class HermesBackend(NotificationBackend):
     def _build_payload(self, event) -> dict:
         payload = {
             "event": event.type,
+            # Hermes' native subscription filter matches on event_type; keep it in
+            # sync with event so filtered subscriptions don't drop us as "unknown".
+            "event_type": event.type,
             "level": event.level,
             "title": event.title,
             "body": event.body,
@@ -159,6 +162,7 @@ class HermesBackend(NotificationBackend):
 
         payload = {
             "event": "test",
+            "event_type": "test",
             "level": "info",
             "title": "Test Notification",
             "body": f"Test message from {APP_DISPLAY_NAME}.",

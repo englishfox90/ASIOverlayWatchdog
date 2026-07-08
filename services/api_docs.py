@@ -161,6 +161,8 @@ WEBHOOK_EVENT_BLOCKS = [
 
 _WEBHOOK_ENVELOPE_FIELDS = [
     ("event", "string", "Event type — see the event table below."),
+    ("event_type", "string", "Mirrors 'event'. Hermes' native subscription filter "
+                             "matches on this field, so keep the two in sync."),
     ("level", "string", "info | warning | error | success"),
     ("title", "string", "Short human-readable title."),
     ("body", "string", "Human-readable message body."),
@@ -200,16 +202,17 @@ def _webhook_schemas() -> dict:
             ),
             "properties": {
                 "event": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[0][2]},
+                "event_type": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[1][2]},
                 "level": {"type": "string", "enum": ["info", "warning", "error", "success"],
-                          "description": _WEBHOOK_ENVELOPE_FIELDS[1][2]},
-                "title": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[2][2]},
-                "body": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[3][2]},
-                "source": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[4][2]},
+                          "description": _WEBHOOK_ENVELOPE_FIELDS[2][2]},
+                "title": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[3][2]},
+                "body": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[4][2]},
+                "source": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[5][2]},
                 "timestamp": {"type": "string", "format": "date-time",
-                              "description": _WEBHOOK_ENVELOPE_FIELDS[5][2]},
+                              "description": _WEBHOOK_ENVELOPE_FIELDS[6][2]},
                 "image": {
                     "type": "object", "nullable": True,
-                    "description": _WEBHOOK_ENVELOPE_FIELDS[6][2],
+                    "description": _WEBHOOK_ENVELOPE_FIELDS[7][2],
                     "properties": {
                         "id": {"type": "integer", "description": "Library image id."},
                         "url": {"type": "string", "description": "Resolvable /library/image URL."},
@@ -378,6 +381,7 @@ _EXAMPLE_STATUS = """{
 
 _EXAMPLE_WEBHOOK = """{
   "event": "roof_changed",
+  "event_type": "roof_changed",
   "level": "warning",
   "title": "Roof Closed",
   "body": "Roof is now Closed (confidence 94%)",

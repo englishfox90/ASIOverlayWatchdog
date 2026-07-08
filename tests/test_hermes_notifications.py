@@ -144,6 +144,8 @@ class TestHermesBackendBuildPayload:
         payload = backend._build_payload(event)
 
         assert payload["event"] == ERROR
+        # event_type mirrors event so Hermes' native subscription filter matches us.
+        assert payload["event_type"] == ERROR
         assert payload["level"] == "error"
         assert payload["title"] == "Something broke"
         assert payload["body"] == "Disk full"
