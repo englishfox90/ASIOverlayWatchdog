@@ -233,6 +233,38 @@ class IntegrationCardsMixin:
         self.hermes_periodic_switch.toggled.connect(self._on_hermes_settings_changed)
         hermes_options_layout.addWidget(self.hermes_periodic_switch)
 
+        # Per-event URL routing (optional): send each event type to its own
+        # webhook path so Hermes can run focused subscriptions. Blank = base URL.
+        self.hermes_route_switch = SwitchRow(
+            "Route Events to Separate URLs",
+            "Post each event type to its own webhook path (blank falls back to base URL)"
+        )
+        self.hermes_route_switch.toggled.connect(self._on_hermes_route_toggle)
+        hermes_options_layout.addWidget(self.hermes_route_switch)
+
+        self.hermes_event_urls_options = QWidget()
+        route_layout = QVBoxLayout(self.hermes_event_urls_options)
+        route_layout.setContentsMargins(0, 0, 0, 0)
+        route_layout.setSpacing(Spacing.input_gap)
+
+        self.hermes_event_url_inputs = {}
+        for key, label in (
+            ("error", "Error"),
+            ("roof_changed", "Roof Changes"),
+            ("periodic_image", "Periodic Image"),
+            ("lifecycle", "Startup/Shutdown"),
+            ("timelapse_done", "Timelapse"),
+            ("calibration_done", "Calibration"),
+        ):
+            field = LineEdit()
+            field.setPlaceholderText("Falls back to base URL")
+            field.textChanged.connect(self._on_hermes_settings_changed)
+            self.hermes_event_url_inputs[key] = field
+            route_layout.addWidget(FormRow(label, field))
+
+        self.hermes_event_urls_options.hide()
+        hermes_options_layout.addWidget(self.hermes_event_urls_options)
+
         # Test button and status
         hermes_test_row = QHBoxLayout()
         hermes_test_row.setSpacing(Spacing.sm)
@@ -365,8 +397,19 @@ class IntegrationCardsMixin:
             hermes['post_timelapse'] = self.hermes_post_timelapse_switch.is_checked()
             hermes['post_calibration'] = self.hermes_post_calibration_switch.is_checked()
             hermes['periodic_enabled'] = self.hermes_periodic_switch.is_checked()
+            hermes['route_by_event'] = self.hermes_route_switch.is_checked()
+            hermes['event_urls'] = {
+                key: field.text().strip()
+                for key, field in self.hermes_event_url_inputs.items()
+            }
             self.main_window.config.set('hermes', hermes)
             self.settings_changed.emit()
+
+    def _on_hermes_route_toggle(self, checked):
+        """Show/hide the per-event URL fields based on the routing switch"""
+        self.hermes_event_urls_options.setVisible(checked)
+        if not self._loading_config:
+            self._on_hermes_settings_changed()
 
     def _test_hermes(self):
         """Test Hermes webhook - emit signal for main window to handle"""

@@ -247,6 +247,18 @@ DEFAULT_CONFIG = {
         "post_timelapse": False,
         "post_calibration": False,
         "periodic_enabled": False,
+        # Optional per-event URL routing: when route_by_event is True, each event
+        # type posts to its own URL below (blank falls back to the base 'url'),
+        # so Hermes can run focused per-event subscriptions. Same secret for all.
+        "route_by_event": False,
+        "event_urls": {
+            "error": "",
+            "roof_changed": "",
+            "periodic_image": "",
+            "lifecycle": "",
+            "timelapse_done": "",
+            "calibration_done": "",
+        },
     },
 
     # YouTube timelapse uploads

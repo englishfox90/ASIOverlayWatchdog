@@ -40,7 +40,23 @@ class HermesBackend(NotificationBackend):
 
     def is_enabled(self) -> bool:
         hermes = self.config.get('hermes', {})
-        return bool(hermes.get('enabled', False) and hermes.get('url', ''))
+        if not hermes.get('enabled', False):
+            return False
+        if (hermes.get('url') or '').strip():
+            return True
+        # No base URL, but per-event routing may still target some events.
+        if hermes.get('route_by_event', False):
+            return any((u or '').strip() for u in (hermes.get('event_urls') or {}).values())
+        return False
+
+    def _resolve_url(self, hermes, event_type) -> str:
+        """Destination for this event: the per-event override when routing is on
+        and set, otherwise the base URL."""
+        base = (hermes.get('url') or '').strip()
+        if hermes.get('route_by_event', False):
+            override = ((hermes.get('event_urls') or {}).get(event_type) or '').strip()
+            return override or base
+        return base
 
     def _deliver(self, event) -> None:
         hermes = self.config.get('hermes', {})
@@ -51,9 +67,17 @@ class HermesBackend(NotificationBackend):
         if not hermes.get(gate_key, False):
             return
 
+        url = self._resolve_url(hermes, event.type)
+        if not url:
+            app_logger.warning(
+                f"Hermes: no URL for event '{event.type}' (base and per-event "
+                f"override both empty); skipping"
+            )
+            return
+
         payload = self._build_payload(event)
         body, headers = build_signed_request(hermes.get('secret', ''), payload)
-        self._post(hermes.get('url', ''), body, headers, event.type)
+        self._post(url, body, headers, event.type)
 
     def _post(self, url, body, headers, event_type) -> None:
         try:

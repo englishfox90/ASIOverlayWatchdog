@@ -180,8 +180,24 @@ Add a top-level `hermes` block next to `discord`. Leave `discord` untouched
     "post_timelapse": False,
     "post_calibration": False,
     "periodic_enabled": False,
+    # Optional per-event URL routing (one focused Hermes subscription per event).
+    "route_by_event": False,
+    "event_urls": {
+        "error": "", "roof_changed": "", "periodic_image": "",
+        "lifecycle": "", "timelapse_done": "", "calibration_done": "",
+    },
 },
 ```
+
+### Per-event URL routing
+
+Routing is orthogonal to the per-event `post_*` gating: the `post_*` flags decide
+**whether** an event is sent, `route_by_event` + `event_urls` decide **where**.
+`HermesBackend._resolve_url()`: when `route_by_event` is True, an event posts to
+its `event_urls[<type>]` override if non-blank, else the base `url`; when False,
+everything uses the base `url`. `is_enabled()` is True when the base `url` is set,
+**or** routing is on and at least one `event_urls` entry is non-blank (so a
+routed-only setup with no base still fires). One shared secret signs every target.
 
 Add a validate() warning mirroring Discord: enabled but url/secret empty.
 

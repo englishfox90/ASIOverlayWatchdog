@@ -374,6 +374,12 @@ class OutputSettingsPanel(IntegrationCardsMixin, QScrollArea):
             self.hermes_post_timelapse_switch.set_checked(hermes.get('post_timelapse', False))
             self.hermes_post_calibration_switch.set_checked(hermes.get('post_calibration', False))
             self.hermes_periodic_switch.set_checked(hermes.get('periodic_enabled', False))
+            route_by_event = hermes.get('route_by_event', False)
+            self.hermes_route_switch.set_checked(route_by_event)
+            event_urls = hermes.get('event_urls', {})
+            for key, field in self.hermes_event_url_inputs.items():
+                field.setText(event_urls.get(key, ''))
+            self.hermes_event_urls_options.setVisible(route_by_event)
             self.hermes_options.setVisible(hermes_enabled)
 
             # Cleanup

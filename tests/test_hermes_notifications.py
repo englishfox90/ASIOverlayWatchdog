@@ -334,6 +334,59 @@ class TestHermesBackendDeliverGating:
 
 
 # ---------------------------------------------------------------------------
+# Per-event URL routing (route_by_event + event_urls)
+# ---------------------------------------------------------------------------
+
+class TestHermesBackendUrlRouting:
+    def _post_url(self, config, event_type=ERROR):
+        """Return the URL _deliver() actually POSTs to, or None if it skipped."""
+        response = MagicMock(status_code=200)
+        with patch(
+            "services.notifications.hermes_backend.post_with_retry", return_value=response
+        ) as post_mock, patch("services.posthog_service.capture_event"):
+            HermesBackend(config)._deliver(NotificationEvent(type=event_type, body="x"))
+        return post_mock.call_args[0][0] if post_mock.called else None
+
+    def test_routing_off_always_uses_base_url_even_when_overrides_set(self):
+        config = _hermes_config(
+            route_by_event=False,
+            event_urls={"error": "https://h/webhooks/sentinel-error"},
+        )
+        assert self._post_url(config) == config["hermes"]["url"]
+
+    def test_routing_on_uses_per_event_override(self):
+        override = "https://h/webhooks/sentinel-error"
+        config = _hermes_config(route_by_event=True, event_urls={"error": override})
+        assert self._post_url(config) == override
+
+    def test_routing_on_falls_back_to_base_when_override_blank(self):
+        config = _hermes_config(route_by_event=True, event_urls={"error": ""})
+        assert self._post_url(config) == config["hermes"]["url"]
+
+    def test_routes_distinct_event_types_to_distinct_urls(self):
+        config = _hermes_config(route_by_event=True, event_urls={
+            "error": "https://h/webhooks/sentinel-error",
+            "roof_changed": "https://h/webhooks/sentinel-roof",
+        })
+        assert self._post_url(config, ERROR) == "https://h/webhooks/sentinel-error"
+        assert self._post_url(config, ROOF_CHANGED) == "https://h/webhooks/sentinel-roof"
+
+    def test_skips_when_no_base_and_no_override(self):
+        config = _hermes_config(url="", route_by_event=True, event_urls={"error": ""})
+        assert self._post_url(config) is None
+
+    def test_is_enabled_true_with_only_event_urls_and_no_base(self):
+        config = _hermes_config(url="", route_by_event=True,
+                                event_urls={"error": "https://h/webhooks/sentinel-error"})
+        assert HermesBackend(config).is_enabled() is True
+
+    def test_is_enabled_false_when_no_base_and_routing_off(self):
+        config = _hermes_config(url="", route_by_event=False,
+                                event_urls={"error": "https://h/webhooks/sentinel-error"})
+        assert HermesBackend(config).is_enabled() is False
+
+
+# ---------------------------------------------------------------------------
 # NotificationDispatcher
 # ---------------------------------------------------------------------------
 

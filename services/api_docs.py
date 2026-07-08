@@ -486,6 +486,9 @@ string <code>"&lt;timestamp&gt;.&lt;body&gt;"</code>; header
 <code>X-Webhook-Timestamp</code> is the Unix seconds used in that string. The
 receiving server should reject requests where the timestamp is more than &plusmn;300s
 from its own clock.</p>
+<p class="sub">Each event type can optionally be routed to its own URL (one focused
+subscription per event) with a single shared secret; the payload shape below is
+identical regardless of destination.</p>
 {envelope_table}
 {event_table}
 </div>
