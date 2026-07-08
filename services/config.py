@@ -236,6 +236,19 @@ DEFAULT_CONFIG = {
         "post_roof_changes": False,   # Post notification when ML confirms a roof status change
     },
 
+    # Hermes webhook — HMAC-signed JSON notifications for an LLM agent to compose/deliver
+    "hermes": {
+        "enabled": False,
+        "url": "",
+        "secret": "",
+        "post_errors": False,
+        "post_startup_shutdown": False,
+        "post_roof_changes": False,
+        "post_timelapse": False,
+        "post_calibration": False,
+        "periodic_enabled": False,
+    },
+
     # YouTube timelapse uploads
     "youtube": {
         "enabled": False,
@@ -647,6 +660,14 @@ class Config:
             url = discord.get('webhook_url', '')
             if not url:
                 warnings.append("Discord enabled but webhook URL is empty")
+
+        # Check Hermes webhook config if enabled
+        hermes = self.data.get('hermes', {})
+        if hermes.get('enabled'):
+            if not hermes.get('url', ''):
+                warnings.append("Hermes enabled but webhook URL is empty")
+            if not hermes.get('secret', ''):
+                warnings.append("Hermes enabled but webhook secret is empty")
 
         # Check YouTube upload config if enabled
         youtube = self.data.get('youtube', {})

@@ -119,6 +119,109 @@ def _library_schemas() -> dict:
     }
 
 
+
+# --- Outbound Hermes webhook (client callback, not a route this server serves) --
+
+# One row per event type: (event name, event-block key, [(field, type, description), ...]).
+# Mirrors services/notifications/hermes_backend.py `_event_block()` exactly —
+# keep in lockstep with that function, not with the plan doc's prose.
+WEBHOOK_EVENT_BLOCKS = [
+    ("roof_changed", "roof", [
+        ("open", "boolean", "New roof state."),
+        ("confidence", "number", "Detector confidence, 0-1."),
+    ]),
+    ("error", "error", [
+        ("text", "string", "Error message (same text as the envelope 'body')."),
+    ]),
+    ("lifecycle", "lifecycle", [
+        ("phase", "string", "startup | shutdown | capture_started"),
+        ("mode", "string", "Capture mode: watch | camera."),
+        ("output_path", "string", "Configured output directory."),
+    ]),
+    ("periodic_image", "capture", [
+        ("exposure", "string", "Exposure, as formatted for overlay tokens."),
+        ("gain", "string", "Gain, as formatted for overlay tokens."),
+        ("temp", "string", "Sensor temperature, as formatted for overlay tokens."),
+        ("resolution", "string", "Frame resolution, e.g. '3856x2180'."),
+    ]),
+    ("timelapse_done", "timelapse", [
+        ("frame_count", "integer", "Frames written to the completed timelapse."),
+        ("elapsed_seconds", "integer", "Wall-clock duration of the timelapse run."),
+        ("filename", "string", "Output video filename."),
+    ]),
+    ("calibration_done", "calibration", [
+        ("rms_residual", "number", "All-sky calibration fit residual, pixels."),
+        ("n_matches", "integer", "Star matches used in the fit."),
+        ("calibrated_at", "string", "ISO-8601 timestamp of the calibration run."),
+        ("a1", "number", "Lens model parameter: sky-circle scale."),
+        ("cx", "number", "Lens model parameter: optical centre X."),
+        ("cy", "number", "Lens model parameter: optical centre Y."),
+    ]),
+]
+
+_WEBHOOK_ENVELOPE_FIELDS = [
+    ("event", "string", "Event type — see the event table below."),
+    ("level", "string", "info | warning | error | success"),
+    ("title", "string", "Short human-readable title."),
+    ("body", "string", "Human-readable message body."),
+    ("source", "string", "App display name (identifies the sender to the agent)."),
+    ("timestamp", "string", "ISO-8601 UTC, e.g. 2026-07-07T21:14:00Z."),
+    ("image", "object", "Optional. { id, url } — present only when a Library image id "
+                         "is available and the library API is enabled."),
+]
+
+
+def _webhook_schemas() -> dict:
+    """OpenAPI component schemas documenting the outbound Hermes webhook payload.
+
+    These are documentation-only — Hermes is a client callback PFR Sentinel POSTs
+    to, not a route this server exposes, so they live under components/schemas
+    rather than paths. See docs/dev/HERMES_NOTIFICATIONS_PLAN.md for the contract
+    and services/notifications/hermes_backend.py for the code that builds them.
+    """
+    event_blocks = {}
+    for event_name, block_key, fields in WEBHOOK_EVENT_BLOCKS:
+        schema_name = "Webhook" + "".join(w.capitalize() for w in block_key.split("_"))
+        event_blocks[schema_name] = {
+            "type": "object",
+            "description": f"Event-specific block for '{event_name}', keyed '{block_key}'.",
+            "properties": {
+                name: {"type": typ, "description": desc, "nullable": True}
+                for name, typ, desc in fields
+            },
+        }
+
+    schemas = {
+        "WebhookNotification": {
+            "type": "object",
+            "description": (
+                "Common envelope sent with every outbound webhook event. Event-specific "
+                "fields (see WebhookEventBlocks) are merged in alongside these."
+            ),
+            "properties": {
+                "event": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[0][2]},
+                "level": {"type": "string", "enum": ["info", "warning", "error", "success"],
+                          "description": _WEBHOOK_ENVELOPE_FIELDS[1][2]},
+                "title": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[2][2]},
+                "body": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[3][2]},
+                "source": {"type": "string", "description": _WEBHOOK_ENVELOPE_FIELDS[4][2]},
+                "timestamp": {"type": "string", "format": "date-time",
+                              "description": _WEBHOOK_ENVELOPE_FIELDS[5][2]},
+                "image": {
+                    "type": "object", "nullable": True,
+                    "description": _WEBHOOK_ENVELOPE_FIELDS[6][2],
+                    "properties": {
+                        "id": {"type": "integer", "description": "Library image id."},
+                        "url": {"type": "string", "description": "Resolvable /library/image URL."},
+                    },
+                },
+            },
+        },
+    }
+    schemas.update(event_blocks)
+    return schemas
+
+
 def build_openapi_spec(*, image_path: str = "/latest", status_path: str = "/status",
                        docs_path: str = "/docs", openapi_path: str = "/openapi.json",
                        library_path: str | None = None) -> dict:
@@ -218,6 +321,10 @@ def build_openapi_spec(*, image_path: str = "/latest", status_path: str = "/stat
         spec["paths"].update(_library_paths(library_path))
         spec["components"]["schemas"].update(_library_schemas())
 
+    # Documentation-only: Hermes is an outbound client callback, never a route
+    # this server serves, so it's unconditional (not gated like the library).
+    spec["components"]["schemas"].update(_webhook_schemas())
+
     return spec
 
 
@@ -269,6 +376,17 @@ _EXAMPLE_STATUS = """{
   "health": { "status": "ok", "reasons": [] }
 }"""
 
+_EXAMPLE_WEBHOOK = """{
+  "event": "roof_changed",
+  "level": "warning",
+  "title": "Roof Closed",
+  "body": "Roof is now Closed (confidence 94%)",
+  "source": "PFR Sentinel",
+  "timestamp": "2026-07-07T21:14:00Z",
+  "image": { "id": 1234, "url": "http://127.0.0.1:8080/library/image?id=1234" },
+  "roof": { "open": false, "confidence": 0.94 }
+}"""
+
 
 def _esc(text: str) -> str:
     return _html.escape(str(text))
@@ -317,6 +435,60 @@ def _render_responses(op: dict) -> str:
         for code, meta in responses.items()
     ]
     return _html_table(["Status", "Description"], rows, label="Responses")
+
+
+def _render_webhook_section(spec: dict) -> str:
+    """Render the outbound Hermes webhook reference from WEBHOOK_EVENT_BLOCKS +
+    the WebhookNotification schema, so this stays in sync with what
+    hermes_backend._build_payload() actually sends rather than drifting prose.
+    """
+    envelope_rows = [
+        f"<tr><td class='path'>{_esc(name)}</td>"
+        f"<td class='type'>{_esc(typ)}</td>"
+        f"<td>{_esc(desc)}</td></tr>"
+        for name, typ, desc in _WEBHOOK_ENVELOPE_FIELDS
+    ]
+    envelope_table = _html_table(["Field", "Type", "Description"], envelope_rows,
+                                 label="Common envelope (every event)")
+
+    event_rows = []
+    for event_name, block_key, fields in WEBHOOK_EVENT_BLOCKS:
+        field_list = ", ".join(f"{name} ({typ})" for name, typ, _ in fields)
+        event_rows.append(
+            f"<tr><td class='path'>{_esc(event_name)}</td>"
+            f"<td class='type'>{_esc(block_key)}</td>"
+            f"<td>{_esc(field_list)}</td></tr>"
+        )
+    event_table = _html_table(["event", "Block key", "Fields"], event_rows,
+                              label="Event types → event-specific block")
+
+    return f"""
+<h2>Outbound Webhook Notifications</h2>
+<p class="sub">PFR Sentinel can <strong>POST</strong> HMAC-signed JSON to a configured
+webhook (e.g. a Hermes agent) for six event types: roof_changed, error, lifecycle,
+periodic_image, timelapse_done, calibration_done. This is a client callback the app
+makes outbound &mdash; it is not a route this server serves, so it will not appear
+under <code>/openapi.json</code> "paths"; the payload shape is documented via the
+<code>WebhookNotification</code> and per-event component schemas instead.</p>
+
+<div class="endpoint">
+<span class="method">POST</span>
+<span class="path">&lt;configured webhook URL&gt;</span>
+<div><strong>Generic V2 HMAC signing</strong></div>
+<p class="sub"><code>Content-Type: application/json</code>. Signed bytes are the
+exact POST body bytes (never re-serialized). Header
+<code>X-Webhook-Signature-V2</code> is the hex HMAC-SHA256 digest of the ASCII
+string <code>"&lt;timestamp&gt;.&lt;body&gt;"</code>; header
+<code>X-Webhook-Timestamp</code> is the Unix seconds used in that string. The
+receiving server should reject requests where the timestamp is more than &plusmn;300s
+from its own clock.</p>
+{envelope_table}
+{event_table}
+</div>
+
+<h3>Example <code>roof_changed</code> payload</h3>
+<pre>{_esc(_EXAMPLE_WEBHOOK)}</pre>
+"""
 
 
 def render_docs_html(spec: dict) -> str:
@@ -382,4 +554,6 @@ def render_docs_html(spec: dict) -> str:
 
 <h2>Example <code>/status</code> response</h2>
 <pre>{_esc(_EXAMPLE_STATUS)}</pre>
+
+{_render_webhook_section(spec)}
 </body></html>"""

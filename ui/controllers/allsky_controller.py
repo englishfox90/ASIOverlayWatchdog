@@ -13,6 +13,7 @@ from typing import Optional, TYPE_CHECKING
 from PySide6.QtCore import QObject, Signal, QThread, QTimer
 
 from services.logger import app_logger as log
+from services.notifications import CALIBRATION_DONE, NotificationEvent
 
 if TYPE_CHECKING:
     from ui.main_window import MainWindow
@@ -414,8 +415,7 @@ class AllSkyController(QObject):
         self.calibration_done.emit(info)
         self.settings_changed.emit()
 
-        # Discord notification
-        self._notify_discord(info)
+        self._notify_calibration_done(info)
 
     def _on_calibration_failed(self, error_msg: str) -> None:
         log.warning(f"All-sky calibration failed: {error_msg}")
@@ -495,15 +495,15 @@ class AllSkyController(QObject):
         cached = getattr(self._mw, '_cached_raw_time', None)
         return cached or datetime.now(timezone.utc)
 
-    def _notify_discord(self, info: dict) -> None:
+    def _notify_calibration_done(self, info: dict) -> None:
         try:
-            discord_cfg = self._mw.config.get('discord', {})
-            if discord_cfg.get('post_calibration', False):
-                from services.discord_alerts import DiscordAlertsService
-                # Find existing service instance
-                for child in self._mw.children():
-                    if hasattr(child, 'send_calibration_complete'):
-                        child.send_calibration_complete(info)
-                        break
+            rms = info.get('rms_residual', 0) or 0
+            n = info.get('n_matches', 0) or 0
+            self._mw.notifier.notify(NotificationEvent(
+                type=CALIBRATION_DONE,
+                title='All-Sky Calibration Complete',
+                body=f"All-sky lens calibrated successfully. {n} stars matched, RMS {rms:.2f}px.",
+                data={'model_info': info},
+            ))
         except Exception as e:
-            log.debug(f"Discord calibration notify failed: {e}")
+            log.debug(f"Calibration notification failed: {e}")

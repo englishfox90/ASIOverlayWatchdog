@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QTimer
 
 from services.logger import app_logger
+from services.notifications import ERROR, LIFECYCLE, PERIODIC_IMAGE, NotificationEvent
 from services.web_output import WebOutputServer
 
 
@@ -58,62 +59,55 @@ class _MainWindowOutputMixin:
             app_logger.error(f"Discord test error: {e}")
             self.output_panel.set_discord_test_result(False, str(e)[:50])
 
-    def _send_discord_startup(self):
-        discord_config = self.config.get('discord', {})
-        if not discord_config.get('enabled', False):
+    def _on_test_hermes(self):
+        hermes_config = self.config.get('hermes', {})
+        if not hermes_config.get('url', ''):
+            self.output_panel.set_hermes_test_result(False, "Webhook URL required")
             return
+
+        try:
+            ok, status = self.notifier.test('hermes')
+            self.output_panel.set_hermes_test_result(ok, status)
+            if ok:
+                app_logger.info("Hermes test message sent successfully")
+            else:
+                app_logger.warning(f"Hermes test failed: {status}")
+        except Exception as e:
+            app_logger.error(f"Hermes test error: {e}")
+            self.output_panel.set_hermes_test_result(False, str(e)[:50])
+
+    def _send_discord_startup(self):
+        # startup_enabled has no backend-side equivalent (it isn't one of the
+        # per-event flags DiscordBackend/HermesBackend check) — it's a
+        # call-site-level "don't even emit this" switch, so it stays here.
+        discord_config = self.config.get('discord', {})
         if not discord_config.get('startup_enabled', True):
             return
 
-        def _send():
-            try:
-                from services.discord_alerts import DiscordAlerts
-                alerts = DiscordAlerts(self.config)
-                if alerts.is_enabled():
-                    alerts.send_startup_message()
-                    app_logger.info("Discord startup notification sent")
-            except Exception as e:
-                app_logger.error(f"Failed to send Discord startup notification: {e}")
-
-        threading.Thread(target=_send, daemon=True).start()
+        mode = self.config.get('capture_mode', 'camera')
+        mode_text = "ZWO Camera Capture" if mode == 'camera' else "Directory Watch"
+        output_path = self.config.get('output_directory', 'Not configured')
+        self.notifier.notify(NotificationEvent(
+            type=LIFECYCLE,
+            title=f"{self.config.get('app_name', 'PFR Sentinel')} Started",
+            body=f"Mode: {mode_text}\nOutput Path: {output_path}",
+            data={'phase': 'startup', 'mode': mode, 'output_path': output_path},
+        ))
 
     def _send_discord_error(self, error_msg: str):
-        discord_config = self.config.get('discord', {})
-        if not discord_config.get('enabled', False):
-            return
-        if not discord_config.get('post_errors', False):
-            return
-
-        def _send():
-            try:
-                from services.discord_alerts import DiscordAlerts
-                alerts = DiscordAlerts(self.config)
-                if alerts.is_enabled():
-                    alerts.send_error_message(error_msg)
-                    app_logger.debug("Discord error notification sent")
-            except Exception as e:
-                app_logger.error(f"Failed to send Discord error notification: {e}")
-
-        threading.Thread(target=_send, daemon=True).start()
+        self.notifier.notify(NotificationEvent(type=ERROR, body=error_msg, level='error'))
 
     def _send_discord_shutdown(self):
-        discord_config = self.config.get('discord', {})
-        if not discord_config.get('enabled', False):
-            return
-        if not discord_config.get('post_startup_shutdown', False):
-            return
-
-        def _send():
-            try:
-                from services.discord_alerts import DiscordAlerts
-                alerts = DiscordAlerts(self.config)
-                if alerts.is_enabled():
-                    alerts.send_shutdown_message()
-                    app_logger.info("Discord shutdown notification sent")
-            except Exception as e:
-                app_logger.error(f"Failed to send Discord shutdown notification: {e}")
-
-        threading.Thread(target=_send, daemon=True).start()
+        self.notifier.notify(NotificationEvent(
+            type=LIFECYCLE,
+            title=f"{self.config.get('app_name', 'PFR Sentinel')} Stopped",
+            body="Application has been closed.",
+            data={
+                'phase': 'shutdown',
+                'mode': self.config.get('capture_mode', 'camera'),
+                'output_path': self.config.get('output_directory', ''),
+            },
+        ))
 
     # =========================================================================
     # IMAGE HANDLING
@@ -580,10 +574,11 @@ class _MainWindowOutputMixin:
 
         try:
             discord_config = self.config.get('discord', {})
-            discord_enabled = discord_config.get('enabled', False)
-            periodic_enabled = discord_config.get('periodic_enabled', False)
+            hermes_config = self.config.get('hermes', {})
+            discord_periodic = discord_config.get('enabled', False) and discord_config.get('periodic_enabled', False)
+            hermes_periodic = hermes_config.get('enabled', False) and hermes_config.get('periodic_enabled', False)
 
-            if discord_enabled and periodic_enabled:
+            if discord_periodic or hermes_periodic:
                 should_post = False
 
                 if not hasattr(self, 'first_image_posted_to_discord'):
@@ -593,9 +588,11 @@ class _MainWindowOutputMixin:
 
                 if not self.first_image_posted_to_discord:
                     should_post = True
-                    app_logger.info(f"Posting first image to Discord: {image_path}")
+                    app_logger.info(f"Posting first periodic image update: {image_path}")
                 else:
-                    # Check interval with jitter to reduce network load
+                    # Check interval with jitter to reduce network load. Hermes has
+                    # no interval field of its own — one shared cadence drives both
+                    # backends, sourced from Discord's setting.
                     interval_minutes = max(30, discord_config.get('periodic_interval_minutes', 30))
 
                     if not hasattr(self, 'last_discord_post_time'):
@@ -610,24 +607,25 @@ class _MainWindowOutputMixin:
                             should_post = True
                             actual_min = elapsed_seconds / 60
                             app_logger.info(
-                                f"Posting periodic Discord update "
+                                f"Posting periodic update "
                                 f"(interval: {interval_minutes}m, jitter: -{self._discord_jitter_seconds}s, "
                                 f"actual: {actual_min:.1f}m)"
                             )
 
                 if should_post:
+                    # Delivery is async (each backend owns its own queue), so
+                    # update scheduling state optimistically here rather than
+                    # waiting for a per-backend success callback.
+                    self.last_discord_post_time = datetime.now()
+                    self.first_image_posted_to_discord = True
+                    self._discord_jitter_seconds = random.randint(0, 300)
                     self._send_discord_periodic_update(image_path)
 
         except Exception as e:
-            app_logger.error(f"Error scheduling Discord post: {e}")
+            app_logger.error(f"Error scheduling periodic update: {e}")
 
-    def _send_discord_periodic_update(self, image_path: str):
-        from services.discord_alerts import DiscordAlerts
-        alerts = DiscordAlerts(self.config)
-        if not alerts.is_enabled():
-            return
-
-        # Collect UI state on the main thread before handing off to worker.
+    def _build_periodic_body(self) -> str:
+        """Token-formatted description shared by the periodic-image event."""
         mode = "ZWO Camera" if self.is_capturing else "Directory Watch"
         count = self.image_count
 
@@ -641,38 +639,26 @@ class _MainWindowOutputMixin:
                 f"\n**Gain:** {gain}"
             )
 
-        message = (
+        return (
             f"**Periodic Status Update**\n\n"
             f"**Mode:** {mode}\n"
             f"**Images Processed:** {count}{camera_info}\n"
             f"**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
-        discord_config = self.config.get('discord', {})
-        include_image = discord_config.get('include_image', True)
-        interval_minutes = discord_config.get('periodic_interval_minutes', 30)
-        attach_image = image_path if include_image else None
-        title = f"{self.config.get('app_name', 'PFRSentinel')} - Status Update"
+    def _send_discord_periodic_update(self, image_path: str):
+        metadata = getattr(self, 'preview_metadata', None) or {}
+        title = f"{self.config.get('app_name', 'PFR Sentinel')} - Status Update"
 
-        def _send():
-            try:
-                success = alerts.send_discord_message(
-                    title=title, description=message, level="info", image_path=attach_image
-                )
-                if success:
-                    self.last_discord_post_time = datetime.now()
-                    self.first_image_posted_to_discord = True
-                    self._discord_jitter_seconds = random.randint(0, 300)
-                    app_logger.info("Discord update sent successfully")
-                    app_logger.debug(f"Next Discord jitter: -{self._discord_jitter_seconds}s")
-                    from services.posthog_service import capture_event
-                    capture_event('discord_post_sent', {
-                        'interval_minutes': interval_minutes,
-                        'include_image': include_image,
-                    })
-                else:
-                    app_logger.warning(f"Discord update failed: {alerts.last_send_status}")
-            except Exception as e:
-                app_logger.error(f"Discord periodic update failed: {e}")
-
-        threading.Thread(target=_send, daemon=True).start()
+        self.notifier.notify(NotificationEvent(
+            type=PERIODIC_IMAGE,
+            title=title,
+            body=self._build_periodic_body(),
+            image_path=image_path,
+            data={
+                'exposure': metadata.get('EXPOSURE', 'N/A'),
+                'gain': metadata.get('GAIN', 'N/A'),
+                'temp': metadata.get('TEMP', 'N/A'),
+                'resolution': metadata.get('RES', 'N/A'),
+            },
+        ))

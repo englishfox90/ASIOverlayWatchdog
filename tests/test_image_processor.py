@@ -13,6 +13,7 @@ import pytest
 # A QApplication is needed before constructing the QThread-derived worker.
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 from PIL import Image
+from services.notifications import ERROR
 from ui.controllers.image_processor import ImageProcessorWorker, ImageProcessingTask
 
 
@@ -27,15 +28,14 @@ def worker(_qapp):
     return ImageProcessorWorker()
 
 
-class _DiscordStub:
-    last_error = None
+class _NotifierStub:
+    """Captures NotificationEvents instead of delivering them."""
 
-    def __init__(self, config):
-        pass
+    def __init__(self):
+        self.events = []
 
-    def send_error_message(self, text):
-        _DiscordStub.last_error = text
-        return True
+    def notify(self, event):
+        self.events.append(event)
 
 
 def _ascom(tmp_path, **over):
@@ -134,17 +134,17 @@ def test_confident_open_via_worker_routes_through_fsm(worker, tmp_path, monkeypa
 
 
 def test_genuine_write_failure_escalates_via_worker(worker, monkeypatch, tmp_path):
-    _DiscordStub.last_error = None
     captured = []
-    monkeypatch.setattr('services.discord_alerts.DiscordAlerts', _DiscordStub)
+    notifier = _NotifierStub()
     monkeypatch.setattr('services.posthog_service.capture_error',
                         lambda exc, context=None: captured.append(context))
-    worker._main_window = type('MW', (), {'config': {}})()
+    worker._main_window = type('MW', (), {'config': {}, 'notifier': notifier})()
     worker._safety_fsm._writer = lambda ml, cfg: False  # genuine failure
 
     worker._safety_fsm.update({'roof_status': 'Closed', 'roof_confidence': 0.9},
                               _ascom(tmp_path))
 
-    assert _DiscordStub.last_error is not None
-    assert 'stale' in _DiscordStub.last_error
+    assert len(notifier.events) == 1
+    assert notifier.events[0].type == ERROR
+    assert 'stale' in notifier.events[0].body
     assert captured == ['ascom_safety_write']

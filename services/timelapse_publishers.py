@@ -9,11 +9,11 @@ from __future__ import annotations
 import os
 import queue
 import threading
-import time
 from datetime import datetime
 from typing import Callable, Optional
 
 from .logger import app_logger
+from .notifications import NotificationDispatcher, NotificationEvent, TIMELAPSE_DONE
 from .youtube_auth import YouTubeAuthManager
 from .youtube_config import (
     TimelapseUploadMetadata,
@@ -35,6 +35,7 @@ class TimelapsePublishers:
         youtube_state_store: Optional[YouTubeUploadStateStore] = None,
         youtube_uploader: Optional[YouTubeUploadService] = None,
         youtube_auth_manager: Optional[YouTubeAuthManager] = None,
+        notifier: Optional[NotificationDispatcher] = None,
         max_queue_size: int = 5,
     ):
         self.config = config
@@ -42,13 +43,17 @@ class TimelapsePublishers:
         self.youtube_state = youtube_state_store or YouTubeUploadStateStore()
         self.youtube_auth = youtube_auth_manager or YouTubeAuthManager()
         self.youtube_uploader = youtube_uploader or YouTubeUploadService(auth_manager=self.youtube_auth)
+        # Prefer a shared dispatcher passed in by the caller (e.g. main_window.notifier)
+        # so backend delivery queues aren't duplicated; fall back to a private one —
+        # cheap to construct and timelapse completion is once-per-session.
+        self._notifier = notifier or NotificationDispatcher(config)
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._worker_lock = threading.Lock()
 
     def publish_finished(self, metadata: TimelapseUploadMetadata):
-        self._post_discord_if_enabled(metadata)
+        self._notify_timelapse_done(metadata)
         self.enqueue_youtube_upload(metadata, manual=False)
 
     def authenticate_youtube(self):
@@ -187,41 +192,24 @@ class TimelapsePublishers:
             self._emit_youtube_status(result.to_status())
             self._queue.task_done()
 
-    def _post_discord_if_enabled(self, metadata: TimelapseUploadMetadata):
-        discord_cfg = self.config.get("discord", {})
-        discord_delivery = discord_cfg.get("enabled", False) and discord_cfg.get("post_timelapse", False)
-        if not discord_delivery:
-            return
+    def _notify_timelapse_done(self, metadata: TimelapseUploadMetadata):
+        """Fan out the completed-timelapse event to every enabled backend.
 
-        app_logger.info("Timelapse: posting completed video to Discord")
-
-        def _post():
-            try:
-                from services.discord_alerts import DiscordAlerts
-
-                alerts = DiscordAlerts(self.config)
-                max_retries = 3
-                for attempt in range(1, max_retries + 1):
-                    success = alerts.send_timelapse_completed(
-                        metadata.path,
-                        metadata.frame_count,
-                        metadata.elapsed_seconds,
-                    )
-                    if success:
-                        app_logger.info("Timelapse: Discord post sent")
-                        return
-                    if attempt < max_retries:
-                        wait = attempt * 10
-                        app_logger.warning(
-                            f"Timelapse: Discord post failed (attempt {attempt}/{max_retries}), "
-                            f"retrying in {wait}s"
-                        )
-                        time.sleep(wait)
-                app_logger.error("Timelapse: Discord post failed after all retries")
-            except Exception as e:
-                app_logger.error(f"Timelapse: Discord post failed: {e}")
-
-        threading.Thread(target=_post, daemon=True).start()
+        Delivery and retries now live in the dispatcher's backend workers —
+        this just builds and hands off the event.
+        """
+        app_logger.info("Timelapse: notifying completed video")
+        self._notifier.notify(NotificationEvent(
+            type=TIMELAPSE_DONE,
+            title="Timelapse Complete",
+            body=f"{metadata.frame_count} frames · {metadata.filename}",
+            video_path=metadata.path,
+            data={
+                'frame_count': metadata.frame_count,
+                'elapsed_seconds': metadata.elapsed_seconds,
+                'filename': metadata.filename,
+            },
+        ))
 
     def _capture_youtube_event(self, result: YouTubeUploadResult, metadata: TimelapseUploadMetadata):
         try:

@@ -36,6 +36,7 @@ class TimelapseController(QObject):
         self._publishers = TimelapsePublishers(
             self._main_window.config,
             youtube_status_callback=self._emit_youtube_status,
+            notifier=getattr(self._main_window, 'notifier', None),
         )
 
         # Status timer: update panel every 5 seconds while recording

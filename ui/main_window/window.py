@@ -19,6 +19,7 @@ from services.logger import app_logger
 from services.web_output import WebOutputServer
 from services.ml_data_collector import init_ml_collector
 from services.library import ImageLibrary
+from services.notifications import NotificationDispatcher
 from version import __version__
 
 from ..theme import apply_theme, apply_accent_theme, get_stylesheet
@@ -246,6 +247,13 @@ class MainWindow(
         # is archived; it re-emits frame_archived onto the GUI thread (queued),
         # and the panel updates the open session/list without a manual refresh.
         self.library_controller.frame_archived.connect(self.library_panel.on_frame_archived)
+
+        self.notifier = NotificationDispatcher(self.config)
+        self.library_controller.frame_archived.connect(self.notifier.on_frame_archived)
+        # aboutToQuit covers both the real closeEvent teardown and
+        # quit_application() — not the tray-hide path, which never quits.
+        QApplication.instance().aboutToQuit.connect(self.notifier.shutdown)
+
         if self.image_library:
             self.image_library.set_frame_saved_callback(
                 self.library_controller.notify_frame_saved
@@ -353,6 +361,7 @@ class MainWindow(
         self.cameras_detected.connect(self._on_cameras_detected)
 
         self.output_panel.test_discord_requested.connect(self._on_test_discord)
+        self.output_panel.test_hermes_requested.connect(self._on_test_hermes)
 
         self.image_processor.processing_complete.connect(self._on_image_processed)
         self.image_processor.preview_ready.connect(self._on_preview_ready)

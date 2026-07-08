@@ -15,6 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from services.logger import app_logger
+from services.notifications import ERROR, ROOF_CHANGED, NotificationEvent
 from services.processor import add_overlays, auto_stretch_image
 from services.sharpening import apply_unsharp_mask
 from services.ml_service import get_ml_service, analyze_image_for_tokens
@@ -463,15 +464,21 @@ class ImageProcessorWorker(QThread):
             self._send_roof_alert(roof_open, confidence, image_path)
 
     def _send_roof_alert(self, roof_open: bool, confidence: float, image_path: str):
-        """Post roof status change to Discord (called from worker thread)."""
+        """Post a confirmed roof status change (called from worker thread)."""
         if not self._main_window:
             return
         try:
-            from services.discord_alerts import DiscordAlerts
-            alerts = DiscordAlerts(self._main_window.config)
-            alerts.send_roof_status_change(roof_open, confidence, image_path)
+            status = "Open" if roof_open else "Closed"
+            self._main_window.notifier.notify(NotificationEvent(
+                type=ROOF_CHANGED,
+                title=f"Roof {status}",
+                body=f"Roof is now {status} (confidence: {confidence:.0%})",
+                level='info' if roof_open else 'warning',
+                image_path=image_path,
+                data={'roof_open': roof_open, 'confidence': confidence},
+            ))
         except Exception as e:
-            app_logger.warning(f"Roof change Discord alert failed: {e}")
+            app_logger.warning(f"Roof change notification failed: {e}")
 
     def _on_safety_write_failure(self):
         """Surface a genuinely-failed safety-file write to operator-visible
@@ -489,11 +496,11 @@ class ImageProcessorWorker(QThread):
 
         if self._main_window:
             try:
-                from services.discord_alerts import DiscordAlerts
-                alerts = DiscordAlerts(self._main_window.config)
-                alerts.send_error_message(msg)
+                self._main_window.notifier.notify(NotificationEvent(
+                    type=ERROR, title='ASCOM Safety Write Failed', body=msg, level='error',
+                ))
             except Exception as e:
-                app_logger.warning(f"ASCOM safety failure Discord alert failed: {e}")
+                app_logger.warning(f"ASCOM safety failure notification failed: {e}")
 
 
 class ImageProcessor(QObject):

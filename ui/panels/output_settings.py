@@ -8,9 +8,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 from qfluentwidgets import (
-    CardWidget, SubtitleLabel, BodyLabel, CaptionLabel,
+    CardWidget, SubtitleLabel, BodyLabel,
     PushButton, PrimaryPushButton, ComboBox, LineEdit,
-    SpinBox, DoubleSpinBox, SwitchButton, ColorPickerButton,
+    SpinBox, DoubleSpinBox, SwitchButton,
     HyperlinkButton
 )
 from PySide6.QtGui import QColor
@@ -19,10 +19,11 @@ import os
 
 from ..theme.tokens import Colors, Typography, Spacing, Layout
 from ..theme.icons import mdi
-from ..components.cards import SettingsCard, FormRow, SwitchRow, CollapsibleCard
+from ..components.cards import SettingsCard, SwitchRow, CollapsibleCard
+from ._integration_cards import IntegrationCardsMixin
 
 
-class OutputSettingsPanel(QScrollArea):
+class OutputSettingsPanel(IntegrationCardsMixin, QScrollArea):
     """
     Output settings panel with:
     - File output (directory, format, naming)
@@ -32,6 +33,7 @@ class OutputSettingsPanel(QScrollArea):
     
     settings_changed = Signal()
     test_discord_requested = Signal()
+    test_hermes_requested = Signal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -140,127 +142,10 @@ class OutputSettingsPanel(QScrollArea):
 
         layout.addWidget(web_card)
         
-        # === DISCORD ===
-        discord_card = CollapsibleCard("Discord Integration", mdi('webhook'))
-        
-        self.discord_enabled_switch = SwitchRow(
-            "Enable Discord Alerts",
-            "Send notifications to Discord channel"
-        )
-        self.discord_enabled_switch.toggled.connect(self._on_discord_enabled_changed)
-        discord_card.add_widget(self.discord_enabled_switch)
-        
-        # Webhook URL
-        webhook_row = QHBoxLayout()
-        webhook_row.setSpacing(Spacing.sm)
-        
-        self.webhook_input = LineEdit()
-        self.webhook_input.setPlaceholderText("https://discord.com/api/webhooks/...")
-        self.webhook_input.setEchoMode(LineEdit.Password)
-        self.webhook_input.textChanged.connect(self._on_discord_settings_changed)
-        webhook_row.addWidget(self.webhook_input, 1)
-        
-        self.show_webhook_btn = PushButton("Show")
-        self.show_webhook_btn.setCheckable(True)
-        self.show_webhook_btn.clicked.connect(self._toggle_webhook_visibility)
-        webhook_row.addWidget(self.show_webhook_btn)
-        
-        webhook_widget = QWidget()
-        webhook_widget.setLayout(webhook_row)
-        discord_card.add_row("Webhook URL", webhook_widget, "Get from Discord Server Settings → Integrations")
-        
-        # Post errors
-        self.post_errors_switch = SwitchRow("Post Errors", "Send error messages to Discord")
-        self.post_errors_switch.toggled.connect(self._on_discord_settings_changed)
-        discord_card.add_widget(self.post_errors_switch)
-        
-        # Post lifecycle
-        self.post_lifecycle_switch = SwitchRow("Post Start/Stop", "Send capture start/stop messages")
-        self.post_lifecycle_switch.toggled.connect(self._on_discord_settings_changed)
-        discord_card.add_widget(self.post_lifecycle_switch)
-
-        # Post timelapse
-        self.post_timelapse_switch = SwitchRow(
-            "Post Timelapse Video",
-            "Upload completed timelapse video (up to 8 MB, camera mode only)"
-        )
-        self.post_timelapse_switch.toggled.connect(self._on_discord_settings_changed)
-        discord_card.add_widget(self.post_timelapse_switch)
-
-        # Post roof changes
-        self.post_roof_changes_switch = SwitchRow(
-            "Post Roof Changes",
-            "Send notification when ML detects a roof open/close event"
-        )
-        self.post_roof_changes_switch.toggled.connect(self._on_discord_settings_changed)
-        discord_card.add_widget(self.post_roof_changes_switch)
-
-        # Periodic posts
-        self.periodic_switch = SwitchRow("Periodic Updates", "Post images at regular intervals")
-        self.periodic_switch.toggled.connect(self._on_periodic_toggle)
-        discord_card.add_widget(self.periodic_switch)
-        
-        # Periodic options container (shown/hidden based on toggle)
-        self.periodic_options = QWidget()
-        periodic_layout = QVBoxLayout(self.periodic_options)
-        periodic_layout.setContentsMargins(0, 0, 0, 0)
-        periodic_layout.setSpacing(Spacing.input_gap)
-        
-        self.periodic_interval_spin = SpinBox()
-        self.periodic_interval_spin.setRange(30, 1440)
-        self.periodic_interval_spin.setValue(60)
-        self.periodic_interval_spin.setSuffix(" min")
-        self.periodic_interval_spin.valueChanged.connect(self._on_discord_settings_changed)
-        periodic_layout.addWidget(FormRow("Interval", self.periodic_interval_spin))
-
-        self.periodic_jitter_label = CaptionLabel(
-            "A random offset of up to 5 minutes is applied each cycle to reduce network load"
-        )
-        self.periodic_jitter_label.setWordWrap(True)
-        self.periodic_jitter_label.setObjectName("hintLabel")
-        periodic_layout.addWidget(self.periodic_jitter_label)
-
-        # Include image
-        self.include_image_switch = SwitchRow("Include Latest Image", "Attach image to Discord posts")
-        self.include_image_switch.set_checked(True)
-        self.include_image_switch.toggled.connect(self._on_discord_settings_changed)
-        periodic_layout.addWidget(self.include_image_switch)
-        
-        self.periodic_options.hide()
-        discord_card.add_widget(self.periodic_options)
-        
-        # Embed Color (wrap in container for proper alignment)
-        color_container = QWidget()
-        color_layout = QHBoxLayout(color_container)
-        color_layout.setContentsMargins(0, 0, 0, 0)
-        color_layout.setSpacing(Spacing.sm)
-        
-        self.embed_color_picker = ColorPickerButton(QColor('#0EA5E9'), 'Embed Color')
-        self.embed_color_picker.setFixedSize(80, 32)
-        self.embed_color_picker.colorChanged.connect(self._on_embed_color_changed)
-        color_layout.addWidget(self.embed_color_picker)
-        color_layout.addStretch()
-        
-        discord_card.add_row("Embed Color", color_container, "Color for Discord message embeds")
-        
-        # Test button and status
-        test_row = QHBoxLayout()
-        test_row.setSpacing(Spacing.sm)
-        
-        self.test_discord_btn = PushButton("Test Webhook")
-        self.test_discord_btn.setIcon(mdi('send'))
-        self.test_discord_btn.clicked.connect(self._test_discord)
-        test_row.addWidget(self.test_discord_btn)
-        
-        self.discord_status_label = CaptionLabel("")
-        test_row.addWidget(self.discord_status_label)
-        test_row.addStretch()
-        
-        test_widget = QWidget()
-        test_widget.setLayout(test_row)
-        discord_card.add_widget(test_widget)
-        
-        layout.addWidget(discord_card)
+        # === DISCORD + HERMES ===
+        # Built by IntegrationCardsMixin (ui/panels/_integration_cards.py) —
+        # kept in a sibling module to stay under the file-size cap.
+        self._build_integration_cards(layout)
 
         # === CLEANUP ===
         cleanup_card = CollapsibleCard("Storage Cleanup", mdi('broom'))
@@ -407,79 +292,9 @@ class OutputSettingsPanel(QScrollArea):
             docs_path = self.main_window.config.get('output', {}).get('webserver_docs_path', '/docs')
         self.api_docs_link.setUrl(f"http://{host}:{port}{docs_path}")
     
-    def _on_discord_enabled_changed(self, checked):
-        if self._loading_config:
-            return
-        if self.main_window and hasattr(self.main_window, 'config'):
-            discord = self.main_window.config.get('discord', {})
-            discord['enabled'] = checked
-            self.main_window.config.set('discord', discord)
-            self.settings_changed.emit()
-    
-    def _toggle_webhook_visibility(self):
-        """Toggle webhook URL visibility"""
-        if self.show_webhook_btn.isChecked():
-            self.webhook_input.setEchoMode(LineEdit.Normal)
-            self.show_webhook_btn.setText("Hide")
-        else:
-            self.webhook_input.setEchoMode(LineEdit.Password)
-            self.show_webhook_btn.setText("Show")
-    
-    def _on_periodic_toggle(self, checked):
-        """Show/hide periodic options based on toggle"""
-        self.periodic_options.setVisible(checked)
-        if not self._loading_config:
-            self._on_discord_settings_changed()
-    
-    def _on_embed_color_changed(self, color: QColor):
-        """Save embed color to config"""
-        if self._loading_config:
-            return
-        hex_color = color.name()  # Returns #RRGGBB format
-        
-        if self.main_window and hasattr(self.main_window, 'config'):
-            discord = self.main_window.config.get('discord', {})
-            discord['embed_color_hex'] = hex_color
-            self.main_window.config.set('discord', discord)
-            self.settings_changed.emit()
-    
-    def _on_discord_settings_changed(self):
-        if self._loading_config:
-            return
-        if self.main_window and hasattr(self.main_window, 'config'):
-            discord = self.main_window.config.get('discord', {})
-            discord['webhook_url'] = self.webhook_input.text()
-            discord['post_errors'] = self.post_errors_switch.is_checked()
-            discord['post_startup_shutdown'] = self.post_lifecycle_switch.is_checked()
-            discord['post_timelapse'] = self.post_timelapse_switch.is_checked()
-            discord['post_roof_changes'] = self.post_roof_changes_switch.is_checked()
-            discord['periodic_enabled'] = self.periodic_switch.is_checked()
-            discord['periodic_interval_minutes'] = self.periodic_interval_spin.value()
-            discord['include_latest_image'] = self.include_image_switch.is_checked()
-            discord['embed_color_hex'] = self.embed_color_picker.color.name()
-            self.main_window.config.set('discord', discord)
-            self.settings_changed.emit()
-    
-    def _test_discord(self):
-        """Test Discord webhook - emit signal for main window to handle"""
-        webhook_url = self.webhook_input.text().strip()
-        if not webhook_url:
-            self.set_discord_test_result(False, "Webhook URL required")
-            return
-        
-        self.discord_status_label.setText("Testing...")
-        self.discord_status_label.setStyleSheet(f"color: {Colors.text_muted};")
-        self.test_discord_requested.emit()
-    
-    def set_discord_test_result(self, success: bool, message: str):
-        """Update Discord test result display"""
-        if success:
-            self.discord_status_label.setText(f"✓ {message}")
-            self.discord_status_label.setStyleSheet(f"color: {Colors.status_success};")
-        else:
-            self.discord_status_label.setText(f"❌ {message}")
-            self.discord_status_label.setStyleSheet(f"color: {Colors.status_error};")
-    
+    # Discord + Hermes handlers live in IntegrationCardsMixin
+    # (ui/panels/_integration_cards.py).
+
     def _on_cleanup_settings_changed(self):
         if self._loading_config:
             return
@@ -546,7 +361,21 @@ class OutputSettingsPanel(QScrollArea):
             # Embed color
             embed_color = discord.get('embed_color_hex', '#0EA5E9')
             self.embed_color_picker.setColor(QColor(embed_color))
-            
+
+            # Hermes
+            hermes = config.get('hermes', {})
+            hermes_enabled = hermes.get('enabled', False)
+            self.hermes_enabled_switch.set_checked(hermes_enabled)
+            self.hermes_url_input.setText(hermes.get('url', ''))
+            self.hermes_secret_input.setText(hermes.get('secret', ''))
+            self.hermes_post_errors_switch.set_checked(hermes.get('post_errors', False))
+            self.hermes_post_lifecycle_switch.set_checked(hermes.get('post_startup_shutdown', False))
+            self.hermes_post_roof_changes_switch.set_checked(hermes.get('post_roof_changes', False))
+            self.hermes_post_timelapse_switch.set_checked(hermes.get('post_timelapse', False))
+            self.hermes_post_calibration_switch.set_checked(hermes.get('post_calibration', False))
+            self.hermes_periodic_switch.set_checked(hermes.get('periodic_enabled', False))
+            self.hermes_options.setVisible(hermes_enabled)
+
             # Cleanup
             self.cleanup_enabled_switch.set_checked(config.get('cleanup_enabled', False))
             self.max_size_spin.setValue(config.get('cleanup_max_size_gb', 10.0))
