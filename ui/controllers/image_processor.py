@@ -630,6 +630,7 @@ class ImageProcessor(QObject):
             'ml_contribution': mw.config.get('ml_contribution', {'enabled': False}),
             'allsky_overlay': mw.config.get('allsky_overlay', {}),
             'weather': mw.config.get('weather', {}),
+            'meteor': mw.config.get('meteor', {}),
         }
 
         return config
