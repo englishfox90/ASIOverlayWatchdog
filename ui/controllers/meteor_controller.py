@@ -18,6 +18,7 @@ import math
 import os
 import threading
 import time
+import traceback
 from datetime import datetime
 from typing import List, Optional, Tuple
 
@@ -296,6 +297,7 @@ class MeteorController(QObject):
 
         except Exception as exc:
             app_logger.error(f"Meteor detection error: {exc}")
+            app_logger.error(traceback.format_exc())
         finally:
             self._detection_semaphore.release()
 
