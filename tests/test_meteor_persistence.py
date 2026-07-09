@@ -147,3 +147,33 @@ class TestResidueSuppression:
         released, _ = pf.update([], frame_idx=3)
         assert len(released) == 1
         assert released[0] is _CROSS
+
+
+class TestNoveltyGate:
+    """A meteor is a one-frame event. A streak that keeps re-appearing in the
+    same place is a static artifact (star-drift residual, fixed feature) and
+    must not be reported repeatedly, even after residue suppression expires."""
+
+    def test_persistent_streak_not_rereleased_after_suppression_expiry(self):
+        pf = PersistenceFilter(residue_suppress_frames=3)
+        pf.update([_DIAG], frame_idx=0)
+        released, _ = pf.update([_DIAG], frame_idx=1)   # first (unavoidable) report
+        assert len(released) == 1
+        # Same streak keeps sitting there, past the 3-frame suppression TTL.
+        reports = 0
+        for idx in range(2, 8):
+            r, _ = pf.update([_DIAG], frame_idx=idx)
+            reports += len(r)
+        assert reports == 0, "Persistent static streak re-reported as a meteor"
+
+    def test_genuinely_new_streak_after_quiet_line_is_released(self):
+        # The novelty memory self-heals: once the line goes quiet, a fresh
+        # streak on it is a meteor again.
+        pf = PersistenceFilter(residue_suppress_frames=2)
+        pf.update([_DIAG], frame_idx=0)
+        pf.update([_DIAG], frame_idx=1)   # first report
+        pf.update([], frame_idx=2)         # line goes quiet
+        pf.update([], frame_idx=3)
+        pf.update([_DIAG], frame_idx=4)    # genuinely new appearance -> held
+        released, _ = pf.update([], frame_idx=5)
+        assert len(released) == 1

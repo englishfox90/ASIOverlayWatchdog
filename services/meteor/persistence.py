@@ -68,6 +68,39 @@ def _hesse(det: MeteorDetection) -> Tuple[float, float, float]:
     return a, b, c
 
 
+def _is_static_repeat(
+    prev: MeteorDetection,
+    new: MeteorDetection,
+    angle_tol_deg: float,
+    lateral_tol_px: float,
+    advance_frac: float = 0.1,
+) -> bool:
+    """
+    True when *new* is the same streak as *prev*, essentially unmoved —
+    collinear, laterally close, and NOT advanced along the track.
+
+    A meteor is a one-frame event: it is absent the frame before it appears.
+    A streak still sitting in the same place a frame later (without advancing,
+    which would make it a plane) is a static artifact — a star-drift residual
+    or a fixed faint feature — not a meteor. A candidate matching a raw
+    detection from the previous frame is therefore not "novel" and must not be
+    held as a meteor. (A released meteor's OWN lingering residue is handled
+    separately by residue suppression.)
+    """
+    d = abs(new.angle_deg - prev.angle_deg) % 180
+    if min(d, 180 - d) > angle_tol_deg:
+        return False
+    a, b, c = _hesse(prev)
+    mid_x = (new.x1 + new.x2) / 2.0
+    mid_y = (new.y1 + new.y2) / 2.0
+    if abs(a * mid_x + b * mid_y + c) > lateral_tol_px:
+        return False
+    prev_mid_x = (prev.x1 + prev.x2) / 2.0
+    prev_mid_y = (prev.y1 + prev.y2) / 2.0
+    advance = math.hypot(mid_x - prev_mid_x, mid_y - prev_mid_y)
+    return advance <= max(prev.length, new.length) * advance_frac
+
+
 def _is_collinear_and_advanced(
     held: MeteorDetection,
     new: MeteorDetection,
@@ -129,6 +162,9 @@ class PersistenceFilter:
         self._residue_suppress_frames = residue_suppress_frames
         self._held: List[_HeldCandidate] = []
         self._suppressions: List[_TrajectorySuppress] = []
+        # Raw candidates from the previous frame — the novelty memory. A streak
+        # already present here is not a fresh one-frame event, so it is not held.
+        self._prev_candidates: List[MeteorDetection] = []
 
     def update(
         self,
@@ -204,15 +240,25 @@ class PersistenceFilter:
                 frames_remaining=self._residue_suppress_frames,
             ))
 
-        # Current candidates that are NOT plane extensions and NOT residue of a
-        # just-released meteor → hold for next frame
+        # Current candidates that are NOT plane extensions, NOT residue of a
+        # just-released meteor, and NOT already present last frame (novelty
+        # gate — a persistent static streak is an artifact, not a meteor) →
+        # hold for next frame.
         self._held = [
             _HeldCandidate(det, frame_idx)
             for ai, det in enumerate(active)
             if ai not in plane_active
             and not any(s.matches(det, self._angle_tol)
                         for s in self._suppressions)
+            and not any(_is_static_repeat(prev, det, self._angle_tol,
+                                          self._lateral_tol)
+                        for prev in self._prev_candidates)
         ]
+
+        # Remember this frame's raw candidates (pre-suppression) so a streak
+        # that keeps re-appearing never looks "novel" again, even after residue
+        # suppression on its line has expired.
+        self._prev_candidates = list(candidates)
 
         return released, len(plane_active)
 
@@ -231,6 +277,7 @@ class PersistenceFilter:
         """Discard all state (stack clear, session change)."""
         self._held.clear()
         self._suppressions.clear()
+        self._prev_candidates.clear()
 
     @property
     def active_suppressions(self) -> int:
