@@ -31,7 +31,10 @@ from services.meteor.detection_scale import DetectionScale, make_scale
 from services.meteor.diagnostics import MeteorDiagnostics
 from services.meteor.frame_stack import FrameStack
 from services.meteor.noise import DiffNoiseEMA, noise_to_threshold
-from services.meteor.detector import detect_meteors, MeteorDetection, annotate_image
+from services.meteor.detector import (
+    detect_meteors, MeteorDetection, annotate_image, merge_collinear_segments,
+)
+from services.meteor.contour_streaks import detect_streaks_contour
 from services.meteor.streak_profile import sample_profile, dash_score, peak_fade_score
 from services.meteor.persistence import PersistenceFilter
 from services.meteor.storage import (
@@ -235,15 +238,29 @@ class MeteorController(QObject):
             min_length_det = (scale.scale_length(min_length_full)
                               if scale else min_length_full)
 
-            detections = detect_meteors(
-                Image.fromarray(masked),
-                min_length=min_length_det,
-                exclusion_zones=det_zones or None,
-                sky_circle=self._sky_circle,
-                threshold=threshold,
-                max_nonline_prob=float(cfg.get("max_nonline_prob", 0.15)),
-                min_brightness=int(cfg.get("min_brightness", 20)),
-            )
+            masked_img = Image.fromarray(masked)
+            method = cfg.get("detection_method", "hough")
+            detections: List[MeteorDetection] = []
+            if method in ("hough", "both"):
+                detections += detect_meteors(
+                    masked_img,
+                    min_length=min_length_det,
+                    exclusion_zones=det_zones or None,
+                    sky_circle=self._sky_circle,
+                    threshold=threshold,
+                    max_nonline_prob=float(cfg.get("max_nonline_prob", 0.15)),
+                    min_brightness=int(cfg.get("min_brightness", 20)),
+                )
+            if method in ("contour", "both"):
+                detections += detect_streaks_contour(
+                    masked_img,
+                    min_length=min_length_det,
+                    exclusion_zones=det_zones or None,
+                    sky_circle=self._sky_circle,
+                    threshold=threshold,
+                )
+            if method == "both" and detections:
+                detections = merge_collinear_segments(detections)
             raw_count = len(detections)
 
             # Absolute length ceiling: a streak spanning most of the sky in one

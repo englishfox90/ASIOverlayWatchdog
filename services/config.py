@@ -316,6 +316,7 @@ DEFAULT_CONFIG = {
         "exclusion_zones": [],          # [{x,y,w,h,note}] — user-rejected regions
         # --- Temporal stack detector (Phase 2+) ---
         "stack_frames": 6,              # FrameStack ring-buffer depth
+        "detection_method": "hough",    # hough | contour | both — candidate finder(s)
         "detection_long_side": 1280,    # Detection working resolution (long side, px)
         "noise_sensitivity": "normal",  # low | normal | high → diff-noise threshold mapping
         "min_brightness": 20,           # Min mean transient value along trail (0 = off)

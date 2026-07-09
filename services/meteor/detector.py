@@ -274,6 +274,11 @@ def detect_meteors(
     return _merge_collinear_segments(detections)
 
 
+# Public alias so other detectors (e.g. contour_streaks) can dedupe a merged
+# candidate set without reaching for the underscore-prefixed helper.
+merge_collinear_segments = _merge_collinear_segments
+
+
 def _validate_trail_brightness(
     gray: np.ndarray,
     x1: int, y1: int, x2: int, y2: int,
