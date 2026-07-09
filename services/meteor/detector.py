@@ -242,8 +242,10 @@ def detect_meteors(
     if lines is None:
         return detections
 
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
+    # OpenCV ≤4.x returns HoughLinesP lines as (N, 1, 4); 5.0 dropped the
+    # middle axis to (N, 4). Normalise so the unpack works on both — on 5.0
+    # `line[0]` would otherwise be a bare int and raise "cannot unpack".
+    for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
         dx, dy = x2 - x1, y2 - y1
         length = float(np.hypot(dx, dy))
         if length < min_length:
