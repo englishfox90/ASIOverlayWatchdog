@@ -288,32 +288,6 @@ class MeteorPanel(QScrollArea):
             "Minimum seconds between detection events to prevent flooding",
         )
 
-        # --- Multi-frame confirmation (advanced) ---
-        self._multi_frame_switch = SwitchRow(
-            "Multi-Frame Confirmation",
-            "Require consistent motion across multiple frames",
-        )
-        self._multi_frame_switch.toggled.connect(self._on_settings_changed)
-        card.add_widget(self._multi_frame_switch)
-
-        self._multi_frame_warn = CaptionLabel(
-            "Short exposures recommended (< 2 s). With long exposures "
-            "a meteor may only appear in a single frame and be discarded."
-        )
-        self._multi_frame_warn.setWordWrap(True)
-        self._multi_frame_warn.setStyleSheet(
-            f"color: {Colors.text_muted}; padding-left: 4px;")
-        card.add_widget(self._multi_frame_warn)
-
-        self._confirm_frames_spin = SpinBox()
-        self._confirm_frames_spin.setRange(2, 10)
-        self._confirm_frames_spin.setValue(2)
-        self._confirm_frames_spin.valueChanged.connect(self._on_settings_changed)
-        card.add_row(
-            "Min Confirm Frames", self._confirm_frames_spin,
-            "Number of frames a trail must appear in before reporting",
-        )
-
         layout.addWidget(card)
 
     def _build_logging_card(self, layout: QVBoxLayout):
@@ -442,8 +416,6 @@ class MeteorPanel(QScrollArea):
             self._diff_threshold_spin.setEnabled(not adaptive)
             self._diff_threshold_spin.setValue(int(config.get("diff_threshold", 25)))
             self._cooldown_spin.setValue(int(config.get("detection_cooldown", 30)))
-            self._multi_frame_switch.set_checked(config.get("multi_frame_confirm", False))
-            self._confirm_frames_spin.setValue(int(config.get("min_confirm_frames", 2)))
             self._save_detections_switch.set_checked(config.get("save_detections", True))
             self._log_file_edit.setText(config.get("log_file", ""))
             self._save_annotated_switch.set_checked(config.get("save_annotated", False))
@@ -510,8 +482,6 @@ class MeteorPanel(QScrollArea):
             "adaptive_threshold":   self._adaptive_switch.is_checked(),
             "diff_threshold":       self._diff_threshold_spin.value(),
             "detection_cooldown":   self._cooldown_spin.value(),
-            "multi_frame_confirm":  self._multi_frame_switch.is_checked(),
-            "min_confirm_frames":   self._confirm_frames_spin.value(),
             "save_detections":      self._save_detections_switch.is_checked(),
             "log_file":             self._log_file_edit.text().strip(),
             "save_annotated":       self._save_annotated_switch.is_checked(),

@@ -326,8 +326,6 @@ DEFAULT_CONFIG = {
         # --- Deprecated (pre-rework, read-but-ignored; remove in Phase 6) ---
         "diff_threshold": 25,
         "adaptive_threshold": True,
-        "multi_frame_confirm": False,
-        "min_confirm_frames": 2,
     },
 
     # All-sky overlay — astronomical annotations on each frame
