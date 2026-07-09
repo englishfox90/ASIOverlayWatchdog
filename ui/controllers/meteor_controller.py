@@ -309,6 +309,11 @@ class MeteorController(QObject):
     ) -> List[MeteorDetection]:
         """Score and filter detections by streak photometry."""
         dash_reject = float(cfg.get("dash_reject_score", 0.6))
+        # peak_fade_min: reject streaks flatter than a meteor's ablation
+        # profile (uniform satellites/equipment edges score ~0). Default 0
+        # disables the gate — it only *rejects*, so raise it deliberately
+        # against logged scores once recall is confirmed, never blind.
+        peak_fade_min = float(cfg.get("peak_fade_min", 0.0))
         gray = np.array(full_res.convert('L'))
         kept = []
         for det in detections:
@@ -319,6 +324,9 @@ class MeteorController(QObject):
                       f"({det.length:.0f}px @{det.angle_deg:.0f}°)")
             if ds > dash_reject:
                 app_logger.debug(f"Meteor: rejected by dash periodicity ({scores})")
+                continue
+            if peak_fade_min > 0 and pf < peak_fade_min:
+                app_logger.debug(f"Meteor: rejected by flat profile ({scores})")
                 continue
             app_logger.debug(f"Meteor: profile scores {scores}")
             kept.append(det)
