@@ -594,14 +594,22 @@ class MeteorController(QObject):
 
     def _resolve_sky_circle(self, detection_gray: Image.Image):
         """Compute and cache sky circle in detection-scale pixel coordinates."""
-        scale = self._detection_scale.factor if self._detection_scale else 1.0
+        det_w = detection_gray.width
         try:
             ctrl = getattr(self._main_window, 'allsky_controller', None)
             model = getattr(ctrl, '_model', None) if ctrl else None
             if model and hasattr(model, 'cx') and hasattr(model, 'a1'):
+                # Map native-calibration pixel coords straight to detection
+                # scale using the model's OWN resolution (model.image_width) —
+                # the same rescale overlay_renderer applies. The calibration was
+                # solved at model.image_width, not the already-resized detection
+                # frame, so scaling by detection_scale.factor here double-drops
+                # the resize and mispositions the circle.
+                native_w = getattr(model, 'image_width', 0) or 0
+                s = (det_w / native_w) if native_w > 0 else (
+                    self._detection_scale.factor if self._detection_scale else 1.0)
                 r = model.a1 * (math.pi / 2)
-                self._sky_circle = (
-                    model.cx * scale, model.cy * scale, r * scale)
+                self._sky_circle = (model.cx * s, model.cy * s, r * s)
                 app_logger.info(
                     f"Meteor: sky circle from calibration — "
                     f"cx={self._sky_circle[0]:.0f}, "
