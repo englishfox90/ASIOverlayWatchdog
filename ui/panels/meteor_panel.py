@@ -100,7 +100,7 @@ class DetectionCard(CardWidget):
             self._toggle_btn = PushButton("Hide Highlight")
             self._toggle_btn.setIcon(FluentIcon.VIEW)
             self._toggle_btn.setToolTip(
-                "Show or hide the green line so you can see the streak underneath"
+                "Show or hide the green box framing the streak"
             )
             self._toggle_btn.clicked.connect(self._on_toggle_highlight)
             meta_layout.addWidget(self._toggle_btn)
@@ -135,7 +135,9 @@ class DetectionCard(CardWidget):
         outer.addLayout(meta_layout, 1)
 
     def _build_highlight_pixmap(self, clean: QPixmap, event: dict) -> QPixmap | None:
-        """Paint the green line + length label on a copy of the clean pixmap.
+        """Paint a green bounding box + length label on a copy of the clean
+        pixmap, framing the streak rather than drawing over it so the trail
+        stays visible for confirm/reject decisions.
 
         Coordinates are translated from the saved 300px crop space to the
         displayed label size (typically 1:1, but scaled if KeepAspectRatio
@@ -151,21 +153,29 @@ class DetectionCard(CardWidget):
         scale = clean.width() / thumb_size if thumb_size else 1.0
         x1, y1, x2, y2 = (int(v * scale) for v in line)
 
+        # Bounding box around the streak with padding, clamped to the pixmap.
+        pad = 10
+        pw, ph = clean.width(), clean.height()
+        bx1 = max(0, min(x1, x2) - pad)
+        by1 = max(0, min(y1, y2) - pad)
+        bx2 = min(pw - 1, max(x1, x2) + pad)
+        by2 = min(ph - 1, max(y1, y2) + pad)
+
         pix = QPixmap(clean)
         painter = QPainter(pix)
         try:
             painter.setRenderHint(QPainter.Antialiasing, True)
             pen = QPen(QColor(0, 255, 0), 2)
             painter.setPen(pen)
-            painter.drawLine(x1, y1, x2, y2)
+            painter.drawRect(bx1, by1, bx2 - bx1, by2 - by1)
             length_px = int(event.get("length_px", event.get("max_length", 0)))
             if length_px:
                 font = QFont()
                 font.setPointSize(9)
                 painter.setFont(font)
-                mid_x = (x1 + x2) // 2
-                mid_y = max(10, (y1 + y2) // 2 - 6)
-                painter.drawText(mid_x, mid_y, f"{length_px}px")
+                # Label above the box, or below if there's no room at the top.
+                label_y = by1 - 4 if by1 > 14 else by2 + 14
+                painter.drawText(bx1, label_y, f"{length_px}px")
         finally:
             painter.end()
         return pix
