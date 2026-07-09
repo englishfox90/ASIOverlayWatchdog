@@ -21,7 +21,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from .detector import MeteorDetection, _soft_sky_mask
+from .detector import MeteorDetection, _soft_sky_mask, _validate_trail_brightness
 
 
 def _circularity(area: float, perimeter: float) -> float:
@@ -41,6 +41,7 @@ def detect_streaks_contour(
     min_area: int = 8,
     max_area: int = 3000,
     max_elongation: float = 0.35,
+    min_brightness: int = 20,
 ) -> List[MeteorDetection]:
     """
     Detect streak candidates by contour morphology.
@@ -105,6 +106,13 @@ def detect_streaks_contour(
         x1, y1 = x0 + vx * t_min, y0 + vy * t_min
         x2, y2 = x0 + vx * t_max, y0 + vy * t_max
         angle_deg = math.degrees(math.atan2(y2 - y1, x2 - x1))
+
+        # Parity with the Hough path: the streak must actually be bright along
+        # its length in the transient map. Rejects phantom streaks fit through
+        # scattered noise / star-drift residuals that no real trail underlies.
+        if min_brightness > 0 and not _validate_trail_brightness(
+                gray, int(x1), int(y1), int(x2), int(y2), length, min_brightness):
+            continue
 
         detections.append(MeteorDetection(
             x1=int(round(x1)), y1=int(round(y1)),
