@@ -14,7 +14,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QFont
 from qfluentwidgets import (
     CardWidget, SubtitleLabel, BodyLabel, CaptionLabel,
-    PushButton, SpinBox, LineEdit, FluentIcon,
+    PushButton, SpinBox, LineEdit, ComboBox, FluentIcon,
 )
 
 from ..theme.tokens import Colors, Spacing, Layout
@@ -259,8 +259,24 @@ class MeteorPanel(QScrollArea):
         card.add_widget(self._enable_switch)
         layout.addWidget(card)
 
+    # Detection-method dropdown values, index-aligned with the combo items.
+    _METHOD_VALUES = ("hough", "contour", "both")
+
     def _build_detection_card(self, layout: QVBoxLayout):
         card = CollapsibleCard("Detection Settings", mdi('radar'))
+
+        self._method_combo = ComboBox()
+        self._method_combo.addItems([
+            "Hough lines (default)",
+            "Contour shapes",
+            "Both (merge)",
+        ])
+        self._method_combo.currentIndexChanged.connect(self._on_settings_changed)
+        card.add_row(
+            "Detection Method", self._method_combo,
+            "Hough finds straight lines; Contour traces streak shapes (better "
+            "on faint/curved trails); Both runs and merges the two",
+        )
 
         self._min_length_spin = SpinBox()
         self._min_length_spin.setRange(10, 500)
@@ -420,6 +436,10 @@ class MeteorPanel(QScrollArea):
         self._loading_config = True
         try:
             self._enable_switch.set_checked(config.get("enabled", False))
+            method = config.get("detection_method", "hough")
+            self._method_combo.setCurrentIndex(
+                self._METHOD_VALUES.index(method)
+                if method in self._METHOD_VALUES else 0)
             self._min_length_spin.setValue(int(config.get("min_length", 100)))
             adaptive = config.get("adaptive_threshold", True)
             self._adaptive_switch.set_checked(adaptive)
@@ -488,6 +508,7 @@ class MeteorPanel(QScrollArea):
         existing = dict(self.main_window.config.get("meteor", {}))
         existing.update({
             "enabled":              self._enable_switch.is_checked(),
+            "detection_method":     self._METHOD_VALUES[self._method_combo.currentIndex()],
             "min_length":           self._min_length_spin.value(),
             "adaptive_threshold":   self._adaptive_switch.is_checked(),
             "diff_threshold":       self._diff_threshold_spin.value(),
