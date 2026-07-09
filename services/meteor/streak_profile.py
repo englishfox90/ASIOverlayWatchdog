@@ -72,6 +72,58 @@ def dash_score(profile: np.ndarray) -> float:
     return float(np.clip(secondary, 0.0, 1.0))
 
 
+def dash_count(
+    profile: np.ndarray,
+    rel_threshold: float = 0.45,
+    min_gap: int = 2,
+) -> int:
+    """
+    Count distinct bright dashes along the streak.
+
+    A meteor leaves a single continuous bright run (count == 1). A plane with
+    strobing nav lights leaves several separated bright segments — the dark
+    gaps between blinks split the profile into multiple runs. This is more
+    robust than :func:`dash_score` for *irregular* strobes, where the
+    autocorrelation finds no clean period and scores only weakly even though
+    the row of dots is obvious to the eye.
+
+    A sample counts as bright when it exceeds
+    ``min + rel_threshold * (max - min)`` of the smoothed profile. Dark gaps
+    shorter than *min_gap* samples are ignored so a single-sample noise dip
+    inside one continuous trail does not split it into two dashes.
+    """
+    if len(profile) < 6:
+        return 0
+
+    # Guard on the raw range: a flat streak has no dashes. Do this before
+    # smoothing, whose 'same'-mode boundary ramp would otherwise manufacture
+    # a spurious peak from a genuinely uniform profile.
+    if float(profile.max() - profile.min()) < 1e-3:
+        return 0
+
+    win = max(1, len(profile) // 16)
+    kernel = np.ones(win, dtype=np.float32) / win
+    smoothed = np.convolve(profile, kernel, mode='same')
+
+    ptp = float(smoothed.max() - smoothed.min())
+    if ptp < 1e-3:
+        return 0
+
+    norm = (smoothed - smoothed.min()) / ptp
+    bright = norm >= rel_threshold
+
+    runs = 0
+    gap = min_gap  # start "in a gap" so the first bright sample opens a run
+    for b in bright:
+        if b:
+            if gap >= min_gap:
+                runs += 1
+            gap = 0
+        else:
+            gap += 1
+    return runs
+
+
 def peak_fade_score(profile: np.ndarray) -> float:
     """
     Unimodality score of the intensity envelope.

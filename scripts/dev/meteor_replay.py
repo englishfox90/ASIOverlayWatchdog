@@ -51,7 +51,7 @@ from services.meteor.detection_scale import make_scale
 from services.meteor.frame_stack import FrameStack
 from services.meteor.noise import DiffNoiseEMA, noise_to_threshold
 from services.meteor.detector import detect_meteors, annotate_image, MeteorDetection
-from services.meteor.streak_profile import sample_profile, dash_score, peak_fade_score
+from services.meteor.streak_profile import sample_profile, dash_score, dash_count, peak_fade_score
 from services.meteor.persistence import PersistenceFilter
 
 
@@ -86,11 +86,15 @@ def _apply_profile_filter(det: MeteorDetection, full_gray: np.ndarray,
     """Return True if the detection passes the profile filter."""
     profile = sample_profile(full_gray, det)
     ds = dash_score(profile)
+    dc = dash_count(profile)
     pf = peak_fade_score(profile)
     if ds > dash_reject:
-        print(f"    [profile REJECT] dash={ds:.2f} peak_fade={pf:.2f}")
+        print(f"    [profile REJECT] dash={ds:.2f} dashes={dc} peak_fade={pf:.2f}")
         return False
-    print(f"    [profile OK]     dash={ds:.2f} peak_fade={pf:.2f}")
+    if dc >= 3:
+        print(f"    [profile REJECT] dash={ds:.2f} dashes={dc} peak_fade={pf:.2f} (dash count)")
+        return False
+    print(f"    [profile OK]     dash={ds:.2f} dashes={dc} peak_fade={pf:.2f}")
     return True
 
 

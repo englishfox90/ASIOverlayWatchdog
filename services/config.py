@@ -323,6 +323,7 @@ DEFAULT_CONFIG = {
         "max_nonline_prob": 0.15,       # Reject blobs fatter than this width/length ratio
         "max_length_frac": 0.5,         # Reject streaks longer than this fraction of frame width
         "dash_reject_score": 0.6,       # Dash-periodicity score above which → plane strobes
+        "dash_count_reject": 3,         # Reject streaks with ≥ this many separated bright dots (0 = off)
         "peak_fade_min": 0.0,           # Min ablation-profile score (0 = off); rejects flat streaks
         "track_suppress_minutes": 10,   # Plane-trajectory suppression TTL
         # --- Deprecated (pre-rework, read-but-ignored; remove in Phase 6) ---

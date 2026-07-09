@@ -35,7 +35,7 @@ from services.meteor.detector import (
     detect_meteors, MeteorDetection, annotate_image, merge_collinear_segments,
 )
 from services.meteor.contour_streaks import detect_streaks_contour
-from services.meteor.streak_profile import sample_profile, dash_score, peak_fade_score
+from services.meteor.streak_profile import sample_profile, dash_score, dash_count, peak_fade_score
 from services.meteor.persistence import PersistenceFilter
 from services.meteor.storage import (
     log_detections, log_event, save_thumbnail, resolve_log_path
@@ -326,6 +326,11 @@ class MeteorController(QObject):
     ) -> List[MeteorDetection]:
         """Score and filter detections by streak photometry."""
         dash_reject = float(cfg.get("dash_reject_score", 0.6))
+        # dash_count_reject: a plane's strobing nav lights split the streak
+        # into several separated bright dots; a meteor is one continuous run.
+        # This catches *irregular* strobes that dash_score's autocorrelation
+        # under-scores. 0 disables the gate.
+        dash_count_reject = int(cfg.get("dash_count_reject", 3))
         # peak_fade_min: reject streaks flatter than a meteor's ablation
         # profile (uniform satellites/equipment edges score ~0). Default 0
         # disables the gate — it only *rejects*, so raise it deliberately
@@ -336,11 +341,15 @@ class MeteorController(QObject):
         for det in detections:
             profile = sample_profile(gray, det)
             ds = dash_score(profile)
+            dc = dash_count(profile)
             pf = peak_fade_score(profile)
-            scores = (f"dash={ds:.2f}, peak_fade={pf:.2f} "
+            scores = (f"dash={ds:.2f}, dashes={dc}, peak_fade={pf:.2f} "
                       f"({det.length:.0f}px @{det.angle_deg:.0f}°)")
             if ds > dash_reject:
                 app_logger.debug(f"Meteor: rejected by dash periodicity ({scores})")
+                continue
+            if dash_count_reject > 0 and dc >= dash_count_reject:
+                app_logger.debug(f"Meteor: rejected by dash count ({scores})")
                 continue
             if peak_fade_min > 0 and pf < peak_fade_min:
                 app_logger.debug(f"Meteor: rejected by flat profile ({scores})")

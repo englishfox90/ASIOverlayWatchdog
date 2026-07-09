@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QTextEdit
 )
 from PySide6.QtCore import Qt, Signal, QTimer, Slot, QSize
-from PySide6.QtGui import QFont, QPixmap, QImage, QPainter, QColor, QPen
+from PySide6.QtGui import QFont, QPainter, QColor, QPen
 from qfluentwidgets import CardWidget, SubtitleLabel, BodyLabel, CaptionLabel, ProgressBar
 
 from PIL import Image
@@ -15,140 +15,8 @@ import numpy as np
 from datetime import datetime
 
 from ..theme.tokens import Colors, Typography, Spacing, Layout
-from ..theme.icons import qicon
 from ..components.cards import MonitoringCard
-
-
-class PreviewWidget(QFrame):
-    """Image preview widget with metadata overlay"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._pixmap = None
-        self._metadata = {}
-        self._overlay_key = None
-        self._setup_ui()
-
-    def _setup_ui(self):
-        self.setMinimumSize(200, 150)
-        # Allow flexible sizing - image will scale to fit
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        # Scope to the class — a bare `QFrame` selector also tints child QLabels
-        # (QLabel subclasses QFrame), which put a box behind the overlay icon.
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(f"""
-            PreviewWidget {{
-                background-color: {Colors.bg_input};
-                border: none;
-                border-radius: {Layout.radius_md}px;
-            }}
-        """)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # Image label (centered). Starts empty — the message overlay below owns
-        # all "no camera / no image" messaging, so a placeholder here would just
-        # show through behind the translucent overlay as duplicate text.
-        self.image_label = QLabel("")
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet(f"""
-            color: {Colors.text_muted};
-            font-size: {Typography.size_body}px;
-        """)
-        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        layout.addWidget(self.image_label)
-
-        # Message overlay (no-camera / stale "last frame") drawn over the image.
-        # The bg is scoped to the frame's objectName so it doesn't tint the
-        # child labels/icon (a selector-less rule propagates to children).
-        self._overlay = QFrame(self)
-        self._overlay.setObjectName("previewOverlay")
-        self._overlay.setAttribute(Qt.WA_StyledBackground, True)
-        self._overlay.setStyleSheet(
-            "#previewOverlay { background-color: rgba(6, 8, 11, 0.55); }"
-        )
-        ov = QVBoxLayout(self._overlay)
-        ov.setAlignment(Qt.AlignCenter)
-        ov.setSpacing(Spacing.md)
-        self._overlay_icon = QLabel()
-        self._overlay_icon.setAlignment(Qt.AlignCenter)
-        self._overlay_title = QLabel()
-        self._overlay_title.setAlignment(Qt.AlignCenter)
-        self._overlay_title.setStyleSheet(
-            f"color: {Colors.text_primary}; font-size: {Typography.size_title}px; "
-            f"font-weight: 600; background: transparent;"
-        )
-        self._overlay_sub = QLabel()
-        self._overlay_sub.setAlignment(Qt.AlignCenter)
-        self._overlay_sub.setWordWrap(True)
-        # Fixed width gives the wrapped label a stable box so it isn't shrunk to
-        # its content width (which clipped the text under the centered layout).
-        self._overlay_sub.setFixedWidth(440)
-        self._overlay_sub.setStyleSheet(
-            f"color: {Colors.text_muted}; font-size: {Typography.size_body}px; "
-            f"background: transparent;"
-        )
-        ov.addWidget(self._overlay_icon, 0, Qt.AlignCenter)
-        ov.addWidget(self._overlay_title)
-        ov.addWidget(self._overlay_sub, 0, Qt.AlignCenter)
-        self._overlay.hide()
-
-    def show_overlay(self, icon_name: str, title: str, subtitle: str = ""):
-        """Cover the preview with a centered message (no-camera / stale frame)."""
-        key = (icon_name, title, subtitle)
-        if key == self._overlay_key and self._overlay.isVisible():
-            return
-        self._overlay_key = key
-        self._overlay_icon.setPixmap(qicon(icon_name, Colors.text_muted).pixmap(QSize(64, 64)))
-        self._overlay_title.setText(title)
-        self._overlay_sub.setText(subtitle)
-        self._overlay.setGeometry(0, 0, self.width(), self.height())
-        self._overlay.raise_()
-        self._overlay.show()
-
-    def clear_overlay(self):
-        if self._overlay.isVisible():
-            self._overlay.hide()
-        self._overlay_key = None
-
-    def update_image(self, pil_image: Image.Image, metadata: dict = None):
-        """Update preview with new image"""
-        try:
-            if pil_image.mode != 'RGB':
-                pil_image = pil_image.convert('RGB')
-            # Cap at 1920px — no need to keep a full 3552×3552 pixmap for a preview widget
-            w, h = pil_image.size
-            if max(w, h) > 1920:
-                scale = 1920 / max(w, h)
-                pil_image = pil_image.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
-            data = pil_image.tobytes('raw', 'RGB')
-            qimg = QImage(data, pil_image.width, pil_image.height,
-                         pil_image.width * 3, QImage.Format_RGB888)
-            self._pixmap = QPixmap.fromImage(qimg)
-            self._metadata = metadata or {}
-            self._update_display()
-            self.clear_overlay()  # a fresh frame supersedes any message overlay
-        except Exception as e:
-            self.image_label.setText(f"Error: {e}")
-    
-    def _update_display(self):
-        """Update displayed image scaled to fit widget (letterboxed)"""
-        if self._pixmap:
-            # Scale to fit - uses KeepAspectRatio to fit entire image with letterboxing
-            scaled = self._pixmap.scaled(
-                self.image_label.size(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
-            self.image_label.setPixmap(scaled)
-    
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_display()
-        # Always track the preview size so the overlay is correctly sized the
-        # moment it's shown (not just while already visible).
-        self._overlay.setGeometry(0, 0, self.width(), self.height())
+from .preview_widget import PreviewWidget  # re-exported for existing callers
 
 
 class HistogramWidget(QFrame):
