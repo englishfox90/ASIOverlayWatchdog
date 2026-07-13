@@ -241,8 +241,8 @@ class NavRail(QFrame):
             layout.addWidget(btn)
             self._buttons[key] = btn
 
-        # Both All-Sky and Meteor Tracker are still in beta.
-        for beta_key in ('allsky', 'meteor'):
+        # Meteor Tracker is still in beta.
+        for beta_key in ('meteor',):
             if beta_key in self._buttons:
                 self._buttons[beta_key].set_badge(True, "BETA", Colors.warning_default)
 

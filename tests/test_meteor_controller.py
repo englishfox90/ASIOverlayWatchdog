@@ -38,7 +38,6 @@ CFG = {
     "min_brightness": 20,
     "max_nonline_prob": 0.25,
     "max_length_frac": 0.5,
-    "dash_reject_score": 0.6,
     "noise_sensitivity": "normal",
     "detection_cooldown": 0,
     "save_detections": False,

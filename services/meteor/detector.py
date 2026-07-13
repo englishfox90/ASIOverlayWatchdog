@@ -11,7 +11,7 @@ Algorithm:
   3. MORPH_CLOSE to connect nearby fragments (replaces the old Canny+dilate/erode)
   4. Cloud/blob mask: large-area contours suppressed
   5. Exclusion zone mask (user-rejected equipment regions)
-  6. Probabilistic Hough — tight maxLineGap=5 (large gap welded plane dashes)
+  6. Probabilistic Hough — maxLineGap=15 (bridges gaps in faint/broken trails)
   7. nonline_prob filter: fat blobs rejected, thin streaks kept
   8. Optional minimum brightness check along the trail
 
@@ -228,14 +228,14 @@ def detect_meteors(
         from .mask import apply_exclusion_zones
         binary = apply_exclusion_zones(binary, exclusion_zones)
 
-    # --- Hough lines: tight maxLineGap so plane dashes stay broken ---
+    # --- Hough lines: maxLineGap bridges small gaps in faint/broken trails ---
     lines = cv2.HoughLinesP(
         binary,
         rho=1,
         theta=np.pi / 180,
         threshold=max(5, min_length // 3),
         minLineLength=min_length,
-        maxLineGap=5,
+        maxLineGap=15,
     )
 
     detections: List[MeteorDetection] = []
@@ -272,11 +272,6 @@ def detect_meteors(
         ))
 
     return _merge_collinear_segments(detections)
-
-
-# Public alias so other detectors (e.g. contour_streaks) can dedupe a merged
-# candidate set without reaching for the underscore-prefixed helper.
-merge_collinear_segments = _merge_collinear_segments
 
 
 def _validate_trail_brightness(

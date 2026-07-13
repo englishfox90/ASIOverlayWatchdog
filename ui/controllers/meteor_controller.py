@@ -9,9 +9,8 @@ Detection pipeline (Phase 2–4):
   2. FrameStack.transient_map() = max−mean: static scene cancels automatically.
   3. FrameStack.hot_mask(): pixels bright in ALL frames masked (equipment edges).
   4. DiffNoiseEMA → noise_to_threshold(): proper diff-noise adaptive threshold.
-  5. detect_meteors() with feathered sky-circle mask and tight Hough maxLineGap.
-  6. Streak profile scoring (dash periodicity + peak-fade shape).
-  7. PersistenceFilter: single-frame candidate held one frame; if collinear+advanced
+  5. detect_meteors(): Hough line detection with a feathered sky-circle mask.
+  6. PersistenceFilter: single-frame candidate held one frame; if collinear+advanced
      streak appears next frame → plane (reject); else → meteor (report).
 """
 import math
@@ -32,10 +31,8 @@ from services.meteor.diagnostics import MeteorDiagnostics
 from services.meteor.frame_stack import FrameStack
 from services.meteor.noise import DiffNoiseEMA, noise_to_threshold
 from services.meteor.detector import (
-    detect_meteors, MeteorDetection, annotate_image, merge_collinear_segments,
+    detect_meteors, MeteorDetection, annotate_image,
 )
-from services.meteor.contour_streaks import detect_streaks_contour
-from services.meteor.streak_profile import sample_profile, dash_score, dash_count, peak_fade_score
 from services.meteor.persistence import PersistenceFilter
 from services.meteor.storage import (
     log_detections, log_event, save_thumbnail, resolve_log_path
@@ -239,28 +236,15 @@ class MeteorController(QObject):
                               if scale else min_length_full)
 
             masked_img = Image.fromarray(masked)
-            method = cfg.get("detection_method", "hough")
-            detections: List[MeteorDetection] = []
-            if method in ("hough", "both"):
-                detections += detect_meteors(
-                    masked_img,
-                    min_length=min_length_det,
-                    exclusion_zones=det_zones or None,
-                    sky_circle=self._sky_circle,
-                    threshold=threshold,
-                    max_nonline_prob=float(cfg.get("max_nonline_prob", 0.15)),
-                    min_brightness=int(cfg.get("min_brightness", 20)),
-                )
-            if method in ("contour", "both"):
-                detections += detect_streaks_contour(
-                    masked_img,
-                    min_length=min_length_det,
-                    exclusion_zones=det_zones or None,
-                    sky_circle=self._sky_circle,
-                    threshold=threshold,
-                )
-            if method == "both" and detections:
-                detections = merge_collinear_segments(detections)
+            detections: List[MeteorDetection] = detect_meteors(
+                masked_img,
+                min_length=min_length_det,
+                exclusion_zones=det_zones or None,
+                sky_circle=self._sky_circle,
+                threshold=threshold,
+                max_nonline_prob=float(cfg.get("max_nonline_prob", 0.30)),
+                min_brightness=int(cfg.get("min_brightness", 10)),
+            )
             raw_count = len(detections)
 
             # Absolute length ceiling: a streak spanning most of the sky in one
@@ -279,10 +263,6 @@ class MeteorController(QObject):
                     angle_deg=d.angle_deg,
                     nonline_prob=d.nonline_prob,
                 ) for d in detections]
-
-            if detections:
-                detections = self._apply_profile_filters(detections, full_res, cfg)
-            after_profile_count = len(detections)
 
             # Persistence filter: hold one frame, report as meteor if absent
             # next frame. Must run EVERY frame — an empty frame is what releases
@@ -309,7 +289,6 @@ class MeteorController(QObject):
             self._diag.detection_run(
                 hot_coverage=hot_coverage, sigma=sigma, threshold=threshold,
                 raw=raw_count, after_length=after_length_count,
-                after_profile=after_profile_count,
                 released=released_count, planes=plane_count)
 
         except Exception as exc:
@@ -317,46 +296,6 @@ class MeteorController(QObject):
             app_logger.error(traceback.format_exc())
         finally:
             self._detection_semaphore.release()
-
-    def _apply_profile_filters(
-        self,
-        detections: List[MeteorDetection],
-        full_res: Image.Image,
-        cfg: dict,
-    ) -> List[MeteorDetection]:
-        """Score and filter detections by streak photometry."""
-        dash_reject = float(cfg.get("dash_reject_score", 0.6))
-        # dash_count_reject: a plane's strobing nav lights split the streak
-        # into several separated bright dots; a meteor is one continuous run.
-        # This catches *irregular* strobes that dash_score's autocorrelation
-        # under-scores. 0 disables the gate.
-        dash_count_reject = int(cfg.get("dash_count_reject", 3))
-        # peak_fade_min: reject streaks flatter than a meteor's ablation
-        # profile (uniform satellites/equipment edges score ~0). Default 0
-        # disables the gate — it only *rejects*, so raise it deliberately
-        # against logged scores once recall is confirmed, never blind.
-        peak_fade_min = float(cfg.get("peak_fade_min", 0.0))
-        gray = np.array(full_res.convert('L'))
-        kept = []
-        for det in detections:
-            profile = sample_profile(gray, det)
-            ds = dash_score(profile)
-            dc = dash_count(profile)
-            pf = peak_fade_score(profile)
-            scores = (f"dash={ds:.2f}, dashes={dc}, peak_fade={pf:.2f} "
-                      f"({det.length:.0f}px @{det.angle_deg:.0f}°)")
-            if ds > dash_reject:
-                app_logger.debug(f"Meteor: rejected by dash periodicity ({scores})")
-                continue
-            if dash_count_reject > 0 and dc >= dash_count_reject:
-                app_logger.debug(f"Meteor: rejected by dash count ({scores})")
-                continue
-            if peak_fade_min > 0 and pf < peak_fade_min:
-                app_logger.debug(f"Meteor: rejected by flat profile ({scores})")
-                continue
-            app_logger.debug(f"Meteor: profile scores {scores}")
-            kept.append(det)
-        return kept
 
     # ------------------------------------------------------------------ #
     #  Reporting                                                           #

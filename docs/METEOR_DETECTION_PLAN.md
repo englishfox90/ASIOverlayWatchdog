@@ -50,6 +50,25 @@
 >   transitions, and a WARNING when hot-mask coverage exceeds 40% of the
 >   frame. Sky-circle resolution failure is now a WARNING (was debug).
 
+> **Update (2026-07-12): streak library removed, restrictions loosened.** The
+> feature was still missing real streaks while flagging equipment, so the two
+> "streak" pieces added during the rework were pulled out with Paul's sign-off:
+> - **Deleted** `services/meteor/contour_streaks.py` (the ASTRiDE-inspired
+>   contour candidate finder) and `services/meteor/streak_profile.py`
+>   (dash/peak-fade/dash-count photometry). The Detection Method dropdown and
+>   the `detection_method`, `dash_reject_score`, `dash_count_reject`,
+>   `peak_fade_min` config keys are gone; `_apply_profile_filters` and the
+>   diagnostics `profile-ok` stage are removed.
+> - The detector is now **Hough-only**. Remaining pipeline: FrameStack transient
+>   map + background-relative `hot_mask` → adaptive threshold → `detect_meteors`
+>   (feathered sky mask) → `PersistenceFilter` (plane reject + residue/novelty
+>   suppression) → exclusion zones. Equipment rejection leans on the masking +
+>   persistence + manual "Not a Meteor" zones, not on streak classification.
+> - Restrictions loosened (gentle): `min_brightness` 20→10, `max_nonline_prob`
+>   0.15→0.30, Hough `maxLineGap` 5→15. Sections below describing the contour
+>   detector and streak-profile scoring are **historical** — kept for design
+>   context but no longer implemented.
+
 ---
 
 ## The Problem

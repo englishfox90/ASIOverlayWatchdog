@@ -316,15 +316,11 @@ DEFAULT_CONFIG = {
         "exclusion_zones": [],          # [{x,y,w,h,note}] — user-rejected regions
         # --- Temporal stack detector (Phase 2+) ---
         "stack_frames": 6,              # FrameStack ring-buffer depth
-        "detection_method": "hough",    # hough | contour | both — candidate finder(s)
         "detection_long_side": 1280,    # Detection working resolution (long side, px)
         "noise_sensitivity": "normal",  # low | normal | high → diff-noise threshold mapping
-        "min_brightness": 20,           # Min mean transient value along trail (0 = off)
-        "max_nonline_prob": 0.15,       # Reject blobs fatter than this width/length ratio
+        "min_brightness": 10,           # Min mean transient value along trail (0 = off)
+        "max_nonline_prob": 0.30,       # Reject blobs fatter than this width/length ratio
         "max_length_frac": 0.5,         # Reject streaks longer than this fraction of frame width
-        "dash_reject_score": 0.6,       # Dash-periodicity score above which → plane strobes
-        "dash_count_reject": 3,         # Reject streaks with ≥ this many separated bright dots (0 = off)
-        "peak_fade_min": 0.0,           # Min ablation-profile score (0 = off); rejects flat streaks
         "track_suppress_minutes": 10,   # Plane-trajectory suppression TTL
         # --- Deprecated (pre-rework, read-but-ignored; remove in Phase 6) ---
         "diff_threshold": 25,

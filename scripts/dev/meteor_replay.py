@@ -20,8 +20,7 @@ what the live pipeline does:
   3. Push to FrameStack; compute transient_map and hot_mask when full.
   4. Apply DiffNoiseEMA → noise_to_threshold.
   5. Run detect_meteors with feathered sky-circle mask.
-  6. Score with streak_profile (dash + peak_fade).
-  7. Feed PersistenceFilter; print released meteors / plane rejections.
+  6. Feed PersistenceFilter; print released meteors / plane rejections.
 
 Output
 ------
@@ -51,7 +50,6 @@ from services.meteor.detection_scale import make_scale
 from services.meteor.frame_stack import FrameStack
 from services.meteor.noise import DiffNoiseEMA, noise_to_threshold
 from services.meteor.detector import detect_meteors, annotate_image, MeteorDetection
-from services.meteor.streak_profile import sample_profile, dash_score, dash_count, peak_fade_score
 from services.meteor.persistence import PersistenceFilter
 
 
@@ -79,23 +77,6 @@ def _to_gray_det(path: str, det_long_side: int) -> tuple:
         det = img.convert("L")
     gray_arr = np.array(det, dtype=np.uint8)
     return gray_arr, img, factor
-
-
-def _apply_profile_filter(det: MeteorDetection, full_gray: np.ndarray,
-                           dash_reject: float) -> bool:
-    """Return True if the detection passes the profile filter."""
-    profile = sample_profile(full_gray, det)
-    ds = dash_score(profile)
-    dc = dash_count(profile)
-    pf = peak_fade_score(profile)
-    if ds > dash_reject:
-        print(f"    [profile REJECT] dash={ds:.2f} dashes={dc} peak_fade={pf:.2f}")
-        return False
-    if dc >= 3:
-        print(f"    [profile REJECT] dash={ds:.2f} dashes={dc} peak_fade={pf:.2f} (dash count)")
-        return False
-    print(f"    [profile OK]     dash={ds:.2f} dashes={dc} peak_fade={pf:.2f}")
-    return True
 
 
 def run(args):
@@ -157,8 +138,7 @@ def run(args):
         print(f"[{i:04d}] {fname}: sigma={sigma:.1f} thresh={threshold} "
               f"raw_dets={len(detections)}")
 
-        # Scale to full-res and profile-filter
-        full_gray = np.array(full_img.convert("L"))
+        # Scale detections back to full-res coords
         kept = []
         for d in detections:
             inv = 1.0 / factor if factor < 1.0 else 1.0
@@ -172,8 +152,7 @@ def run(args):
             print(f"    det: ({d_full.x1},{d_full.y1})→({d_full.x2},{d_full.y2}) "
                   f"len={d_full.length:.0f}px angle={d_full.angle_deg:.0f}° "
                   f"nonline={d_full.nonline_prob:.3f}")
-            if _apply_profile_filter(d_full, full_gray, args.dash_reject):
-                kept.append(d_full)
+            kept.append(d_full)
 
         prev_held_img = held_img
         released, planes = pf.update(kept, frame_idx)
@@ -229,12 +208,10 @@ def main():
                         default="normal", help="Noise sensitivity (default: normal)")
     parser.add_argument("--min-length", type=float, default=100,
                         help="Minimum streak length in full-res pixels (default: 100)")
-    parser.add_argument("--max-nonline-prob", type=float, default=0.15,
-                        help="Max nonlinearity probability to pass (default: 0.15)")
+    parser.add_argument("--max-nonline-prob", type=float, default=0.30,
+                        help="Max nonlinearity probability to pass (default: 0.30)")
     parser.add_argument("--max-length-frac", type=float, default=0.5,
                         help="Reject streaks longer than this fraction of frame width (default: 0.5)")
-    parser.add_argument("--dash-reject", type=float, default=0.6,
-                        help="Dash periodicity score above which to reject (default: 0.6)")
     parser.add_argument("--suppress-frames", type=int, default=30,
                         help="Plane suppression duration in frames (default: 30)")
     parser.add_argument("--save", action="store_true",

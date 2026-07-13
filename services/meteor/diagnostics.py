@@ -7,9 +7,9 @@ Answers the two questions a silent night raises:
      dries up, and a 'frames resumed' line marks recovery.
   2. "Frames flowed but nothing fired — where did candidates die?" A periodic
      INFO heartbeat summarises per-stage counters (raw Hough candidates →
-     length ceiling → streak profile → persistence verdicts) plus the current
-     noise threshold and hot-mask coverage, so a zero-detection night is
-     attributable to a specific stage from the log alone.
+     length ceiling → persistence verdicts) plus the current noise threshold
+     and hot-mask coverage, so a zero-detection night is attributable to a
+     specific stage from the log alone.
 
 Also logs transitions: roof-gate suspend/resume, and a WARNING when the hot
 mask blankets an implausible fraction of the frame (the transient map is then
@@ -59,7 +59,6 @@ class MeteorDiagnostics:
         self._skipped = {"warming": 0, "cooldown": 0, "busy": 0}
         self._raw = 0
         self._after_length = 0
-        self._after_profile = 0
         self._released = 0
         self._planes = 0
 
@@ -99,7 +98,7 @@ class MeteorDiagnostics:
                 self._skipped[reason] += 1
 
     def detection_run(self, hot_coverage: float, sigma: float, threshold: int,
-                      raw: int, after_length: int, after_profile: int,
+                      raw: int, after_length: int,
                       released: int, planes: int) -> Optional[str]:
         """Record one detection run's stage counts. Returns the hot-mask
         warning message when coverage crosses the warn fraction, else None."""
@@ -107,7 +106,6 @@ class MeteorDiagnostics:
             self._runs += 1
             self._raw += raw
             self._after_length += after_length
-            self._after_profile += after_profile
             self._released += released
             self._planes += planes
             self._sigma = sigma
@@ -201,8 +199,7 @@ class MeteorDiagnostics:
         parts = [
             f"Meteor heartbeat: {self._frames} frames, {self._runs} detection "
             f"run(s)" + (f" ({skipped} skipped)" if skipped else ""),
-            f"candidates {self._raw} raw -> {self._after_length} length-ok -> "
-            f"{self._after_profile} profile-ok",
+            f"candidates {self._raw} raw -> {self._after_length} length-ok",
             f"{self._released} meteor(s) released, "
             f"{self._planes} plane track(s) suppressed",
             f"hot mask {self._hot_coverage * 100:.1f}%, "

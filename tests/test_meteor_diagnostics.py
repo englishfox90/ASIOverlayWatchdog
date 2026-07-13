@@ -35,7 +35,7 @@ def diag(clock):
 
 def _run(diag, **overrides):
     kwargs = dict(hot_coverage=0.02, sigma=1.4, threshold=6,
-                  raw=0, after_length=0, after_profile=0,
+                  raw=0, after_length=0,
                   released=0, planes=0)
     kwargs.update(overrides)
     return diag.detection_run(**kwargs)
@@ -58,13 +58,13 @@ class TestHeartbeat:
 
     def test_heartbeat_after_interval_summarises_stages(self, diag, clock):
         diag.frame_received()
-        _run(diag, raw=4, after_length=3, after_profile=2, released=1, planes=1)
+        _run(diag, raw=4, after_length=3, released=1, planes=1)
         clock.advance(15 * 60)
         diag.frame_received()   # keep the frame flow alive across the interval
         msg = diag.maybe_heartbeat(enabled=True)
         assert msg is not None
         assert "2 frames" in msg
-        assert "4 raw -> 3 length-ok -> 2 profile-ok" in msg
+        assert "4 raw -> 3 length-ok" in msg
         assert "1 meteor(s) released" in msg
         assert "1 plane track(s) suppressed" in msg
 
