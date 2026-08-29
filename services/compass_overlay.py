@@ -22,6 +22,42 @@ COMPASS_HALF_BASE = 0.12
 COMPASS_INNER_R = 0.07
 COMPASS_LABEL_R = 0.88
 
+# Resolved label fonts, keyed by pixel size.
+#
+# Resolving inside draw_compass meant a filesystem font lookup on every frame
+# of a 24/7 capture loop, and — worse — a *transient* truetype failure could
+# resolve one frame to arial and the next to the default bitmap font, so the
+# labels visibly changed size and position between frames. Cache the outcome so
+# every frame in a session renders identically.
+_FONT_CACHE = {}
+
+
+def _label_font(px):
+    """Return the cached label font for `px`, resolving it on first use.
+
+    Returns None only if no font could be loaded at all, in which case the
+    caller skips the labels rather than failing the frame — an unattended
+    capture must not stop over a missing font.
+    """
+    if px in _FONT_CACHE:
+        return _FONT_CACHE[px]
+
+    font = None
+    for name in ('arial.ttf', 'Arial.ttf', 'DejaVuSans.ttf'):
+        try:
+            font = ImageFont.truetype(name, px)
+            break
+        except (OSError, IOError):
+            continue
+    if font is None:
+        try:
+            font = ImageFont.load_default()
+        except Exception:
+            font = None
+
+    _FONT_CACHE[px] = font
+    return font
+
 
 def draw_compass(image, rotation=0, position='bottom-right',
                  size=DEFAULT_SIZE, color=DEFAULT_COLOR,
@@ -125,10 +161,9 @@ def draw_compass(image, rotation=0, position='bottom-right',
     )
 
     # --- Cardinal labels (N, E, S, W) ---
-    try:
-        font = ImageFont.truetype("arial.ttf", max(10, size // 6))
-    except (OSError, IOError):
-        font = ImageFont.load_default()
+    font = _label_font(max(10, size // 6))
+    if font is None:
+        return Image.alpha_composite(image, overlay)
 
     for label_text, angle_deg in [('N', 0), ('E', 90), ('S', 180), ('W', 270)]:
         angle = rot_rad + flip * math.radians(angle_deg)

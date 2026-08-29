@@ -185,3 +185,96 @@ class TestCompassConfig:
         assert compass[0]['rotation'] == 45
         assert compass[0]['size'] == 100
         assert compass[0]['anchor'] == 'Top-Right'
+
+
+class TestCompassFontCaching:
+    """The label font is resolved once per size, not per draw_compass call.
+
+    Re-resolving per call meant a transient ImageFont.truetype failure could
+    render one frame in arial and the next in the default bitmap font — labels
+    visibly jumping size between consecutive frames of a capture loop, and a
+    flaky E/W mirror comparison.
+    """
+
+    def _clear_cache(self):
+        from services import compass_overlay
+        compass_overlay._FONT_CACHE.clear()
+
+    def test_font_resolved_once_across_many_draws(self):
+        from PIL import ImageFont
+        from services import compass_overlay
+        self._clear_cache()
+
+        calls = []
+        real = ImageFont.truetype
+
+        def counting(font=None, *args, **kwargs):
+            if isinstance(font, str):
+                calls.append(font)
+            return real(font, *args, **kwargs)
+
+        ImageFont.truetype = counting
+        try:
+            for _ in range(5):
+                draw_compass(_make_image(), size=160, cx=128, cy=128)
+        finally:
+            ImageFont.truetype = real
+            self._clear_cache()
+
+        assert len(calls) == 1, f"font re-resolved per call: {calls}"
+
+    def test_consecutive_draws_use_the_same_font_despite_a_transient_failure(self):
+        """The exact flake: font available for one call, unavailable for the next."""
+        from PIL import ImageFont
+        self._clear_cache()
+
+        real = ImageFont.truetype
+        state = {"n": 0}
+
+        def flaky(font=None, *args, **kwargs):
+            if isinstance(font, str) and font.lower().endswith('arial.ttf'):
+                state["n"] += 1
+                if state["n"] > 1:
+                    raise OSError("cannot open resource")
+            return real(font, *args, **kwargs)
+
+        ImageFont.truetype = flaky
+        try:
+            normal = draw_compass(_make_image(), size=160, cx=128, cy=128)
+            mirrored = draw_compass(_make_image(), size=160, cx=128, cy=128,
+                                    mirror=True)
+        finally:
+            ImageFont.truetype = real
+            self._clear_cache()
+
+        def _ink(img, x0, x1):
+            crop = img.crop((128 + x0, 108, 128 + x1, 148))
+            return int(np.array(crop)[:, :, :3].sum())
+
+        west_band, east_band = (-92, -58), (58, 92)
+        assert _ink(normal, *east_band) == _ink(mirrored, *west_band)
+        assert _ink(normal, *west_band) == _ink(mirrored, *east_band)
+
+    def test_missing_font_skips_labels_instead_of_failing_the_frame(self):
+        """An unattended capture must not stop over a font that won't load."""
+        from PIL import ImageFont
+        from services import compass_overlay
+        self._clear_cache()
+
+        real = ImageFont.truetype
+        real_default = ImageFont.load_default
+
+        def boom(*args, **kwargs):
+            raise OSError("no fonts on this box")
+
+        ImageFont.truetype = boom
+        ImageFont.load_default = boom
+        try:
+            img = draw_compass(_make_image(), size=160, cx=128, cy=128)
+        finally:
+            ImageFont.truetype = real
+            ImageFont.load_default = real_default
+            self._clear_cache()
+
+        assert img is not None
+        assert img.size == (256, 256)
