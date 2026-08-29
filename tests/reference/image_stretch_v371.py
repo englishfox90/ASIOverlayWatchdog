@@ -1,7 +1,17 @@
-"""Image stretch engine — MTF and shadow-clipping pipeline."""
+"""FROZEN REFERENCE COPY — DO NOT EDIT.
+
+Verbatim copy of ``services/image_stretch.py`` as of v3.7.1 (commit 106252b),
+kept solely so ``tests/test_image_stretch.py`` can assert that the chunked
+rewrite is bit-identical to the implementation it replaced.
+
+The only permitted deviation from the original is the ``app_logger`` import
+below, which is absolutised so this module can be imported from ``tests/``.
+If the production stretch ever intentionally changes its output, freeze a new
+reference file next to this one — never edit this one to match.
+"""
 import numpy as np
 from PIL import Image
-from .logger import app_logger
+from services.logger import app_logger
 
 
 def mtf_stretch(value, midtone):
@@ -74,12 +84,17 @@ def auto_stretch_image(img, config, raw_16bit=None):
         PIL Image with stretch applied (8-bit output)
     """
     try:
-        # Deferred: image_stretch_chunked imports back into this module for the
-        # MTF primitives, so importing it at module scope would be circular.
-        from .image_stretch_chunked import FrameSource, stretch_linked_rgb_to_uint8
-
-        source = FrameSource(img, raw_16bit)
-        bit_depth_str = source.bit_depth_str
+        # Convert, then scale IN PLACE. `astype(...) / scale` allocates a second
+        # full-frame float32 array (83 MB for a 2628x2628 RGB frame) just to
+        # hold the quotient; `/=` reuses the buffer astype already made.
+        if raw_16bit is not None and raw_16bit.dtype == np.uint16:
+            img_array = raw_16bit.astype(np.float32)
+            img_array /= 65535.0
+            bit_depth_str = "16-bit"
+        else:
+            img_array = np.array(img, dtype=np.float32)
+            img_array /= 255.0
+            bit_depth_str = "8-bit"
 
         target_median = config.get('target_median', 0.25)
         linked_stretch = config.get('linked_stretch', True)
@@ -89,29 +104,20 @@ def auto_stretch_image(img, config, raw_16bit=None):
         saturation_boost = config.get('saturation_boost', 1.5)
         normalize_channels = config.get('normalize_channels', False)
         dark_scene_threshold = config.get('dark_scene_threshold', 0.05)
-        scnr_amount = config.get('scnr_amount', 0.0)
 
         target_median = np.clip(target_median, 0.05, 0.95)
         black_point = np.clip(black_point, 0.0, 0.1)
         shadow_aggressiveness = np.clip(shadow_aggressiveness, 1.0, 5.0)
 
-        # For RGB the brightness probe is the same luminance plane the linked
-        # stretch needs, so build that one plane instead of the whole float32
-        # frame; the full frame is only materialised for paths that cannot be
-        # evaluated band-by-band.
-        img_array = None
-        luminance = None
-        if source.is_rgb:
-            luminance = source.luminance_plane()
-            current_brightness = np.median(luminance)
+        if len(img_array.shape) == 2:
+            current_brightness = np.median(img_array)
         else:
-            img_array = source.full()
-            if len(img_array.shape) == 2 or img_array.shape[2] < 3:
-                current_brightness = np.median(img_array)
-            else:
+            if img_array.shape[2] >= 3:
                 current_brightness = np.median(
                     0.299 * img_array[:,:,0] + 0.587 * img_array[:,:,1] + 0.114 * img_array[:,:,2]
                 )
+            else:
+                current_brightness = np.median(img_array)
 
         if current_brightness > target_median + 0.1:
             app_logger.debug(f"Auto-stretch skipped ({bit_depth_str}): image already bright (median={current_brightness:.3f} > target={target_median:.3f})")
@@ -120,69 +126,55 @@ def auto_stretch_image(img, config, raw_16bit=None):
         app_logger.debug(f"Auto-stretch starting ({bit_depth_str}): current_median={current_brightness:.3f}, target={target_median:.3f}, preserve_blacks={preserve_blacks}")
 
         is_dark_scene = current_brightness < dark_scene_threshold
-        chunkable = (luminance is not None and linked_stretch and scnr_amount <= 0
-                     and not (normalize_channels and is_dark_scene))
+        if normalize_channels and is_dark_scene and len(img_array.shape) == 3 and img_array.shape[2] >= 3:
+            img_array = _normalize_channel_medians(img_array)
 
-        if chunkable:
-            stretched_uint8 = stretch_linked_rgb_to_uint8(
-                source, luminance, target_median, preserve_blacks,
-                black_point, shadow_aggressiveness
-            )
-            luminance = None
-        else:
-            luminance = None
-            if img_array is None:
-                img_array = source.full()
-
-            if normalize_channels and is_dark_scene and len(img_array.shape) == 3 and img_array.shape[2] >= 3:
-                img_array = _normalize_channel_medians(img_array)
-
-            if len(img_array.shape) == 2:
-                stretched = _stretch_channel(img_array, target_median, 'L',
-                                            preserve_blacks, black_point, shadow_aggressiveness)
-            elif img_array.shape[2] == 3:
-                if linked_stretch:
-                    stretched = _stretch_linked_rgb(img_array, target_median,
-                                                   preserve_blacks, black_point, shadow_aggressiveness)
-                else:
-                    stretched = np.zeros_like(img_array)
-                    channel_names = ['R', 'G', 'B']
-                    for c in range(3):
-                        stretched[:,:,c] = _stretch_channel(
-                            img_array[:,:,c], target_median, channel_names[c],
-                            preserve_blacks, black_point, shadow_aggressiveness
-                        )
-            elif img_array.shape[2] == 4:
-                rgb = img_array[:,:,:3]
-                alpha = img_array[:,:,3]
-
-                if linked_stretch:
-                    stretched_rgb = _stretch_linked_rgb(rgb, target_median,
-                                                       preserve_blacks, black_point, shadow_aggressiveness)
-                else:
-                    stretched_rgb = np.zeros_like(rgb)
-                    channel_names = ['R', 'G', 'B']
-                    for c in range(3):
-                        stretched_rgb[:,:,c] = _stretch_channel(
-                            rgb[:,:,c], target_median, channel_names[c],
-                            preserve_blacks, black_point, shadow_aggressiveness
-                        )
-
-                stretched = np.dstack([stretched_rgb, alpha])
+        if len(img_array.shape) == 2:
+            stretched = _stretch_channel(img_array, target_median, 'L',
+                                        preserve_blacks, black_point, shadow_aggressiveness)
+        elif img_array.shape[2] == 3:
+            if linked_stretch:
+                stretched = _stretch_linked_rgb(img_array, target_median,
+                                               preserve_blacks, black_point, shadow_aggressiveness)
             else:
-                return img
+                stretched = np.zeros_like(img_array)
+                channel_names = ['R', 'G', 'B']
+                for c in range(3):
+                    stretched[:,:,c] = _stretch_channel(
+                        img_array[:,:,c], target_median, channel_names[c],
+                        preserve_blacks, black_point, shadow_aggressiveness
+                    )
+        elif img_array.shape[2] == 4:
+            rgb = img_array[:,:,:3]
+            alpha = img_array[:,:,3]
 
-            if scnr_amount > 0 and len(stretched.shape) == 3 and stretched.shape[2] >= 3:
-                stretched = _apply_scnr(stretched, scnr_amount)
+            if linked_stretch:
+                stretched_rgb = _stretch_linked_rgb(rgb, target_median,
+                                                   preserve_blacks, black_point, shadow_aggressiveness)
+            else:
+                stretched_rgb = np.zeros_like(rgb)
+                channel_names = ['R', 'G', 'B']
+                for c in range(3):
+                    stretched_rgb[:,:,c] = _stretch_channel(
+                        rgb[:,:,c], target_median, channel_names[c],
+                        preserve_blacks, black_point, shadow_aggressiveness
+                    )
 
-            # Scale in place: by this point *stretched* is always a freshly built
-            # array — every branch above produced one via np.zeros_like, np.dstack,
-            # or _stretch_channel's leading .copy() — so it never aliases the
-            # caller's data, and `stretched * 255.0` would be one more full-frame
-            # float32 temp (83 MB at 2628x2628) for no reader.
-            np.multiply(stretched, 255.0, out=stretched)
-            stretched_uint8 = stretched.astype(np.uint8)
+            stretched = np.dstack([stretched_rgb, alpha])
+        else:
+            return img
 
+        scnr_amount = config.get('scnr_amount', 0.0)
+        if scnr_amount > 0 and len(stretched.shape) == 3 and stretched.shape[2] >= 3:
+            stretched = _apply_scnr(stretched, scnr_amount)
+
+        # Scale in place: by this point *stretched* is always a freshly built
+        # array — every branch above produced one via np.zeros_like, np.dstack,
+        # or _stretch_channel's leading .copy() — so it never aliases the
+        # caller's data, and `stretched * 255.0` would be one more full-frame
+        # float32 temp (83 MB at 2628x2628) for no reader.
+        np.multiply(stretched, 255.0, out=stretched)
+        stretched_uint8 = stretched.astype(np.uint8)
         result_img = Image.fromarray(stretched_uint8, mode=img.mode)
 
         if saturation_boost != 1.0 and result_img.mode in ('RGB', 'RGBA'):
