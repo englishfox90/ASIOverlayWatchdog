@@ -3,13 +3,21 @@
 NINA loads plugins from ``%LOCALAPPDATA%\\NINA\\Plugins\\<version>\\<PluginName>\\``.
 
 **The version in that path is NOT NINA's own version.** It is
-``PluginMinimumApplicationVersion`` — the plugin compatibility baseline stamped
-on ``NINA.Plugin.dll`` (see NINA's ``NINA.Plugin/Constants.cs``). Verified on a
-3.2.0.9001 install whose plugins live in ``Plugins\\3.0.0\\``: reading
-``NINA.exe``'s FileVersion would target ``3.2.0\\``, where NINA never looks — a
-silent no-op. So the folder is resolved by **enumerating the existing version
-folders and taking the highest**, defaulting to
+``PluginMinimumApplicationVersion`` — the plugin compatibility baseline, which
+has stayed ``3.0.0`` across the whole NINA 3.x line. Verified on a 3.3.0.1057
+install whose 25 plugins all live in ``Plugins\\3.0.0\\``: neither NINA's
+FileVersion (``3.3.0\\``) nor "the highest existing folder" points there.
+Taking the highest is actively wrong — an older build that read ``NINA.exe``'s
+four-part FileVersion once created a stray ``Plugins\\3.2.0.9001\\`` folder;
+being numerically higher than ``3.0.0`` it then wins "take highest" forever,
+so every install lands in a folder NINA never scans — a silent no-op.
+
+So the folder is resolved by finding **where NINA's other plugins already
+live**: the version folder hosting the most non-PFRSentinel plugin subfolders
+(see :func:`resolve_plugin_api_version`), defaulting to
 :data:`DEFAULT_PLUGIN_API_VERSION` on a fresh NINA that has no plugins yet.
+A copy stranded under the old folder then shows up as *stale* and is swept by
+Remove / superseded on the next install.
 
 No sidecar JSON is written: the C# plugin reads
 ``%LOCALAPPDATA%\\PFRSentinel\\config.json`` directly for host/port/token, the
@@ -177,10 +185,52 @@ def list_plugin_api_versions(plugins_root: str) -> list:
     return [name for _, name in found]
 
 
+def _count_other_plugins(version_dir: str) -> int:
+    """Plugin subfolders under a version folder that are not our own.
+
+    NINA loads a plugin from ``<version>\\<PluginName>\\``; the *count* of
+    non-PFRSentinel plugin folders is our evidence that NINA actually loads from
+    this version folder. Our own folder is excluded so a stray copy of just this
+    plugin can never make its host folder look populated.
+    """
+    try:
+        entries = os.listdir(version_dir)
+    except OSError:
+        return 0
+    count = 0
+    for name in entries:
+        if name.casefold() == PLUGIN_FOLDER_NAME.casefold():
+            continue
+        if os.path.isdir(os.path.join(version_dir, name)):
+            count += 1
+    return count
+
+
 def resolve_plugin_api_version(plugins_root: str) -> str:
-    """Highest existing version folder, else :data:`DEFAULT_PLUGIN_API_VERSION`."""
-    versions = list_plugin_api_versions(plugins_root)
-    return versions[-1] if versions else DEFAULT_PLUGIN_API_VERSION
+    """The version folder NINA actually loads plugins from.
+
+    NINA loads plugins from ``Plugins\\<PluginMinimumApplicationVersion>\\`` — a
+    compatibility baseline that has stayed ``3.0.0`` across the whole NINA 3.x
+    line, **not** NINA's own version. So the highest-numbered folder is the
+    wrong signal: a stray ``3.2.0.9001`` left by an older build (whose name is
+    just some past NINA's four-part FileVersion) sorts above ``3.0.0`` yet holds
+    no plugin NINA ever loads — installing there is a silent no-op.
+
+    The reliable signal is where NINA's **other** plugins already live. Pick the
+    version folder hosting the most non-PFRSentinel plugins; on a tie the lowest
+    (most canonical) baseline wins. Fall back to
+    :data:`DEFAULT_PLUGIN_API_VERSION` when nothing is populated — a fresh NINA,
+    or one where only our own stray folders exist.
+    """
+    versions = list_plugin_api_versions(plugins_root)  # sorted lowest-first
+    best = None
+    best_count = 0
+    for version in versions:
+        count = _count_other_plugins(os.path.join(plugins_root, version))
+        if count > best_count:  # strict: first (lowest) among equal counts wins
+            best_count = count
+            best = version
+    return best if best is not None else DEFAULT_PLUGIN_API_VERSION
 
 
 def resolve_target_dir(plugins_root: str, version: str | None = None) -> str:

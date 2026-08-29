@@ -50,18 +50,41 @@ def test_plugins_root_empty_without_local_app_data():
     assert npi.get_nina_root("") == ""
 
 
-def test_resolve_picks_highest_version_folder(tmp_path):
+def test_resolve_follows_where_other_plugins_live(tmp_path):
+    # NINA's real layout: every plugin sits under the 3.0.0 baseline, while a
+    # stray higher-numbered folder (left by an older installer that read
+    # NINA.exe's four-part FileVersion) holds only our own plugin. Resolution
+    # must follow the populated folder, not the higher number.
     root = tmp_path / "Plugins"
-    for name in ("3.0.0", "3.1.0", "2.9.9", "4.0.0"):
-        (root / name).mkdir(parents=True)
-    assert npi.resolve_plugin_api_version(str(root)) == "4.0.0"
+    for name in ("Advanced API", "Hocus Focus", "Target Scheduler"):
+        (root / "3.0.0" / name).mkdir(parents=True)
+    (root / "3.2.0.9001" / npi.PLUGIN_FOLDER_NAME).mkdir(parents=True)
+    assert npi.resolve_plugin_api_version(str(root)) == "3.0.0"
 
 
-def test_resolve_compares_numerically_not_lexically(tmp_path):
+def test_resolve_picks_most_populated_folder(tmp_path):
+    # When two folders host real plugins, the busier one wins even if lower.
     root = tmp_path / "Plugins"
-    for name in ("3.9.0", "3.10.0"):
-        (root / name).mkdir(parents=True)
-    assert npi.resolve_plugin_api_version(str(root)) == "3.10.0"
+    for name in ("PluginA", "PluginB", "PluginC"):
+        (root / "3.0.0" / name).mkdir(parents=True)
+    (root / "4.0.0" / "LonePlugin").mkdir(parents=True)
+    assert npi.resolve_plugin_api_version(str(root)) == "3.0.0"
+
+
+def test_resolve_ties_prefer_lowest_baseline(tmp_path):
+    # Equal population: the lowest (most canonical) baseline wins.
+    root = tmp_path / "Plugins"
+    (root / "3.9.0" / "PluginX").mkdir(parents=True)
+    (root / "3.10.0" / "PluginY").mkdir(parents=True)
+    assert npi.resolve_plugin_api_version(str(root)) == "3.9.0"
+
+
+def test_resolve_defaults_when_only_our_stray_folder_exists(tmp_path):
+    # A stray folder containing only our plugin must not be selected; with no
+    # other plugins anywhere, fall back to the canonical baseline.
+    root = tmp_path / "Plugins"
+    (root / "3.2.0.9001" / npi.PLUGIN_FOLDER_NAME).mkdir(parents=True)
+    assert npi.resolve_plugin_api_version(str(root)) == npi.DEFAULT_PLUGIN_API_VERSION
 
 
 def test_malformed_folder_names_are_ignored(tmp_path):
@@ -192,8 +215,11 @@ def test_status_stale_when_installed_under_other_version(tmp_path, bundled_dll):
     stale = root / "3.0.0" / npi.PLUGIN_FOLDER_NAME
     assert stale.is_dir()
 
-    # NINA moves its compatibility baseline; the plugin is left behind.
-    (root / "4.0.0").mkdir()
+    # NINA moves its compatibility baseline: its other plugins now live under
+    # 4.0.0, so that is where NINA loads from and where we must reinstall. Our
+    # copy under 3.0.0 is left behind (stale). An empty 4.0.0 folder alone would
+    # NOT move the target — only real plugins living there are evidence.
+    (root / "4.0.0" / "Some Other Plugin").mkdir(parents=True)
 
     status = npi.get_status(str(root), bundled_dll)
     assert status.status == npi.STATUS_STALE
@@ -266,6 +292,9 @@ def test_install_refuses_a_junctioned_version_folder(plugins_root, tmp_path, bun
     """A junction named like a version must not take the copy out of the root."""
     outside = tmp_path / "Elsewhere"
     outside.mkdir()
+    # Populate it so resolution selects this (junctioned) version folder as the
+    # target — only then does install reach, and refuse at, the containment guard.
+    (outside / "Some Other Plugin").mkdir()
     link = os.path.join(plugins_root, "9.9.9")
     made = subprocess.run(["cmd", "/c", "mklink", "/J", link, str(outside)],
                           capture_output=True, shell=False)
@@ -401,9 +430,10 @@ def test_remove_clears_a_stale_install_by_default(tmp_path, bundled_dll):
     """A stale install lives in the one folder the resolved target is not."""
     root = tmp_path / "NINA" / "Plugins"
     (root / "3.0.0").mkdir(parents=True)
-    npi.install_plugin(str(root), bundled_dll)
+    npi.install_plugin(str(root), bundled_dll)          # -> 3.0.0 (default)
     stale = root / "3.0.0" / npi.PLUGIN_FOLDER_NAME
-    (root / "4.0.0").mkdir()
+    # NINA moves its baseline: its other plugins now live under 4.0.0.
+    (root / "4.0.0" / "Some Other Plugin").mkdir(parents=True)
     assert npi.get_status(str(root), bundled_dll).status == npi.STATUS_STALE
 
     result = npi.remove_plugin(str(root))
@@ -414,8 +444,8 @@ def test_remove_clears_a_stale_install_by_default(tmp_path, bundled_dll):
 
 def test_remove_reports_what_it_managed_to_delete(tmp_path, bundled_dll):
     root = tmp_path / "NINA" / "Plugins"
-    for name in ("3.0.0", "4.0.0"):
-        (root / name).mkdir(parents=True)
+    # NINA loads from 4.0.0 (its other plugins live there); install targets it.
+    (root / "4.0.0" / "Some Other Plugin").mkdir(parents=True)
     npi.install_plugin(str(root), bundled_dll)              # -> 4.0.0
     stale = root / "3.0.0" / npi.PLUGIN_FOLDER_NAME
     os.makedirs(stale)
@@ -461,16 +491,20 @@ def test_remove_refuses_a_name_match_directly_under_a_drive_root():
 
 def test_remove_include_stale_clears_old_version_folders(tmp_path, bundled_dll):
     root = tmp_path / "NINA" / "Plugins"
-    for name in ("3.0.0", "4.0.0"):
-        (root / name).mkdir(parents=True)
+    # NINA loads from 4.0.0 (its other plugins live there); install targets it.
+    (root / "4.0.0" / "Some Other Plugin").mkdir(parents=True)
     npi.install_plugin(str(root), bundled_dll)
+    target = root / "4.0.0" / npi.PLUGIN_FOLDER_NAME
+    assert target.is_dir()
+
+    # A copy left behind under an older baseline must be swept too.
     stale = root / "3.0.0" / npi.PLUGIN_FOLDER_NAME
     os.makedirs(stale)
     write_fake_dll(str(stale / npi.PLUGIN_DLL_NAME), (2, 0, 0, 0))
 
     assert npi.remove_plugin(str(root), include_stale=True).ok
+    assert not target.exists()
     assert not stale.exists()
-    assert not (root / "4.0.0" / npi.PLUGIN_FOLDER_NAME).exists()
 
 
 def test_remove_without_nina_reports_it(tmp_path):
