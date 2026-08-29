@@ -331,10 +331,14 @@ class OutputSettingsPanel(IntegrationCardsMixin, QScrollArea):
         output = self.main_window.config.get('output', {})
         output['webserver_control_enabled'] = checked
         self.main_window.config.set('output', output)
-        # Persist + reconcile the server first, then mint — minting reads the
-        # flag we just wrote.
+        # Persist + reconcile the server first, then resolve the token — the
+        # resolve reads the flag we just wrote. This runs on BOTH edges: on
+        # disable it pushes an empty token, which is what actually disarms a
+        # server that is already up (server reconciliation only watches
+        # webserver_enabled, so without this the routes stay live until
+        # restart).
         self.settings_changed.emit()
-        self._sync_control_token(mint=checked)
+        self._sync_control_token()
 
         if checked and not self.web_enabled_switch.is_checked():
             # The control routes ride on the web server; enabling one without
@@ -366,22 +370,26 @@ class OutputSettingsPanel(IntegrationCardsMixin, QScrollArea):
         if not (self.main_window and hasattr(self.main_window, 'regenerate_control_token')):
             return
         self.main_window.regenerate_control_token()
-        self._sync_control_token(mint=False)
+        self._sync_control_token()
         self._notify_main_window(
             "New API token generated — any tool using the old one must be updated."
         )
 
-    def _sync_control_token(self, mint=False):
-        """Refresh the token field from config, optionally minting one first.
+    def _sync_control_token(self):
+        """Resolve the token through the window, then reflect it in the field.
 
-        Minting and pushing the token to a live server belong to the main
-        window (panels stay layout-only); this just reflects the result.
+        Always resolves, on enable and disable alike: ensure_control_token()
+        mints when the API is on and returns "" when it is off, and either way
+        pushes the result to a running server. Panels stay layout-only, so the
+        minting and the push belong to the window, not here.
         """
-        if mint and self.main_window and hasattr(self.main_window, 'ensure_control_token'):
-            self.main_window.ensure_control_token()
         token = ''
-        if self.main_window and hasattr(self.main_window, 'config'):
-            token = self.main_window.config.get('output', {}).get('api_token', '') or ''
+        if self.main_window and hasattr(self.main_window, 'ensure_control_token'):
+            # Shows the token the server would actually accept: "" while the API
+            # is off, so a disabled field can never be mistaken for a working
+            # credential. The value itself stays in config, so re-enabling
+            # restores it and anything already holding it keeps working.
+            token = self.main_window.ensure_control_token() or ''
         self.control_token_input.setText(token)
 
     def _notify_main_window(self, message, category='info'):
@@ -450,9 +458,11 @@ class OutputSettingsPanel(IntegrationCardsMixin, QScrollArea):
             self.web_host_input.setText(output.get('webserver_host', '127.0.0.1'))
             self.web_port_spin.setValue(output.get('webserver_port', 8080))
             self.web_path_input.setText(output.get('webserver_path', '/latest'))
-            self.control_enabled_switch.set_checked(
-                output.get('webserver_control_enabled', False))
-            self.control_token_input.setText(output.get('api_token', '') or '')
+            control_on = output.get('webserver_control_enabled', False)
+            self.control_enabled_switch.set_checked(control_on)
+            # Same rule as _sync_control_token: only show a live credential.
+            self.control_token_input.setText(
+                (output.get('api_token', '') or '') if control_on else '')
             self._update_api_docs_url()
 
             # Discord

@@ -42,6 +42,32 @@ class _Window(_MainWindowSettingsMixin):
     def __init__(self, config, web_server=None):
         self.config = config
         self.web_server = web_server
+        self.settings_emitted = 0
+
+
+@pytest.fixture(scope="module", autouse=False)
+def qapp():
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+def _qt_window_cls():
+    """MainWindow stand-in that is a real QWidget, so the panel can parent to it."""
+    from PySide6.QtWidgets import QWidget
+
+    class _QtWindowImpl(_MainWindowSettingsMixin, QWidget):
+        def __init__(self, config, web_server=None):
+            super().__init__()
+            self.config = config
+            self.web_server = web_server
+            self.notes = []
+
+        def _notify(self, message, category='info'):
+            self.notes.append((category, message))
+
+    return _QtWindowImpl
 
 
 def enabled_config(**extra):
@@ -124,6 +150,31 @@ def test_disabling_pushes_an_empty_token_to_a_running_server():
                                   "api_token": "stored"}})
     _Window(cfg, web_server=server).ensure_control_token()
     assert server.tokens[-1] == ""
+
+
+def test_panel_disarms_a_running_server_when_the_api_is_switched_off(qapp):
+    """The disable edge is the one that matters and the one that was broken.
+
+    Server reconciliation only watches `webserver_enabled`, so turning the
+    control API off must push an empty token itself — otherwise
+    POST /capture/start stays fully live until the app restarts.
+    """
+    from ui.panels.output_settings import OutputSettingsPanel
+
+    server = _FakeServer()
+    cfg = enabled_config(api_token="live-token")
+    win = _qt_window_cls()(cfg, web_server=server)
+    panel = OutputSettingsPanel(win)
+    panel.load_from_config(cfg)
+
+    assert panel.control_token_input.text() == "live-token"
+
+    panel.control_enabled_switch.set_checked(False)
+    panel._on_control_enabled_changed(False)
+
+    assert cfg.data["output"]["webserver_control_enabled"] is False
+    assert server.tokens[-1] == "", "running server still armed after disable"
+    assert panel.control_token_input.text() == ""
 
 
 def test_no_server_is_not_an_error():
