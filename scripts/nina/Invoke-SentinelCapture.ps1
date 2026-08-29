@@ -9,7 +9,7 @@
     capture follows the observing session.
 
     Credentials are read out of Sentinel's own config.json, so there is nothing
-    to paste into NINA. The token is never printed, logged, or echoed — not
+    to paste into NINA. The token is never printed, logged, or echoed - not
     even with -Verbose.
 
     The call blocks until capture actually reaches the requested state (or the
@@ -60,6 +60,10 @@ param(
     [string]$ConfigPath
 )
 
+# Windows PowerShell 5.1 is what the .bat wrapper launches, so this script must
+# stay parseable there: no ternary (? :), no null-coalescing (??), no `clean`
+# PS7-only syntax. A parse error here fails the whole NINA step with a wall of
+# red rather than a usable message.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -91,7 +95,7 @@ if ($needsConfig) {
         Fail 2 "Could not read Sentinel config at $ConfigPath."
     }
     if (-not $config.PSObject.Properties.Name.Contains('output')) {
-        Fail 3 "Sentinel config has no 'output' section — is this a current Sentinel install?"
+        Fail 3 "Sentinel config has no 'output' section - is this a current Sentinel install?"
     }
     $output = $config.output
 }
@@ -108,7 +112,7 @@ function Get-OutputValue([string]$Name, $Default) {
 if (-not $BaseUrl) {
     $host_ = Get-OutputValue 'webserver_host' '127.0.0.1'
     # A wildcard bind is an address to listen on, not one to connect to.
-    # http://0.0.0.0:8080 does not resolve — and the control API's Host
+    # http://0.0.0.0:8080 does not resolve - and the control API's Host
     # allow-list accepts loopback anyway, so that is the right target.
     if ($host_ -in @('0.0.0.0', '::', '[::]', '')) { $host_ = '127.0.0.1' }
     $port = Get-OutputValue 'webserver_port' 8080
@@ -144,9 +148,10 @@ try {
         -Headers @{ Authorization = "Bearer $Token" } `
         -TimeoutSec $clientTimeout
 } catch {
+    $err = $_
     $webResponse = $null
-    if ($_.Exception.PSObject.Properties.Name -contains 'Response') {
-        $webResponse = $_.Exception.Response
+    if ($err.Exception.PSObject.Properties.Name -contains 'Response') {
+        $webResponse = $err.Exception.Response
     }
 
     if ($null -eq $webResponse) {
@@ -154,12 +159,52 @@ try {
     }
 
     $status = [int]$webResponse.StatusCode
+
+    # Sentinel puts the real cause in the response body - "No ZWO cameras
+    # detected", and a machine-readable `code`. Read it before branching;
+    # "check the log" is a poor substitute for the reason we were just handed.
+    # PowerShell 7 hands the body to $_.ErrorDetails.Message; Windows PowerShell
+    # 5.1 requires reading the response stream. Try both - the .bat wrapper does
+    # not pin which one runs.
+    $detail = $null
+    $errCode = $null
+    $raw = $null
+    if ($err.PSObject.Properties.Name -contains 'ErrorDetails' -and $err.ErrorDetails) {
+        $raw = $err.ErrorDetails.Message
+    }
+    if (-not $raw) {
+        try {
+            $reader = New-Object System.IO.StreamReader($webResponse.GetResponseStream())
+            $raw = $reader.ReadToEnd()
+        } catch { }
+    }
+    if ($raw) {
+        try {
+            $parsed = $raw | ConvertFrom-Json
+            if ($parsed.PSObject.Properties.Name -contains 'message') { $detail = $parsed.message }
+            elseif ($parsed.PSObject.Properties.Name -contains 'error') { $detail = $parsed.error }
+            if ($parsed.PSObject.Properties.Name -contains 'code') { $errCode = $parsed.code }
+        } catch { }
+    }
+
+    if ($detail) { Write-Output "[Sentinel] Server said: $detail" }
+
+    # 503 has two causes needing opposite fixes; `code` is what separates them.
+    if ($status -eq 503) {
+        if ($errCode -eq 'control_unavailable') {
+            Fail 3 "Sentinel is running but capture control is not wired up. Restart Sentinel."
+        }
+        Fail 3 "The capture control API is switched off in Sentinel. Enable it on the Output tab."
+    }
+
     switch ($status) {
         401 { Fail 5 "Authentication rejected. Regenerate the token on Sentinel's Output tab." }
         403 { Fail 5 "Request rejected by the Host allow-list. Sentinel only accepts control calls from the same machine." }
-        503 { Fail 3 "Sentinel's control API is not available (not enabled, or capture is not ready)." }
         504 { Fail 6 "Timed out after ${TimeoutSeconds}s waiting for capture to $Command." }
-        500 { Fail 7 "Capture reported a failure while trying to $Command. Check Sentinel's log." }
+        500 {
+            if ($detail) { Fail 7 $detail }
+            Fail 7 "Capture reported a failure while trying to $Command. Check Sentinel's log."
+        }
         default { Fail 4 "Unexpected HTTP $status from Sentinel." }
     }
 }
