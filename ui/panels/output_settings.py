@@ -21,9 +21,10 @@ from ..theme.tokens import Colors, Typography, Spacing, Layout
 from ..theme.icons import mdi
 from ..components.cards import SettingsCard, SwitchRow, CollapsibleCard
 from ._integration_cards import IntegrationCardsMixin
+from ._nina_plugin_card import NinaPluginCardMixin
 
 
-class OutputSettingsPanel(IntegrationCardsMixin, QScrollArea):
+class OutputSettingsPanel(IntegrationCardsMixin, NinaPluginCardMixin, QScrollArea):
     """
     Output settings panel with:
     - File output (directory, format, naming)
@@ -183,7 +184,12 @@ class OutputSettingsPanel(IntegrationCardsMixin, QScrollArea):
                          "you only need to copy it for other tools")
 
         layout.addWidget(web_card)
-        
+
+        # === NINA PLUGIN ===
+        # Built by NinaPluginCardMixin (ui/panels/_nina_plugin_card.py) — sits
+        # next to the control API it pairs with.
+        self._build_nina_plugin_card(layout)
+
         # === DISCORD + HERMES ===
         # Built by IntegrationCardsMixin (ui/panels/_integration_cards.py) —
         # kept in a sibling module to stay under the file-size cap.

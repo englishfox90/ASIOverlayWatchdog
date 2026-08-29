@@ -45,6 +45,67 @@ class _MainWindowSettingsMixin:
                 app_logger.error(f"Could not apply control token to web server: {e}")
 
     # =========================================================================
+    # NINA PLUGIN
+    # =========================================================================
+
+    def nina_plugin_controller(self):
+        """Lazily built so a headless/testing window pays nothing for it."""
+        controller = getattr(self, '_nina_plugin_controller', None)
+        if controller is None:
+            from ui.controllers.nina_plugin_controller import NinaPluginController
+            controller = NinaPluginController(self)
+            controller.status_ready.connect(self._on_nina_plugin_status)
+            controller.action_finished.connect(self._on_nina_plugin_action_finished)
+            controller.busy_changed.connect(self._on_nina_plugin_busy)
+            self._nina_plugin_controller = controller
+        return controller
+
+    def run_nina_plugin_action(self, action: str) -> bool:
+        """Run install / remove / refresh off the GUI thread.
+
+        Owned by the window for the same reason as the control token: the panel
+        is layout-only, and the file I/O has to leave the GUI thread.
+        """
+        try:
+            return self.nina_plugin_controller().run(action)
+        except Exception as e:
+            app_logger.error(f"NINA plugin action '{action}' failed to start: {e}")
+            return False
+
+    def refresh_nina_plugin_status(self) -> bool:
+        return self.run_nina_plugin_action('refresh')
+
+    def _on_nina_plugin_status(self, status):
+        self._maybe_nudge_nina_plugin_stale(status)
+        panel = getattr(self, 'output_panel', None)
+        if panel is not None and hasattr(panel, 'set_nina_plugin_status'):
+            panel.set_nina_plugin_status(status)
+
+    def _on_nina_plugin_action_finished(self, result):
+        # Verbatim: the service already distinguishes "close NINA first" from a
+        # real failure, and rewording it here would lose that.
+        self._notify(result.message, 'info' if result.ok else 'warning')
+
+    def _on_nina_plugin_busy(self, busy):
+        panel = getattr(self, 'output_panel', None)
+        if panel is not None and hasattr(panel, 'set_nina_plugin_busy'):
+            panel.set_nina_plugin_busy(busy)
+
+    def _maybe_nudge_nina_plugin_stale(self, status):
+        """One nudge per session when NINA reads from a folder we're not in.
+
+        Only for 'stale' — an absent or current plugin is not a problem, and a
+        notification on every start for those would train the user to ignore it.
+        """
+        if getattr(self, '_nina_plugin_nudged', False):
+            return
+        from services.nina_plugin_install import STATUS_STALE
+        if getattr(status, 'status', '') != STATUS_STALE:
+            return
+        self._nina_plugin_nudged = True
+        self._notify(f"NINA plugin: {status.message}", 'warning')
+
+    # =========================================================================
     # SETTINGS
     # =========================================================================
 
@@ -149,6 +210,9 @@ class _MainWindowSettingsMixin:
         finally:
             self.is_loading_config = False
             self._update_start_button()
+            # Startup state for the NINA card, and the stale-install nudge.
+            # Outside the try above so a config-load failure doesn't skip it.
+            self.refresh_nina_plugin_status()
 
     def _init_weather_service(self, from_settings_save=False):
         try:
