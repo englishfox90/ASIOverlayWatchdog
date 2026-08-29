@@ -1,4 +1,4 @@
-<ResourceDictionary
+﻿<ResourceDictionary
     x:Class="PFRSentinel.NINA.SentinelSequenceItems.SentinelTemplates"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -6,14 +6,76 @@
     xmlns:mini="clr-namespace:NINA.View.Sequencer.MiniSequencer;assembly=NINA.Sequencer"
     xmlns:nina="clr-namespace:NINA.View.Sequencer;assembly=NINA.Sequencer">
 
-    <!--
-        Instruction icon. Renamed from the template's "Plugin_Test_SVG": NINA merges every
-        plugin's dictionaries, so the template's key collides across every plugin built
-        from it. Referenced by [ExportMetadata("Icon", ...)] on both instructions.
-    -->
-    <GeometryGroup x:Key="PFRSentinel_SVG">
-        <PathGeometry Figures="M 153.646,20.8542L 88.875,20.8542L 88.875,180.708L 64.7708,180.708L 64.7708,20.8542L -1.01725e-005,20.8542L -1.01725e-005,-0.5625L 153.646,-0.5625L 153.646,20.8542 Z " />
-        <PathGeometry Figures="M 263.627,115.083L 163.44,115.083C 163.44,123.458 164.69,130.729 167.211,136.938C 169.711,143.146 173.169,148.25 177.544,152.229C 181.752,156.125 186.773,159.042 192.586,161C 198.377,162.958 204.773,163.917 211.773,163.917C 221.023,163.917 230.336,162.083 239.711,158.375C 249.086,154.688 255.752,151.063 259.732,147.479L 260.94,147.479L 260.94,172.438C 253.232,175.688 245.357,178.396 237.315,180.583C 229.273,182.771 220.836,183.875 212.002,183.875C 189.44,183.875 171.836,177.771 159.169,165.563C 146.502,153.354 140.169,136 140.169,113.5C 140.169,91.2708 146.232,73.625 158.377,60.5417C 170.502,47.4792 186.482,40.9375 206.294,40.9375C 224.627,40.9375 238.752,46.3125 248.711,57.0208C 258.648,67.7292 263.627,82.9583 263.627,102.667L 263.627,115.083 Z " />
+    <!-- Start Sentinel Capture - aperture + play.
+         Aperture = the PFR Sentinel mark (same paths as the dockable icon, from
+         assets/Icon.svg), with the action badge sitting in a gap cut out of it.
+
+         The cut is CombinedGeometry/Exclude, NOT a fill rule. An EvenOdd
+         knockout looks right only where the circle overlaps the aperture: over
+         bare background the circle is covered once, so it fills solid, and the
+         glyph inside it then lands on an even count and punches through as a
+         hole - an inverted badge on a disc. Exclude subtracts strictly where
+         the shapes intersect, which is what "leave a gap" actually means. -->
+    <GeometryGroup x:Key="PFRSentinel_StartSVG" FillRule="Nonzero">
+        <CombinedGeometry GeometryCombineMode="Exclude">
+            <CombinedGeometry.Geometry1>
+                <GeometryGroup FillRule="Nonzero">
+                    <GeometryGroup.Transform>
+                        <TransformGroup>
+                            <ScaleTransform ScaleX="1.30159" ScaleY="1.30159" />
+                            <TranslateTransform X="-256.41" Y="-256.41" />
+                        </TransformGroup>
+                    </GeometryGroup.Transform>
+                        <PathGeometry Figures="M449.46,383.68h90.44l-102.61-177.73c-55.56,13.45-106.53,41.91-147.98,83.36-27.7,27.7-49.59,59.65-65.09,94.37h225.25Z" />
+                        <PathGeometry Figures="M591.87,393.69l45.21,78.31,102.56-177.63c-1.63-1.7-3.27-3.39-4.94-5.06-59.48-59.48-138.57-92.24-222.7-92.24-10.99,0-21.9.57-32.68,1.68l112.55,194.94s0,.01,0,.02Z" />
+                        <PathGeometry Figures="M257.04,696.96l112.56-194.96,45.22-78.32h-205.25c-8.23,28.33-12.51,58-12.51,88.32,0,67.38,21.04,131.53,59.98,184.96Z" />
+                        <PathGeometry Figures="M432.15,630.34s0,0,0-.01l-45.22-78.32-102.56,177.63c1.63,1.7,3.27,3.39,4.94,5.06,59.48,59.48,138.57,92.24,222.7,92.24,10.99,0,21.9-.57,32.69-1.68l-112.54-194.92Z" />
+                        <PathGeometry Figures="M766.96,327.04l-112.56,194.96-45.22,78.32h205.25c8.23-28.33,12.51-58,12.51-88.32,0-67.38-21.04-131.53-59.98-184.96Z" />
+                        <PathGeometry Figures="M574.57,640.32s-.02,0-.03,0h-90.44l102.61,177.73c55.56-13.46,106.53-41.91,147.98-83.36,27.7-27.7,49.59-59.65,65.09-94.37h-225.22Z" />
+                        <EllipseGeometry Center="512,512" RadiusX="59.16" RadiusY="59.16" />
+                </GeometryGroup>
+            </CombinedGeometry.Geometry1>
+            <CombinedGeometry.Geometry2>
+                <EllipseGeometry Center="757,757" RadiusX="272" RadiusY="272" />
+            </CombinedGeometry.Geometry2>
+        </CombinedGeometry>
+        <PathGeometry Figures="M 655,600 L 655,914 L 940,757 Z" />
+    </GeometryGroup>
+
+    <!-- Stop Sentinel Capture - aperture + stop.
+         Aperture = the PFR Sentinel mark (same paths as the dockable icon, from
+         assets/Icon.svg), with the action badge sitting in a gap cut out of it.
+
+         The cut is CombinedGeometry/Exclude, NOT a fill rule. An EvenOdd
+         knockout looks right only where the circle overlaps the aperture: over
+         bare background the circle is covered once, so it fills solid, and the
+         glyph inside it then lands on an even count and punches through as a
+         hole - an inverted badge on a disc. Exclude subtracts strictly where
+         the shapes intersect, which is what "leave a gap" actually means. -->
+    <GeometryGroup x:Key="PFRSentinel_StopSVG" FillRule="Nonzero">
+        <CombinedGeometry GeometryCombineMode="Exclude">
+            <CombinedGeometry.Geometry1>
+                <GeometryGroup FillRule="Nonzero">
+                    <GeometryGroup.Transform>
+                        <TransformGroup>
+                            <ScaleTransform ScaleX="1.30159" ScaleY="1.30159" />
+                            <TranslateTransform X="-256.41" Y="-256.41" />
+                        </TransformGroup>
+                    </GeometryGroup.Transform>
+                        <PathGeometry Figures="M449.46,383.68h90.44l-102.61-177.73c-55.56,13.45-106.53,41.91-147.98,83.36-27.7,27.7-49.59,59.65-65.09,94.37h225.25Z" />
+                        <PathGeometry Figures="M591.87,393.69l45.21,78.31,102.56-177.63c-1.63-1.7-3.27-3.39-4.94-5.06-59.48-59.48-138.57-92.24-222.7-92.24-10.99,0-21.9.57-32.68,1.68l112.55,194.94s0,.01,0,.02Z" />
+                        <PathGeometry Figures="M257.04,696.96l112.56-194.96,45.22-78.32h-205.25c-8.23,28.33-12.51,58-12.51,88.32,0,67.38,21.04,131.53,59.98,184.96Z" />
+                        <PathGeometry Figures="M432.15,630.34s0,0,0-.01l-45.22-78.32-102.56,177.63c1.63,1.7,3.27,3.39,4.94,5.06,59.48,59.48,138.57,92.24,222.7,92.24,10.99,0,21.9-.57,32.69-1.68l-112.54-194.92Z" />
+                        <PathGeometry Figures="M766.96,327.04l-112.56,194.96-45.22,78.32h205.25c8.23-28.33,12.51-58,12.51-88.32,0-67.38-21.04-131.53-59.98-184.96Z" />
+                        <PathGeometry Figures="M574.57,640.32s-.02,0-.03,0h-90.44l102.61,177.73c55.56-13.46,106.53-41.91,147.98-83.36,27.7-27.7,49.59-59.65,65.09-94.37h-225.22Z" />
+                        <EllipseGeometry Center="512,512" RadiusX="59.16" RadiusY="59.16" />
+                </GeometryGroup>
+            </CombinedGeometry.Geometry1>
+            <CombinedGeometry.Geometry2>
+                <EllipseGeometry Center="757,757" RadiusX="272" RadiusY="272" />
+            </CombinedGeometry.Geometry2>
+        </CombinedGeometry>
+        <RectangleGeometry Rect="607,607,300,300" RadiusX="42" RadiusY="42" />
     </GeometryGroup>
 
     <!--

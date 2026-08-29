@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 using Newtonsoft.Json;
 using NINA.Core.Model;
 using NINA.Core.Utility;
@@ -31,7 +31,7 @@ namespace PFRSentinel.NINA.SentinelSequenceItems {
     /// </remarks>
     [ExportMetadata("Name", "Stop Sentinel Capture")]
     [ExportMetadata("Description", "Stops PFR Sentinel capture and waits until it has actually stopped before the sequence continues. Safe to re-run: an already-stopped capture succeeds without changing anything.")]
-    [ExportMetadata("Icon", "PFRSentinel_SVG")]
+    [ExportMetadata("Icon", "PFRSentinel_StopSVG")]
     [ExportMetadata("Category", "PFR Sentinel")]
     [Export(typeof(ISequenceItem))]
     [JsonObject(MemberSerialization.OptIn)]
