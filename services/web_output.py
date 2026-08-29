@@ -104,7 +104,9 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
             # build. Answer with a redacted 500 instead.
             app_logger.error(f"Unhandled error in control route: {api_auth.redact(e)}")
             try:
-                self.send_error(500, "Internal error handling control request.")
+                web_control._send_error(
+                    self, 500, "Internal error handling control request.",
+                    "internal_error")
             except Exception:
                 pass
 

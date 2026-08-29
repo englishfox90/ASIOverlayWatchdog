@@ -37,11 +37,15 @@ AUTH_INVALID = "invalid"                # well-formed but wrong token
 # switched off needs to know that, and the NINA helper maps it to its own
 # "enable the control API" exit code. That reveals only a setting the operator
 # already controls — never anything about the token.
+# The `code` is machine-readable and deliberately coarser than the verdict:
+# all three genuine auth failures collapse to one code as well as one message,
+# so a client still cannot distinguish them.
 _VERDICT_RESPONSE = {
-    AUTH_NOT_CONFIGURED: (503, "Control API is not configured on this server."),
-    AUTH_MISSING: (401, "Authorization required."),
-    AUTH_MALFORMED: (401, "Authorization required."),
-    AUTH_INVALID: (401, "Authorization required."),
+    AUTH_NOT_CONFIGURED: (503, "control_disabled",
+                          "Control API is not configured on this server."),
+    AUTH_MISSING: (401, "unauthorized", "Authorization required."),
+    AUTH_MALFORMED: (401, "unauthorized", "Authorization required."),
+    AUTH_INVALID: (401, "unauthorized", "Authorization required."),
 }
 
 # Config key holding the control-API bearer token, inside the nested `output`
@@ -143,13 +147,13 @@ def check_bearer(header_value, expected_token) -> str:
 
 
 def verdict_response(verdict: str):
-    """Map an ``AUTH_*`` verdict to ``(http_status, client_message)``.
+    """Map an ``AUTH_*`` verdict to ``(http_status, code, client_message)``.
 
     ``AUTH_OK`` has no response of its own — asking for one is a caller bug.
     """
     if verdict == AUTH_OK:
         raise ValueError("verdict_response() called on AUTH_OK")
-    return _VERDICT_RESPONSE.get(verdict, (401, "Authorization required."))
+    return _VERDICT_RESPONSE.get(verdict, (401, "unauthorized", "Authorization required."))
 
 
 def normalize_host(host_header) -> str:

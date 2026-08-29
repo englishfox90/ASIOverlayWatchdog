@@ -334,3 +334,66 @@ def test_get_capture_state_returns_capture_and_health():
     assert h.body["capture"]["state"] == "capturing"
     assert h.body["health"]["status"] == "ok"
     assert "Access-Control-Allow-Origin" not in h.sent_headers
+
+
+# --- machine-readable error codes -----------------------------------------
+
+def test_the_two_503_causes_are_distinguishable():
+    """Same status, opposite operator advice — a client must not match on prose.
+
+    503 means either 'the control API is switched off' (tell the user to enable
+    it on the Output tab) or 'the server is up but no capture handler
+    registered' (a wiring fault). Only `code` separates them.
+    """
+    disabled = make_handler()
+    disabled.server.control_token = ""
+    post(disabled)
+
+    unavailable = make_handler(recorder=None)  # token fine, no handler
+    post(unavailable)
+
+    assert disabled.status == unavailable.status == 503
+    assert disabled.body["code"] == "control_disabled"
+    assert unavailable.body["code"] == "control_unavailable"
+
+
+@pytest.mark.parametrize("headers,code", [
+    ({"Host": "127.0.0.1"}, "unauthorized"),
+    ({"Host": "127.0.0.1", "Authorization": "Bearer wrong"}, "unauthorized"),
+    ({"Host": "127.0.0.1", "Authorization": "Basic x"}, "unauthorized"),
+    ({"Host": "evil.example.com", "Authorization": f"Bearer {TOKEN}"}, "host_not_allowed"),
+])
+def test_rejection_codes(headers, code):
+    h = make_handler(headers=headers)
+    post(h)
+    assert h.body["code"] == code
+
+
+def test_auth_failures_share_one_code_and_message():
+    """The code must not leak which of the three auth failures occurred."""
+    missing = make_handler(headers={"Host": "127.0.0.1"})
+    wrong = make_handler(headers={"Host": "127.0.0.1", "Authorization": "Bearer wrong"})
+    post(missing)
+    post(wrong)
+    assert missing.body["code"] == wrong.body["code"]
+    assert missing.body["error"] == wrong.body["error"]
+
+
+def test_bad_body_codes():
+    malformed = make_handler(body=b"{nope", recorder=_Recorder())
+    post(malformed)
+    assert malformed.body["code"] == "bad_request"
+
+    oversized = make_handler(recorder=_Recorder())
+    oversized.headers["Content-Length"] = str(api_control.MAX_BODY_BYTES + 1)
+    post(oversized)
+    assert oversized.body["code"] == "body_too_large"
+
+
+def test_every_error_response_carries_a_code():
+    for h in (make_handler(headers={"Host": "127.0.0.1"}),
+              make_handler(headers={"Host": "evil.com"}),
+              make_handler(body=b"{nope", recorder=_Recorder()),
+              make_handler(recorder=None)):
+        post(h)
+        assert "code" in h.body, h.body

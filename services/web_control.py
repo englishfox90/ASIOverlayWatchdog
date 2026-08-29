@@ -59,8 +59,19 @@ def _send_json(handler, status: int, payload: dict):
         app_logger.error(f"Error serving control response: {api_auth.redact(e)}")
 
 
-def _send_error(handler, status: int, message: str):
-    _send_json(handler, status, {"error": message, "status": status})
+# Machine-readable error codes. HTTP status alone is not enough: 503 has two
+# entirely different causes needing opposite operator advice, and a client
+# should never have to match on free text to tell them apart.
+ERR_BAD_REQUEST = "bad_request"
+ERR_BODY_TOO_LARGE = "body_too_large"
+ERR_UNAUTHORIZED = "unauthorized"
+ERR_HOST_NOT_ALLOWED = "host_not_allowed"
+ERR_CONTROL_DISABLED = "control_disabled"        # no token configured
+ERR_CONTROL_UNAVAILABLE = "control_unavailable"  # no capture handler registered
+
+
+def _send_error(handler, status: int, message: str, code: str):
+    _send_json(handler, status, {"error": message, "status": status, "code": code})
 
 
 def _configured_host(handler):
@@ -80,7 +91,7 @@ def authorize(handler) -> bool:
             "Rejected control request with disallowed Host header "
             f"'{api_auth.redact(handler.headers.get('Host'))}'"
         )
-        _send_error(handler, 403, "Host not allowed.")
+        _send_error(handler, 403, "Host not allowed.", ERR_HOST_NOT_ALLOWED)
         return False
 
     token = getattr(handler.server, "control_token", "") or ""
@@ -88,10 +99,10 @@ def authorize(handler) -> bool:
     if verdict == api_auth.AUTH_OK:
         return True
 
-    status, message = api_auth.verdict_response(verdict)
+    status, code, message = api_auth.verdict_response(verdict)
     # The verdict is safe to log; the presented credential is not.
     app_logger.warning(f"Control request denied ({verdict}) for {handler.path}")
-    _send_error(handler, status, message)
+    _send_error(handler, status, message, code)
     return False
 
 
@@ -106,18 +117,18 @@ def _read_body(handler):
     try:
         length = int(handler.headers.get("Content-Length") or 0)
     except (TypeError, ValueError):
-        return None, (400, "Invalid Content-Length.")
+        return None, (400, "Invalid Content-Length.", ERR_BAD_REQUEST)
     if length < 0:
-        return None, (400, "Invalid Content-Length.")
+        return None, (400, "Invalid Content-Length.", ERR_BAD_REQUEST)
     if length > api_control.MAX_BODY_BYTES:
-        return None, (413, "Request body too large.")
+        return None, (413, "Request body too large.", ERR_BODY_TOO_LARGE)
     if length == 0:
         return b"", None
     try:
         return handler.rfile.read(length), None
     except Exception as e:
         app_logger.debug(f"Error reading control body: {api_auth.redact(e)}")
-        return None, (400, "Could not read request body.")
+        return None, (400, "Could not read request body.", ERR_BAD_REQUEST)
 
 
 def _read_snapshot(handler_cls):
@@ -156,7 +167,11 @@ def serve_command(handler, command: str):
 
     params, error = api_control.parse_request(raw_body)
     if error:
-        _send_error(handler, *error)
+        # api_control validates plain values and has no HTTP vocabulary, so it
+        # returns (status, message); the code is assigned here.
+        status, message = error
+        _send_error(handler, status, message,
+                    ERR_BODY_TOO_LARGE if status == 413 else ERR_BAD_REQUEST)
         return
 
     handler_cls = type(handler)
@@ -173,7 +188,8 @@ def serve_command(handler, command: str):
     command_handler = getattr(handler.server, "capture_command_handler", None)
     if not callable(command_handler):
         app_logger.error(f"Control command '{command}' rejected — no handler registered")
-        _send_error(handler, 503, "Capture control is not available on this server.")
+        _send_error(handler, 503, "Capture control is not available on this server.",
+                    ERR_CONTROL_UNAVAILABLE)
         return
 
     # Snapshot the error as it stands BEFORE the command, so a stale fault from
