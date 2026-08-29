@@ -1,0 +1,41 @@
+<ResourceDictionary
+    x:Class="PFRSentinel.NINA.Options"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!--  Key MUST be "<AssemblyTitle>_Options". AssemblyTitle is "PFR Sentinel".  -->
+    <DataTemplate x:Key="PFR Sentinel_Options">
+        <StackPanel Margin="0,0,0,10" Orientation="Vertical">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock VerticalAlignment="Center" Text="Sentinel base URL override" />
+                <!--
+                    UpdateSourceTrigger=LostFocus, not PropertyChanged: the panel re-reads
+                    this every poll, and saving on each keystroke would have it chasing
+                    every half-typed address as the operator types one.
+                -->
+                <TextBox
+                    MinWidth="220"
+                    Margin="5,0,0,0"
+                    Text="{Binding BaseUrlOverride, UpdateSourceTrigger=LostFocus}"
+                    ToolTip="Example: http://192.168.1.20:8080 — leave empty to read host and port from Sentinel's own config.json." />
+            </StackPanel>
+            <TextBlock
+                Margin="0,6,0,0"
+                MaxWidth="520"
+                HorizontalAlignment="Left"
+                Foreground="#FF8A8A8A"
+                TextWrapping="Wrap">
+                Leave empty on the observatory PC — the panel then reads host and port from Sentinel's own config.json.
+                Set it only when Sentinel runs on another machine. Changes apply within a few seconds; no restart needed.
+            </TextBlock>
+            <TextBlock
+                Margin="0,4,0,0"
+                MaxWidth="520"
+                HorizontalAlignment="Left"
+                Foreground="#FF8A8A8A"
+                TextWrapping="Wrap">
+                This overrides the address only. The capture control token still comes from the local config.json, so a
+                remote Sentinel will show frames and health but may refuse Start/Stop.
+            </TextBlock>
+        </StackPanel>
+    </DataTemplate>
+</ResourceDictionary>

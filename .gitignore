@@ -95,3 +95,8 @@ ml/eval_output/
 # ML local training/test scratch (image-size sweeps + pre-validation model backups)
 ml/models/_size_sweep/
 ml/models/backup_*/
+
+# C# / .NET build output (nina-plugin/)
+[Bb]in/
+[Oo]bj/
+*.user

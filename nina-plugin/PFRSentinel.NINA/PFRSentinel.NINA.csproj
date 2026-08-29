@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <OutputType>Library</OutputType>
+    <RootNamespace>PFRSentinel.NINA</RootNamespace>
+    <AssemblyName>PFRSentinel.NINA</AssemblyName>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <UseWPF>true</UseWPF>
+    <ImportWindowsDesktopTargets>true</ImportWindowsDesktopTargets>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NINA.Plugin" Version="3.2.0.9001" />
+  </ItemGroup>
+  <!--
+    NINA resolves its plugin folder from PluginMinimumApplicationVersion on NINA.Plugin.dll
+    (NINA.Plugin/Constants.cs), NOT from the running NINA version. On NINA 3.2.0.9001 that
+    is still "3.0.0", which is where every installed plugin on this machine lives. Do not
+    "fix" this to the NINA version - the DLL would land where NINA never looks.
+  -->
+  <!-- Deploy into NINA's plugin folder.
+
+       Keyed to 3.0.0, which is NINA's PluginMinimumApplicationVersion, NOT its
+       own version - NINA 3.2.0.9001 loads plugins from Plugins\3.0.0\.
+
+       The stock template used `xcopy /c`, where /c means "continue on error".
+       NINA holds an open handle on a loaded plugin DLL, so the copy fails
+       whenever NINA is running - and /c swallowed it, letting the build report
+       success while NINA carried on running the PREVIOUS build. Use Copy so a
+       locked file fails the build loudly instead. -->
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+    <PropertyGroup>
+      <PluginDeployDir>$(LOCALAPPDATA)\NINA\Plugins\3.0.0\$(TargetName)</PluginDeployDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(PluginDeployDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PluginDeployDir)" ContinueOnError="false" />
+    <Message Importance="high" Text="Deployed $(TargetFileName) -&gt; $(PluginDeployDir)" />
+  </Target>
+</Project>
