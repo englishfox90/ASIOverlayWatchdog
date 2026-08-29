@@ -41,6 +41,11 @@ PFRSentinel/
 │   ├── discord_alerts.py       # Discord webhook client
 │   ├── weather.py              # OpenWeatherMap API, 10-min cache
 │   ├── web_output.py           # HTTP server
+│   ├── api_control.py          # Capture-control command logic (pure)
+│   ├── api_auth.py             # Control-API bearer auth, Host allow-list
+│   ├── web_control.py          # POST /capture/start|stop routes
+│   ├── nina_plugin_install.py  # Install/update/remove the NINA plugin
+│   ├── pe_version.py           # Windows PE FileVersion reader
 │   ├── timelapse_writer.py     # ffmpeg stdin pipe, time-gated capture
 │   ├── ffmpeg_utils.py         # Shared ffmpeg detection
 │   └── allsky/                 # All-sky fisheye calibration + overlay
@@ -48,6 +53,7 @@ PFRSentinel/
 ├── tests/                      # pytest suite — see "Testing" below
 ├── docs/                       # Plans, design docs, references
 ├── archive/                    # Legacy Tkinter GUI (do not modify)
+├── nina-plugin/                # NINA plugin (C#/.NET 8 + WPF) — see below
 ├── installer/                  # Inno Setup packaging
 ├── main.py                     # Entry point
 ├── app_config.py               # %APPDATA%\PFRSentinel path resolver, handles migration
@@ -107,9 +113,10 @@ Detailed conventions are split by file type and live in `.claude/rules/`. **Read
 | `services/allsky/**` | [`.claude/rules/allsky.md`](.claude/rules/allsky.md) — calibration, coordinate frames |
 | `tests/**` | [`.claude/rules/tests.md`](.claude/rules/tests.md) — pytest markers, fixtures |
 | `ml/**` | [`.claude/rules/ml.md`](.claude/rules/ml.md) — ONNX inference conventions |
+| `nina-plugin/**` | [`.claude/rules/nina-plugin.md`](.claude/rules/nina-plugin.md) — C#/WPF, NINA API, build + deploy |
 
 Two hooks enforce the most-violated rules automatically:
-- `.claude/hooks/check_file_size.py` (PreToolUse) — blocks Edit/Write that would exceed the per-file size cap.
+- `.claude/hooks/check_file_size.py` (PreToolUse) — blocks Edit/Write that would exceed the per-file size cap. Covers `.py`, and `.cs`/`.xaml` in `nina-plugin/`.
 - `.claude/hooks/check_panel_purity.py` (PostToolUse) — warns when business-logic markers appear in `ui/panels/`.
 
 Slash commands: `/audit-size`, `/audit-tests`, `/pre-commit-check`. Reviewer subagent: `pfr-reviewer`.

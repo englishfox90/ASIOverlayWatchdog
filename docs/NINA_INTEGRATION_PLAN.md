@@ -1,7 +1,7 @@
 # NINA Integration Plan — Capture Control API · Dockable Widget · Sequencer Instructions
 
 **Created:** 2026-08-28
-**Status:** Stage 0 complete and buildable end-to-end (P0, 0a–0d + UI + NINA scripts). 0e now only needs a real NINA + rig run — that run is the gate for Stages 1–3.
+**Status:** Stages 0, 1 and 2 complete and running in NINA. Stage 3a (install service) done; 3b/3c in progress. 0e — a real night — is the last unverified item.
 **Updated:** 2026-08-29
 **Goal:** Surface the pier camera inside NINA's imaging dashboard (live frame + health), give the operator start/stop capture from NINA, and expose start/stop as Advanced Sequencer instructions so capture follows the observing session automatically.
 
@@ -185,13 +185,13 @@ Traditional engineer-days are the wrong unit here — code volume is not the con
 | ~~**P0**~~ | ~~Split `ui/main_window/capture.py`~~ | D0 | S | unit | **DONE** — split into `capture.py` (365), `camera_detect.py` (324), `capture_watchdog.py` (99). `_MainWindowCaptureMixin` now composes both new mixins, so the surface is unchanged. |
 | ~~**0a**~~ | ~~`services/api_control.py` + `api_auth.py`~~ | D1 | S | unit | **DONE** — 90 unit tests. Token minted on first enable via `resolve_control_token()`. |
 | ~~**0b**~~ | ~~`services/web_control.py` routes + security~~ | D1 | M | unit | **DONE** — D1 answered: loopback only. 33 route tests incl. ACAO regression guard. |
-| **0c** | Handler registration (MainWindow + HeadlessRunner) | D0 | M | rig | **BUILT, NOT RIG-VERIFIED.** `CaptureCommandBridge` (QueuedConnection) + headless pause Event. 11 tests pin the threading. Still needs a real-rig run. |
+| ~~**0c**~~ | ~~Handler registration~~ | D0 | M | rig | **DONE — verified against the running app, including the no-camera failure path.** `CaptureCommandBridge` (QueuedConnection) + headless pause Event. 11 tests pin the threading. Still needs a real-rig run. |
 | ~~**0d**~~ | ~~OpenAPI/docs + tests~~ | D0 | S | unit | **DONE** — `/openapi.json` + `/docs` generated from `CONTROL_ROUTES`; routes hidden when control is off. |
 | **0e** | **Prove value: NINA external-script sequence item** | D0 | S | nina | **SCRIPTS BUILT & TESTED against a live server; awaiting a real NINA+rig run.** `scripts/nina/` — see below. **Still the gate for Stages 1–3.** |
-| **1a** | Spike: build + load template plugin | D0 | S | nina | De-risks all C#. **Needs the .NET 8 SDK — this machine has none.** See spike findings. |
-| **1b** | Dockable panel | D2 | M | nina | D2 = layout/UX calls. |
-| **2** | Sequencer instructions | D1 | S | nina | Small once 1a lands. |
-| **3a** | `nina_plugin_install.py` | D1 | M | nina | Version detection is the fiddly bit. |
+| ~~**1a**~~ | ~~Spike: build + load template plugin~~ | D0 | S | nina | **DONE — plugin builds and loads in NINA 3.2.0.9001.** De-risks all C#. **Needs the .NET 8 SDK — this machine has none.** See spike findings. |
+| ~~**1b**~~ | ~~Dockable panel~~ | D2 | M | nina | **DONE** — live frame, staleness, health, statistics, Start/Stop, base-URL override. Verified in NINA. |
+| ~~**2**~~ | ~~Sequencer instructions~~ | D1 | S | nina | **DONE** — Start/Stop with `Validate()` pre-flight. Visible in NINA's picker. |
+| ~~**3a**~~ | ~~`nina_plugin_install.py`~~ | D1 | M | nina | **DONE** — 53 tests; removal guard independently attacked with junctions/UNC/decoys. |
 | **3b** | Panel/controller wiring + upgrade nudge | D0 | S | nina | |
 | **3c** | PyInstaller + Inno packaging | D0 | M | field | Only provable via a real installer run. |
 
@@ -293,8 +293,8 @@ as its ability to say *which* failure it hit. Codes: `bad_request`, `body_too_la
 ## Open decisions
 
 - ~~**D1 — Does NINA run on the same machine as Sentinel?**~~ **ANSWERED 2026-08-29: same machine, loopback only.** `webserver_host` stays `127.0.0.1`; control routes enforce a `Host` allow-list of loopback + the configured host. If NINA ever moves to a separate observatory PC, revisit 0b (LAN bind, TLS or SSH tunnel, and W6 thread exhaustion).
-- **D2 — Panel scope.** Frame + health + two buttons, or also interval/exposure controls? Recommend shipping the minimal version first; more controls mean more endpoints and a wider mutating surface.
-- **D3 — Does Sentinel's uninstaller remove the plugin?** Per-user `LOCALAPPDATA` path makes this non-automatic.
+- ~~**D2 — Panel scope.**~~ **ANSWERED: frame + health + Start/Stop + read-only statistics.** The statistics needed no new endpoints — `/status` already carries uptime, images served, image age/staleness, interval, next-capture and recovery — so the mutating surface stayed exactly start/stop.
+- ~~**D3 — Does Sentinel's uninstaller remove the plugin?**~~ **ANSWERED: yes.** Per-user `%LOCALAPPDATA%` path, so Inno needs an explicit uninstall step (Stage 3c).
 
 ---
 
