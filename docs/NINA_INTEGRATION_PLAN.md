@@ -188,7 +188,7 @@ Traditional engineer-days are the wrong unit here — code volume is not the con
 | **0c** | Handler registration (MainWindow + HeadlessRunner) | D0 | M | rig | **BUILT, NOT RIG-VERIFIED.** `CaptureCommandBridge` (QueuedConnection) + headless pause Event. 11 tests pin the threading. Still needs a real-rig run. |
 | ~~**0d**~~ | ~~OpenAPI/docs + tests~~ | D0 | S | unit | **DONE** — `/openapi.json` + `/docs` generated from `CONTROL_ROUTES`; routes hidden when control is off. |
 | **0e** | **Prove value: NINA external-script sequence item** | D0 | S | nina | **SCRIPTS BUILT & TESTED against a live server; awaiting a real NINA+rig run.** `scripts/nina/` — see below. **Still the gate for Stages 1–3.** |
-| **1a** | Spike: build + load template plugin | D0 | S | nina | De-risks all C#. Do before committing. |
+| **1a** | Spike: build + load template plugin | D0 | S | nina | De-risks all C#. **Needs the .NET 8 SDK — this machine has none.** See spike findings. |
 | **1b** | Dockable panel | D2 | M | nina | D2 = layout/UX calls. |
 | **2** | Sequencer instructions | D1 | S | nina | Small once 1a lands. |
 | **3a** | `nina_plugin_install.py` | D1 | M | nina | Version detection is the fiddly bit. |
@@ -201,13 +201,88 @@ Traditional engineer-days are the wrong unit here — code volume is not the con
 
 ---
 
+## Spike findings (2026-08-29) — corrections to Stages 1–3
+
+Researched before writing any C#. **Verified on this machine** unless marked inferred.
+
+### The plugin install path in Stage 3a is wrong
+
+The plan says the target is `%LOCALAPPDATA%\NINA\Plugins\<NINA Major>.<Minor>.<Hotfix>\`.
+It is not. From NINA's `NINA.Plugin/Constants.cs`, the folder is keyed to
+**`PluginMinimumApplicationVersion`** — the compatibility baseline stamped on
+`NINA.Plugin.dll` — not to NINA's own version.
+
+Verified here: **NINA is 3.2.0.9001, and its plugins live in `Plugins\3.0.0\`.**
+Reading `NINA.exe`'s FileVersion, as Stage 3a step 1 instructs, would install the
+DLL to `3.2.0\` where NINA never looks — a silent no-op.
+
+Two consequences, both good:
+- **Stage 3a gets simpler.** Enumerate `%LOCALAPPDATA%\NINA\Plugins\*`, take the
+  highest parseable version, default `3.0.0`. No registry probe, no version parse.
+- **"NINA upgrades orphan the plugin" is a much smaller risk than stated.** The
+  folder only moves when the compat baseline moves (i.e. NINA 4.x), not on every
+  3.2 → 3.3 bump. Keep the startup nudge; drop the "recurring tax" framing.
+
+### Stage 3's sidecar JSON is not needed for pairing
+
+A C# plugin can read `%LOCALAPPDATA%\PFRSentinel\config.json` directly in ~10 lines,
+exactly as `scripts/nina/Invoke-SentinelCapture.ps1` already does. The sidecar only
+earns its place if Sentinel and NINA run as different Windows users or on different
+machines — excluded by D1. Stage 3 shrinks to "copy the DLL + offer an override".
+
+### Toolchain
+
+Needs the **.NET 8 SDK** and nothing else (`winget install Microsoft.DotNet.SDK.8`).
+This machine has the .NET 8 *runtime* and MSBuild Build Tools but **no SDK**, so
+nothing can build today. Visual Studio is not required — `dotnet build` suffices;
+VS would only add the template's token-substitution wizard.
+
+The template pins `NINA.Plugin` **3.0.0.2017-beta**; bump to **3.2.0.9001** to match
+the installed NINA. Note .NET 8 reaches end-of-support **10 Nov 2026**, so a TFM
+migration is near-term, not distant.
+
+### Resequence: do Stage 2 before Stage 1
+
+The plugin's value is concentrated in the *sequencer* half, and that half is also
+the cheaper one:
+
+| | Value over the existing scripts |
+|---|---|
+| Stage 2 `Validate()` | **Genuinely new capability.** NINA validates a sequence *before* the night starts. An External Script instruction cannot be validated — it fails at 22:15 when it runs. "Sentinel not reachable / control API disabled" at sequence-build time is what the scripts structurally cannot do. |
+| Stage 2 native items | Cosmetic. The `.bat` already works. |
+| Stage 1 panel | Real but ~90% replicated by a browser window on `http://127.0.0.1:8080`. The delta is not alt-tabbing. |
+
+Stage 1 is also the expensive one: XAML, the `<FQTypeName>_Dockable` DataTemplate key
+convention, a `ResourceDictionary` pack URI that fails *silently* through MEF if it
+mismatches, and a polling lifecycle to gate on `IsVisible`.
+
+**New order: 1a (spike) → 0e (real night) → 2 → decide again → 1b.**
+
+### Open question to close during the spike
+
+`IValidatable` is **not implemented in the template** — only referenced in a comment.
+Its exact namespace and members (likely `Issues` + `Validate()`) could not be verified
+from source. Resolve it by inspecting the restored `NINA.Sequencer.dll` during 1a
+rather than designing around a guess.
+
+### Done as a result of this spike: machine-readable error codes
+
+Control error responses now carry a `code` field. `503` had two entirely different
+causes — control API switched off vs. no capture handler registered — needing opposite
+operator advice, distinguishable only by free-text prose. `Validate()` is only as good
+as its ability to say *which* failure it hit. Codes: `bad_request`, `body_too_large`,
+`unauthorized`, `host_not_allowed`, `control_disabled`, `control_unavailable`,
+`internal_error`. The three auth failures deliberately share one code and one message.
+
+---
+
 ## Risk register
 
 | Risk | Severity | Mitigation |
 |---|---|---|
 | Control endpoint called from HTTP thread touches Qt state | **High** — crashes or races | Handler-registration seam + `QueuedConnection`; never call capture directly from the request thread. Explicit test that the handler is invoked off the request thread. |
 | Mutating API inherits read-only security assumptions | **High** | Token + no-wildcard-ACAO + Host allow-list on control routes; fail closed with no token. Security review before merge. |
-| NINA upgrade orphans the plugin | Medium — silent | Re-runnable install + startup version-mismatch nudge. |
+| NINA upgrade orphans the plugin | **Low** (revised) — the folder tracks the plugin compat baseline, not NINA's version, so it moves only at NINA 4.x. Keep the re-runnable install + startup nudge. |
 | NINA plugin API churn | Medium | Pin NuGet version; spike (1a) validates surface; private distribution means no third-party rigs to support. |
 | `capture.py` over cap blocks work | Medium — already true | P0 split first. |
 | Token leaks into logs / PostHog | Medium | Reuse `sanitize_exception`; explicit test. |
