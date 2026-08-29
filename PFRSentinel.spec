@@ -236,6 +236,13 @@ added_files = [
     ('star_data/messier_list.json', 'star_data'),
     ('star_data/NGC.csv', 'star_data'),
     ('star_data/constellations.json', 'star_data'),
+    # NINA Advanced Sequencer helpers. Shipped as loose scripts (not frozen)
+    # because the user points a NINA "External Script" instruction at the .bat
+    # by path — it has to exist on disk next to the install.
+    ('scripts/nina/Invoke-SentinelCapture.ps1', 'scripts/nina'),
+    ('scripts/nina/sentinel-capture-start.bat', 'scripts/nina'),
+    ('scripts/nina/sentinel-capture-stop.bat', 'scripts/nina'),
+    ('scripts/nina/README.md', 'scripts/nina'),
 ]
 
 # ============================================================================
