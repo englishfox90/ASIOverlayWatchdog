@@ -351,6 +351,10 @@ class HeadlessRunner:
                 start_time = time.time()
                 img, metadata = self.zwo_camera.capture_single_frame()
                 capture_time = time.time() - start_time
+                # Headless never reprocesses, so the rebuild keys (25 MB of
+                # SDK bytes) would only ride along into the library queue.
+                from services.camera.frame_builder import strip_cache_keys
+                metadata = strip_cache_keys(metadata)
 
                 # Process and save
                 self._process_and_save(img, metadata)

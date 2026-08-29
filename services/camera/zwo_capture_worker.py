@@ -14,14 +14,9 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import numpy as np
-from PIL import Image
 
-from .camera_utils import (
-    apply_white_balance,
-    calculate_image_stats,
-    call_with_timeout,
-    debayer_raw_image,
-)
+from .camera_utils import call_with_timeout
+from .frame_builder import build_frame
 from ..posthog_service import capture_error
 
 if TYPE_CHECKING:
@@ -203,19 +198,10 @@ def capture_single_frame(camera: "ZWOCamera"):
 
         temp_info = _get_temperature(camera)
 
-        buf = camera._ensure_frame_buffers(width, height, active_bit_depth)
-        img_rgb, img_rgb_raw16 = debayer_raw_image(
-            img_data, width, height, camera.bayer_pattern,
-            bit_depth=active_bit_depth,
-            return_raw16=(active_bit_depth == 16),
-            dst_rgb8=buf['rgb8'],
-            dst_rgb16=buf['rgb16'],
+        img, arrays, stats = build_frame(
+            img_data, width, height, active_bit_depth,
+            camera.bayer_pattern, camera.wb_config,
         )
-        img_rgb_no_wb = img_rgb.copy()
-        img_rgb = apply_white_balance(img_rgb, camera.wb_config)
-        img = Image.fromarray(img_rgb, mode='RGB')
-
-        stats = calculate_image_stats(np.array(img))
 
         metadata = {
             'CAMERA': camera_info['Name'],
@@ -239,8 +225,14 @@ def capture_single_frame(camera: "ZWOCamera"):
             'P25': f"{stats['p25']:.1f}",
             'P75': f"{stats['p75']:.1f}",
             'P95': f"{stats['p95']:.1f}",
-            'RAW_RGB_NO_WB': img_rgb_no_wb,
-            'RAW_RGB_16BIT': img_rgb_raw16,
+            'RAW_RGB_NO_WB': arrays['RAW_RGB_NO_WB'],
+            'RAW_RGB_16BIT': arrays['RAW_RGB_16BIT'],
+            # Rebuild keys: the SDK bytes (referenced, not copied) plus what
+            # build_frame needs to decode them again. They let the reprocess /
+            # all-sky cache hold ~25 MB instead of the decoded frame's ~125 MB.
+            'RAW_BAYER': img_data,
+            'RAW_GEOMETRY': (width, height, active_bit_depth, camera.bayer_pattern),
+            'WB_CONFIG': dict(camera.wb_config or {}),
             'CAMERA_BIT_DEPTH': camera_info.get('BitDepth', 8),
             'IMAGE_BIT_DEPTH': active_bit_depth,
             'BAYER_PATTERN': camera.bayer_pattern,
@@ -525,6 +517,12 @@ def capture_loop(camera: "ZWOCamera"):
                         )
                 except Exception:
                     pass
+
+                # Each frame now owns its arrays (~100 MB at 3552x3552 RAW16),
+                # so holding these locals across the inter-frame wait would keep
+                # a finished frame resident alongside the next one.
+                img = None
+                metadata = None
 
                 if camera.is_capturing:
                     wait_end = time.time() + camera.effective_capture_interval

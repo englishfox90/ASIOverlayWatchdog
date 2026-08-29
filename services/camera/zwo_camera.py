@@ -8,8 +8,6 @@ camera_connection.py, calibration to camera_calibration.py.
 import threading
 import time
 
-import numpy as np
-
 from .camera_calibration import CameraCalibration
 from .camera_connection import CameraConnection
 from .camera_utils import is_within_scheduled_window as check_scheduled_window
@@ -101,14 +99,6 @@ class ZWOCamera:
         
         # Initialize calibration manager
         self.calibration_manager = None  # Will be initialized after camera connection
-
-        # Pre-allocated ping-pong frame buffers reused each capture to reduce
-        # per-frame large numpy allocation churn. Allocated lazily on first frame.
-        self._frame_bufs: list = []
-        self._frame_buf_idx: int = 0
-        self._frame_buf_width: int = 0
-        self._frame_buf_height: int = 0
-        self._frame_buf_depth: int = 0
     
     # =========================================================================
     # Property aliases for backward compatibility (delegate to connection manager)
@@ -218,42 +208,6 @@ class ZWOCamera:
             return max(1.0, float(self.scheduled_window_interval))
         return self.capture_interval
     
-    def _ensure_frame_buffers(self, width: int, height: int, bit_depth: int) -> dict:
-        """Return the next ping-pong buffer slot, (re)allocating if geometry changed."""
-        if (self._frame_buf_width != width
-                or self._frame_buf_height != height
-                or self._frame_buf_depth != bit_depth
-                or len(self._frame_bufs) < 2):
-            self._frame_bufs = [
-                {
-                    'rgb8':  np.empty((height, width, 3), dtype=np.uint8),
-                    'rgb16': np.empty((height, width, 3), dtype=np.uint16) if bit_depth == 16 else None,
-                }
-                for _ in range(2)
-            ]
-            self._frame_buf_width  = width
-            self._frame_buf_height = height
-            self._frame_buf_depth  = bit_depth
-            # RAW8: 2 slots × rgb8 only; RAW16: 2 slots × (rgb8 + rgb16)
-            mb = 2 * width * height * 3 * (1 + 2 * (bit_depth == 16)) // (1024 * 1024)
-            self.log(f"Frame buffers: 2×{width}×{height} {'RAW16' if bit_depth == 16 else 'RAW8'} ({mb} MB)")
-        buf = self._frame_bufs[self._frame_buf_idx]
-        self._frame_buf_idx = 1 - self._frame_buf_idx
-        return buf
-
-    def _release_frame_buffers(self):
-        """Drop pre-allocated frame buffers after capture stops.
-
-        Safe to call from the main thread: stop_capture() always joins the
-        capture thread (or confirms it has exited) before calling this, so
-        no concurrent writer can be using the buffers at this point.
-        """
-        self._frame_bufs = []
-        self._frame_buf_width = 0
-        self._frame_buf_height = 0
-        self._frame_buf_depth = 0
-        self._frame_buf_idx = 0
-
     def initialize_sdk(self):
         """Initialize the ZWO ASI SDK (delegates to connection manager)"""
         # Update connection manager's logger to use our log method
@@ -588,7 +542,6 @@ class ZWOCamera:
                 self.log("Capture thread finished successfully")
                 self.capture_thread = None
 
-        self._release_frame_buffers()
         self.log("Capture stopped")
     
     def set_exposure(self, seconds):

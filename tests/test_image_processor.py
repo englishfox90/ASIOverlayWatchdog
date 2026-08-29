@@ -148,3 +148,46 @@ def test_genuine_write_failure_escalates_via_worker(worker, monkeypatch, tmp_pat
     assert notifier.events[0].type == ERROR
     assert 'stale' in notifier.events[0].body
     assert captured == ['ascom_safety_write']
+
+
+# ---------------------------------------------------------------------------
+# Deferred frame construction (reprocess rebuilds on the worker thread)
+# ---------------------------------------------------------------------------
+
+def test_frame_factory_runs_on_worker_and_result_is_processed(worker, tmp_path):
+    worker._main_window = None
+    calls = []
+
+    def factory():
+        calls.append(1)
+        return Image.new('RGB', (16, 12), (40, 50, 60)), {'FILENAME': 'rebuilt.png'}
+
+    task = ImageProcessingTask(None, {'FILENAME': 'stale.png'}, _base_config(tmp_path, {'enabled': False}),
+                               frame_factory=factory)
+    saved = []
+    worker.processing_complete.connect(lambda p, o, m, path: saved.append((m, path)))
+
+    worker._process_task(task)
+
+    assert calls == [1]
+    assert task.frame_factory is None  # consumed, not retained
+    assert saved and saved[0][0]['FILENAME'] == 'rebuilt.png'
+    assert saved[0][1].endswith('rebuilt.png')
+
+
+def test_frame_factory_returning_nothing_skips_the_frame(worker, tmp_path):
+    worker._main_window = None
+    task = ImageProcessingTask(None, {}, _base_config(tmp_path, {'enabled': False}),
+                               frame_factory=lambda: (None, None))
+    errors, done = [], []
+    worker.error_occurred.connect(errors.append)
+    worker.processing_complete.connect(lambda *a: done.append(a))
+
+    worker._process_task(task)
+
+    assert errors == [] and done == []
+
+
+def test_task_takes_ownership_of_the_image_without_copying():
+    img = Image.new('RGB', (4, 4))
+    assert ImageProcessingTask(img, {}, {}).img is img

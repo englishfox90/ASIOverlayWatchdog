@@ -468,9 +468,10 @@ class AllSkyController(QObject):
         """Return (image, source_description) for the most recent clean frame.
 
         Tries, in order:
-          MainWindow._cached_raw_image — Camera mode caches the RAW
-          pre-overlay frame in on_image_captured; Watch mode caches the
-          clean (no all-sky) output frame in _on_image_processed.
+          MainWindow.cached_raw_frame() — Camera mode rebuilds the RAW
+          pre-overlay frame from the Bayer bytes cached in on_image_captured;
+          Watch mode returns the clean (no all-sky) output frame cached in
+          _on_image_processed.
 
         The old "load the last saved output image from disk" fallback was
         removed: that file is overlay-contaminated and already resized, so
@@ -479,6 +480,15 @@ class AllSkyController(QObject):
 
         Returns (None, '') if nothing is available.
         """
+        accessor = getattr(self._mw, 'cached_raw_frame', None)
+        if accessor is not None:
+            # Camera mode rebuilds the frame from cached Bayer bytes (~0.9 s
+            # at 3552^2) — acceptable on an explicit Calibrate Now click.
+            image, _meta = accessor()
+            if image is not None:
+                return image, "cached raw frame"
+            return None, ""
+
         cached = getattr(self._mw, '_cached_raw_image', None)
         if cached is not None:
             return cached, "cached raw frame"

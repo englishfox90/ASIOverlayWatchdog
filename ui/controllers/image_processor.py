@@ -24,11 +24,24 @@ from .dev_mode_utils import dev_mode_saver, collect_ml_contribution_sample
 
 
 class ImageProcessingTask:
-    """Encapsulates an image processing task"""
-    def __init__(self, img: Image.Image, metadata: dict, config: dict):
-        self.img = img.copy()  # Copy to avoid race conditions
+    """Encapsulates an image processing task.
+
+    The task OWNS ``img`` and the arrays in ``metadata``: every caller hands
+    over per-frame objects nothing else holds (camera frames are built fresh
+    per exposure, a reprocess rebuilds from cached Bayer bytes), so the
+    defensive PIL copy this used to take was a 50 MB temp per 12.6 MP frame
+    for no reader.
+
+    ``frame_factory`` defers building the image to the worker thread. A
+    reprocess rebuilds the frame from ~25 MB of raw bytes (~0.9 s at 3552^2),
+    which must not run on the GUI thread; the factory returns
+    ``(pil_image, metadata)`` or ``(None, None)`` when nothing can be rebuilt.
+    """
+    def __init__(self, img, metadata: dict, config: dict, frame_factory=None):
+        self.img = img
         self.metadata = metadata.copy() if metadata else {}
         self.config = config.copy() if config else {}
+        self.frame_factory = frame_factory
 
 
 class ImageProcessorWorker(QThread):
@@ -136,6 +149,13 @@ class ImageProcessorWorker(QThread):
             img = task.img
             metadata = task.metadata
             config = task.config
+            if task.frame_factory is not None:
+                img, metadata = task.frame_factory()
+                task.frame_factory = None
+                if img is None:
+                    app_logger.warning("Reprocess skipped: cached frame could not be rebuilt")
+                    return
+                task.img, task.metadata = img, metadata
             
             # Extract config values
             output_dir = config.get('output_dir', '')
@@ -558,15 +578,17 @@ class ImageProcessor(QObject):
         self._worker.wait(1000)
         app_logger.debug("Image processor stopped")
     
-    def process_and_save(self, img: Image.Image, metadata: dict):
+    def process_and_save(self, img, metadata: dict, frame_factory=None):
         """
         Process image and save to disk
         
         Gathers config from UI, then queues processing to background thread.
         
         Args:
-            img: PIL Image to process
+            img: PIL Image to process (None when frame_factory is given)
             metadata: Image metadata dict
+            frame_factory: optional zero-arg callable run on the worker thread
+                that returns (img, metadata); see ImageProcessingTask
         """
         if not self._main_window:
             app_logger.error("ImageProcessor: main_window not set")
@@ -581,7 +603,7 @@ class ImageProcessor(QObject):
                 return
             
             # Create task and queue it
-            task = ImageProcessingTask(img, metadata, config)
+            task = ImageProcessingTask(img, metadata, config, frame_factory=frame_factory)
             self._worker.queue_task(task)
             
         except Exception as e:

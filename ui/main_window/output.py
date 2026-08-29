@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QTimer
 
 from services import api_auth
+from services.camera import frame_builder
 from services.logger import app_logger
 from services.notifications import ERROR, LIFECYCLE, PERIODIC_IMAGE, NotificationEvent
 from services.web_output import WebOutputServer
@@ -127,29 +128,21 @@ class _MainWindowOutputMixin:
         # A fresh frame clears any prior capture error for /status health.
         self._last_capture_error = None
 
-        # Cache raw frame for reprocessing on settings changes.
-        # Deep-copy the large numpy arrays so the camera's ping-pong buffer
-        # is free for the next frame as soon as this method returns.
-        # Queue tasks then share this one stable copy via shallow metadata.copy().
-        # Only the array reprocessing will actually read is kept; the other is
-        # DROPPED, not carried. RAW_RGB_NO_WB is read solely as the fallback for
-        # a missing RAW_RGB_16BIT (image_processor._process_task), so in RAW16
-        # mode it has no reader and holding it pins a second full-frame array
-        # (38 MB at 3552x3552) for the life of the frame. Pop the key rather
-        # than merely skipping the copy: NO_WB is a fresh per-frame array
-        # (zwo_capture_worker makes it with img_rgb.copy()), so a bare reference
-        # would not corrupt anything — it would just pin the frame anyway,
-        # which is the whole thing we are trying to avoid. Only RAW_RGB_16BIT
-        # is the camera's live ping-pong slot, which is why it must be copied.
-        self._cached_raw_image = pil_image.copy()
+        # Cache what REBUILDS the frame (the ~25 MB of SDK Bayer bytes) rather
+        # than the decoded frame itself — the old deep copies of the PIL image
+        # and the uint16 array kept ~125 MB resident forever. The queued task is
+        # then the only holder of this frame's arrays, so they free the moment
+        # processing finishes, and nothing can overwrite them mid-stretch.
         self._cached_raw_time = datetime.now(timezone.utc)
-        meta_copy = metadata.copy()
-        if meta_copy.get('RAW_RGB_16BIT') is not None:
-            meta_copy['RAW_RGB_16BIT'] = meta_copy['RAW_RGB_16BIT'].copy()
-            meta_copy.pop('RAW_RGB_NO_WB', None)
-        elif meta_copy.get('RAW_RGB_NO_WB') is not None:
-            meta_copy['RAW_RGB_NO_WB'] = meta_copy['RAW_RGB_NO_WB'].copy()
-        self._cached_raw_metadata = meta_copy
+        if frame_builder.is_rebuildable(metadata):
+            self._cached_raw_image = None
+            self._cached_raw_metadata = frame_builder.cache_metadata(metadata)
+            # RAW_BAYER must not reach the processor: it only pops the two
+            # decoded arrays, so the bytes would ride on into preview_metadata.
+            metadata = frame_builder.strip_cache_keys(metadata)
+        else:
+            self._cached_raw_image = pil_image.copy()
+            self._cached_raw_metadata = metadata.copy()
 
         auto_stretch_enabled = self.config.get('auto_stretch', {}).get('enabled', False)
         if auto_stretch_enabled:
@@ -161,6 +154,23 @@ class _MainWindowOutputMixin:
 
         self.image_captured.emit(pil_image)
 
+    def cached_raw_frame(self):
+        """(pil_image, metadata) of the last clean frame, or (None, None).
+
+        Camera mode caches only the raw Bayer bytes and rebuilds on demand;
+        watch mode caches the clean (no all-sky) output frame directly.
+        """
+        if frame_builder.is_rebuildable(self._cached_raw_metadata):
+            return frame_builder.rebuild_frame(self._cached_raw_metadata)
+        if self._cached_raw_image is None:
+            return None, None
+        return self._cached_raw_image, self._cached_raw_metadata
+
+    def has_cached_frame(self) -> bool:
+        """True if a frame exists to reprocess/calibrate, without rebuilding it."""
+        return (self._cached_raw_image is not None
+                or frame_builder.is_rebuildable(self._cached_raw_metadata))
+
     def reprocess_last_frame(self):
         """Reprocess the cached raw frame with current settings.
 
@@ -168,7 +178,7 @@ class _MainWindowOutputMixin:
         sees the effect immediately instead of waiting for the next exposure.
         Debounced to 500ms so slider drags don't queue dozens of reprocesses.
         """
-        if self._cached_raw_image is None:
+        if not self.has_cached_frame():
             return
 
         # Debounce: restart the timer on every call, fire only once after 500ms idle
@@ -179,7 +189,7 @@ class _MainWindowOutputMixin:
         self._reprocess_timer.start(500)
 
     def _do_reprocess(self):
-        if self._cached_raw_image is None:
+        if not self.has_cached_frame():
             return
 
         app_logger.debug("Reprocessing last frame with updated settings")
@@ -190,9 +200,18 @@ class _MainWindowOutputMixin:
         else:
             self.app_bar.set_status('processing')
 
-        self.image_processor.process_and_save(
-            self._cached_raw_image, self._cached_raw_metadata
-        )
+        # Camera mode rebuilds the 12.6 MP frame from the cached Bayer bytes
+        # (~0.9 s) — on the processor's worker thread, never here.
+        if frame_builder.is_rebuildable(self._cached_raw_metadata):
+            cached = self._cached_raw_metadata
+            self.image_processor.process_and_save(
+                None, cached,
+                frame_factory=lambda: frame_builder.rebuild_frame(cached),
+            )
+        else:
+            self.image_processor.process_and_save(
+                self._cached_raw_image, self._cached_raw_metadata
+            )
 
     def _on_image_processed(self, preview_image, output_image, metadata: dict, output_path: str):
         try:
