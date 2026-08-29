@@ -397,3 +397,31 @@ def test_every_error_response_carries_a_code():
               make_handler(recorder=None)):
         post(h)
         assert "code" in h.body, h.body
+
+
+# --- pre-flight readiness (Stage 2 Validate) -------------------------------
+
+def test_capture_state_reports_control_ready_when_a_handler_is_registered():
+    h = make_handler(path="/capture", recorder=_Recorder())
+    web_control.serve_capture_state(h)
+    assert h.body["control_ready"] is True
+
+
+def test_capture_state_reports_not_ready_without_a_handler():
+    """The gap this closes: the token is valid, so the route used to answer a
+    bare 200 and a sequence would validate green then fail when it ran."""
+    h = make_handler(path="/capture", recorder=None)
+    web_control.serve_capture_state(h)
+    assert h.status == 200
+    assert h.body["control_ready"] is False
+
+
+def test_control_ready_matches_what_a_command_would_do():
+    """Readiness must agree with serve_command, or validation lies."""
+    unwired = make_handler(path="/capture", recorder=None)
+    web_control.serve_capture_state(unwired)
+    assert unwired.body["control_ready"] is False
+
+    cmd = make_handler(recorder=None)
+    post(cmd)
+    assert cmd.status == 503 and cmd.body["code"] == "control_unavailable"

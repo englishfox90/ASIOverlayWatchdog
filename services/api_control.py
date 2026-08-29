@@ -95,7 +95,9 @@ CONTROL_ROUTES = [
         "summary": "Current capture control state",
         "description": (
             "Convenience alias for the 'capture' block of /status, so a control "
-            "client needs only one path prefix. Requires a bearer token."
+            "client needs only one path prefix. Also returns 'control_ready': "
+            "whether a start/stop would actually be accepted, so a client can "
+            "pre-flight without issuing a command. Requires a bearer token."
         ),
     },
 ]

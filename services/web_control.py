@@ -144,9 +144,16 @@ def serve_capture_state(handler):
     if not authorize(handler):
         return
     payload = handler._build_status_dict()
+    # `control_ready` says whether a capture command would actually be accepted.
+    # Without it this route checks only the token, so a Sentinel running with no
+    # registered handler answers 200 here and reveals the fault only when a
+    # command arrives — a NINA sequence would validate green at dusk and fail at
+    # 22:15. Pre-flight validation is the whole point of the sequencer items, so
+    # the readiness has to be observable without issuing a command.
     _send_json(handler, 200, {
         "capture": payload.get("capture", {}),
         "health": payload.get("health", {}),
+        "control_ready": callable(getattr(handler.server, "capture_command_handler", None)),
         "timestamp": payload.get("timestamp"),
     })
 
