@@ -287,11 +287,20 @@ class MLService:
     def _compute_corner_analysis(self, image_array: np.ndarray) -> Dict[str, float]:
         """Compute corner-to-center analysis for ML features."""
         try:
-            # Convert to grayscale if needed
+            # Convert to grayscale if needed. Accumulate in float32, not numpy's
+            # default float64 for integer input: a 3552x3552 frame costs 50 MB
+            # this way against 101 MB. The 3-channel sum (<= 196605) is exact in
+            # float32, but the /3 and the medians below still round, so the
+            # features this returns differ from the old float64 path at ~1e-7
+            # relative — orders of magnitude below anything that could move a
+            # classifier decision, though not bit-identical if you diff dev-mode
+            # calibration JSON across versions. Both branches yield a freshly
+            # allocated array, so the normalisation below is applied in place
+            # instead of allocating a second full-frame copy.
             orig_dtype = image_array.dtype
             if len(image_array.shape) == 3:
                 # RGB to grayscale
-                gray = np.mean(image_array, axis=2)
+                gray = np.mean(image_array, axis=2, dtype=np.float32)
             else:
                 gray = image_array.astype(np.float32)
 
@@ -301,9 +310,11 @@ class MLService:
             # 255 and must not be mistaken for 8-bit. median_lum has to land in
             # [0,1] (the model trained on 16-bit / 65535) or roof predictions flip.
             if np.issubdtype(orig_dtype, np.integer):
-                gray = gray / float(np.iinfo(orig_dtype).max)
-            elif gray.max() > 1.0:
-                gray = gray / gray.max()
+                gray /= float(np.iinfo(orig_dtype).max)
+            else:
+                gray_max = float(gray.max())
+                if gray_max > 1.0:
+                    gray /= gray_max
 
             h, w = gray.shape
 
@@ -330,7 +341,12 @@ class MLService:
             return {
                 'corner_med': float(corner_med),
                 'center_med': float(center_med),
-                'frame_med': float(np.median(gray)),  # whole-frame median == training's median_lum
+                # whole-frame median == training's median_lum. overwrite_input
+                # lets np.median partition *gray* in place instead of copying a
+                # whole frame (48 MB at 3552x3552); safe only because this is
+                # the last read of gray — corner_med and center_med are already
+                # reduced to scalars above, and gray dies with this frame.
+                'frame_med': float(np.median(gray, overwrite_input=True)),
                 'corner_to_center_ratio': float(ratio),
             }
 

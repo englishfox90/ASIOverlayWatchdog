@@ -131,12 +131,24 @@ class _MainWindowOutputMixin:
         # Deep-copy the large numpy arrays so the camera's ping-pong buffer
         # is free for the next frame as soon as this method returns.
         # Queue tasks then share this one stable copy via shallow metadata.copy().
+        # Only the array reprocessing will actually read is kept; the other is
+        # DROPPED, not carried. RAW_RGB_NO_WB is read solely as the fallback for
+        # a missing RAW_RGB_16BIT (image_processor._process_task), so in RAW16
+        # mode it has no reader and holding it pins a second full-frame array
+        # (38 MB at 3552x3552) for the life of the frame. Pop the key rather
+        # than merely skipping the copy: NO_WB is a fresh per-frame array
+        # (zwo_capture_worker makes it with img_rgb.copy()), so a bare reference
+        # would not corrupt anything — it would just pin the frame anyway,
+        # which is the whole thing we are trying to avoid. Only RAW_RGB_16BIT
+        # is the camera's live ping-pong slot, which is why it must be copied.
         self._cached_raw_image = pil_image.copy()
         self._cached_raw_time = datetime.now(timezone.utc)
         meta_copy = metadata.copy()
-        for _k in ('RAW_RGB_16BIT', 'RAW_RGB_NO_WB'):
-            if meta_copy.get(_k) is not None:
-                meta_copy[_k] = meta_copy[_k].copy()
+        if meta_copy.get('RAW_RGB_16BIT') is not None:
+            meta_copy['RAW_RGB_16BIT'] = meta_copy['RAW_RGB_16BIT'].copy()
+            meta_copy.pop('RAW_RGB_NO_WB', None)
+        elif meta_copy.get('RAW_RGB_NO_WB') is not None:
+            meta_copy['RAW_RGB_NO_WB'] = meta_copy['RAW_RGB_NO_WB'].copy()
         self._cached_raw_metadata = meta_copy
 
         auto_stretch_enabled = self.config.get('auto_stretch', {}).get('enabled', False)

@@ -196,22 +196,23 @@ class ImageProcessorWorker(QThread):
                         target_brightness = self._main_window.camera_controller.zwo_camera.target_brightness
                         app_logger.debug(f"Histogram config from camera: auto_exposure={zwo_auto_exposure}, target={target_brightness}")
             
-            # Calculate histogram - use appropriate range based on bit depth
-            # 16-bit data needs to be scaled down for 256-bin histogram display
-            if raw_array.dtype == np.uint16:
-                # Scale 16-bit to 8-bit range for histogram display
-                hist_array = (raw_array / 257).astype(np.uint8)
-            else:
-                hist_array = raw_array
-            
+            # Calculate histogram - use appropriate range based on bit depth.
+            # 16-bit is bucketed by WIDENING the range, not by rescaling pixels:
+            # 256 bins over [0, 257*256) makes every bin exactly 257 wide, so
+            # bin == floor(v / 257) — the same bucketing the old
+            # (raw_array / 257).astype(np.uint8) produced, without materialising
+            # a full-frame float64 temp (303 MB at 3552x3552; uint16 / int
+            # promotes to float64). np.histogram accumulates in fixed-size
+            # blocks, so peak cost is one raveled channel, not a whole frame.
+            hist_range = (0, 257 * 256) if raw_array.dtype == np.uint16 else (0, 256)
+
             hist_data = {
-                'r': np.histogram(hist_array[:, :, 0], bins=256, range=(0, 256))[0],
-                'g': np.histogram(hist_array[:, :, 1], bins=256, range=(0, 256))[0],
-                'b': np.histogram(hist_array[:, :, 2], bins=256, range=(0, 256))[0],
+                'r': np.histogram(raw_array[:, :, 0], bins=256, range=hist_range)[0],
+                'g': np.histogram(raw_array[:, :, 1], bins=256, range=hist_range)[0],
+                'b': np.histogram(raw_array[:, :, 2], bins=256, range=hist_range)[0],
                 'auto_exposure': zwo_auto_exposure,
                 'target_brightness': target_brightness
             }
-            del hist_array
             # Note: We keep metadata['RAW_RGB_16BIT'] alive for auto-stretch below
             
             # Resize if needed (only for 8-bit PIL image, 16-bit handled in stretch)

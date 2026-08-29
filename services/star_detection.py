@@ -90,10 +90,14 @@ def estimate_fwhm(image, stars, radius=8):
     if not stars or image is None or image.size == 0:
         return 0.0
 
+    # float32, not float64: FWHM is a half-max crossing measured on a small
+    # cutout, so ~7 significant digits is already far more precision than the
+    # measurement carries, and it halves a full-frame temp (50 MB vs 101 MB on
+    # a 3552x3552 frame).
     if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float64)
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32)
     else:
-        gray = image.astype(np.float64)
+        gray = image.astype(np.float32)
 
     h, w = gray.shape
     fwhm_values = []

@@ -74,11 +74,16 @@ def auto_stretch_image(img, config, raw_16bit=None):
         PIL Image with stretch applied (8-bit output)
     """
     try:
+        # Convert, then scale IN PLACE. `astype(...) / scale` allocates a second
+        # full-frame float32 array (83 MB for a 2628x2628 RGB frame) just to
+        # hold the quotient; `/=` reuses the buffer astype already made.
         if raw_16bit is not None and raw_16bit.dtype == np.uint16:
-            img_array = raw_16bit.astype(np.float32) / 65535.0
+            img_array = raw_16bit.astype(np.float32)
+            img_array /= 65535.0
             bit_depth_str = "16-bit"
         else:
-            img_array = np.array(img).astype(np.float32) / 255.0
+            img_array = np.array(img, dtype=np.float32)
+            img_array /= 255.0
             bit_depth_str = "8-bit"
 
         target_median = config.get('target_median', 0.25)
@@ -153,7 +158,13 @@ def auto_stretch_image(img, config, raw_16bit=None):
         if scnr_amount > 0 and len(stretched.shape) == 3 and stretched.shape[2] >= 3:
             stretched = _apply_scnr(stretched, scnr_amount)
 
-        stretched_uint8 = (stretched * 255.0).astype(np.uint8)
+        # Scale in place: by this point *stretched* is always a freshly built
+        # array — every branch above produced one via np.zeros_like, np.dstack,
+        # or _stretch_channel's leading .copy() — so it never aliases the
+        # caller's data, and `stretched * 255.0` would be one more full-frame
+        # float32 temp (83 MB at 2628x2628) for no reader.
+        np.multiply(stretched, 255.0, out=stretched)
+        stretched_uint8 = stretched.astype(np.uint8)
         result_img = Image.fromarray(stretched_uint8, mode=img.mode)
 
         if saturation_boost != 1.0 and result_img.mode in ('RGB', 'RGBA'):
@@ -170,6 +181,15 @@ def auto_stretch_image(img, config, raw_16bit=None):
 
 
 def _normalize_channel_medians(img_array):
+    """Equalise per-channel medians toward luminance, IN PLACE.
+
+    Mutates *img_array* and returns it. The only caller (auto_stretch_image)
+    owns a private float32 frame and rebinds the result immediately, so the
+    defensive copy this used to make was a whole extra frame (83 MB at
+    2628x2628) that nothing ever read. All three channel medians are sampled
+    before any channel is written, so scaling in place cannot feed a rescaled
+    channel back into a later channel's target.
+    """
     r_median = np.median(img_array[:,:,0])
     g_median = np.median(img_array[:,:,1])
     b_median = np.median(img_array[:,:,2])
@@ -181,27 +201,18 @@ def _normalize_channel_medians(img_array):
     app_logger.debug(f"Dark scene normalization: R={r_median:.4f}, G={g_median:.4f}, B={b_median:.4f}")
     app_logger.debug(f"  Luminance target: {target_median:.4f}")
 
-    result = img_array.copy()
+    for c, (median, name) in enumerate(
+            ((r_median, 'R'), (g_median, 'G'), (b_median, 'B'))):
+        if median <= min_median:
+            continue
+        scale = target_median / median
+        scale = 1.0 + 0.5 * (scale - 1.0)
+        channel = img_array[:, :, c]
+        np.multiply(channel, scale, out=channel)
+        np.clip(channel, 0.0, 1.0, out=channel)
+        app_logger.debug(f"  {name} scaled by {scale:.3f}")
 
-    if r_median > min_median:
-        r_scale = target_median / r_median
-        r_scale = 1.0 + 0.5 * (r_scale - 1.0)
-        result[:,:,0] = np.clip(img_array[:,:,0] * r_scale, 0, 1)
-        app_logger.debug(f"  R scaled by {r_scale:.3f}")
-
-    if g_median > min_median:
-        g_scale = target_median / g_median
-        g_scale = 1.0 + 0.5 * (g_scale - 1.0)
-        result[:,:,1] = np.clip(img_array[:,:,1] * g_scale, 0, 1)
-        app_logger.debug(f"  G scaled by {g_scale:.3f}")
-
-    if b_median > min_median:
-        b_scale = target_median / b_median
-        b_scale = 1.0 + 0.5 * (b_scale - 1.0)
-        result[:,:,2] = np.clip(img_array[:,:,2] * b_scale, 0, 1)
-        app_logger.debug(f"  B scaled by {b_scale:.3f}")
-
-    return result
+    return img_array
 
 
 def _apply_scnr(img_array, amount=0.5):
