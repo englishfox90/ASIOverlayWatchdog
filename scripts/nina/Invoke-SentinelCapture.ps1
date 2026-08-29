@@ -107,6 +107,10 @@ function Get-OutputValue([string]$Name, $Default) {
 
 if (-not $BaseUrl) {
     $host_ = Get-OutputValue 'webserver_host' '127.0.0.1'
+    # A wildcard bind is an address to listen on, not one to connect to.
+    # http://0.0.0.0:8080 does not resolve — and the control API's Host
+    # allow-list accepts loopback anyway, so that is the right target.
+    if ($host_ -in @('0.0.0.0', '::', '[::]', '')) { $host_ = '127.0.0.1' }
     $port = Get-OutputValue 'webserver_port' 8080
     $BaseUrl = "http://${host_}:${port}"
 }
