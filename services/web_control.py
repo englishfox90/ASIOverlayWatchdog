@@ -74,7 +74,8 @@ def authorize(handler) -> bool:
     the constant-time compare.
     """
     if not api_auth.host_allowed(handler.headers.get("Host"),
-                                 _configured_host(handler)):
+                                 _configured_host(handler),
+                                 getattr(handler.server, "control_allowed_hosts", None)):
         app_logger.warning(
             "Rejected control request with disallowed Host header "
             f"'{api_auth.redact(handler.headers.get('Host'))}'"
@@ -95,7 +96,13 @@ def authorize(handler) -> bool:
 
 
 def _read_body(handler):
-    """Read the request body, or ``(None, error)`` if it is unreadable/oversized."""
+    """Read the request body, or ``(None, error)`` if it is unreadable/oversized.
+
+    The 413/401/403 paths answer without draining ``rfile``. That is safe only
+    because this handler stays on HTTP/1.0, so every connection closes after the
+    response. If ``protocol_version`` is ever raised to HTTP/1.1, the undrained
+    body becomes a request-smuggling desync — drain it first at that point.
+    """
     try:
         length = int(handler.headers.get("Content-Length") or 0)
     except (TypeError, ValueError):
@@ -160,7 +167,7 @@ def serve_command(handler, command: str):
                   if command == api_control.COMMAND_START
                   else api_control.RESULT_ALREADY_STOPPED)
         _send_json(handler, 200, api_control.build_result(
-            command, snapshot, result=result, changed=False))
+            command, snapshot, result=result, issued=False))
         return
 
     command_handler = getattr(handler.server, "capture_command_handler", None)
@@ -169,13 +176,17 @@ def serve_command(handler, command: str):
         _send_error(handler, 503, "Capture control is not available on this server.")
         return
 
+    # Snapshot the error as it stands BEFORE the command, so a stale fault from
+    # an earlier session can't be mistaken for this command failing.
+    baseline_error = snapshot.get("last_error")
+
     try:
         command_handler(command)
     except Exception as e:
         app_logger.error(f"Capture command '{command}' failed: {api_auth.redact(e)}")
         _send_json(handler, 500, api_control.build_result(
             command, _read_snapshot(handler_cls),
-            result=api_control.RESULT_FAILED, changed=False))
+            result=api_control.RESULT_FAILED, issued=True))
         return
 
     app_logger.info(f"Capture control: '{command}' issued via HTTP API")
@@ -183,7 +194,7 @@ def serve_command(handler, command: str):
     if not params["wait"]:
         _send_json(handler, 200, api_control.build_result(
             command, _read_snapshot(handler_cls),
-            result=api_control.RESULT_PENDING, changed=True))
+            result=api_control.RESULT_PENDING, issued=True))
         return
 
     started = time.monotonic()
@@ -193,13 +204,14 @@ def serve_command(handler, command: str):
         timeout=params["timeout"],
         monotonic=time.monotonic,
         sleep=time.sleep,
+        baseline_error=baseline_error,
     )
     elapsed = time.monotonic() - started
     result = api_control.result_for_outcome(command, outcome)
     _send_json(
         handler,
         api_control.http_status_for_result(result),
-        api_control.build_result(command, snapshot, result=result, changed=True,
+        api_control.build_result(command, snapshot, result=result, issued=True,
                                  waited=True, wait_seconds=elapsed),
     )
 

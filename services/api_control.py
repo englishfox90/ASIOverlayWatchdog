@@ -23,6 +23,9 @@ from __future__ import annotations
 
 import json
 
+# Sentinel for "no baseline captured", distinct from a baseline of None.
+_UNSET = object()
+
 COMMAND_START = "start"
 COMMAND_STOP = "stop"
 COMMANDS = (COMMAND_START, COMMAND_STOP)
@@ -103,7 +106,10 @@ CONTROL_RESULT_FIELDS = [
     ("result", "string",
      "Outcome: 'started', 'stopped', 'already_running', 'already_stopped', "
      "'pending', 'timeout', or 'failed'."),
-    ("changed", "boolean", "Whether this request actually changed capture state."),
+    ("changed", "boolean",
+     "Whether capture state actually changed — true only for 'started'/'stopped'."),
+    ("issued", "boolean",
+     "Whether a command was handed to the app (false for idempotent no-ops)."),
     ("state", "string", "Capture state reached, from the /status 'capture' block."),
     ("running", "boolean", "Whether capture is producing frames."),
     ("enabled", "boolean", "Whether capture is enabled in the app."),
@@ -137,15 +143,29 @@ def is_at_target(snapshot, command: str) -> bool:
     return False
 
 
-def is_failed(snapshot, command: str) -> bool:
-    """Whether capture has failed outright, so waiting further is pointless."""
+def is_failed(snapshot, command: str, baseline_error=_UNSET) -> bool:
+    """Whether the command has failed outright, so waiting further is pointless.
+
+    ``baseline_error`` is ``last_error`` as it stood when the command was
+    issued. A *new* error appearing while we wait is a real failure; the stale
+    one already there is not — without that distinction, any start after a
+    previous camera fault would report failure before the app had even
+    processed the command.
+    """
     if command != COMMAND_START:
         return False
     snapshot = snapshot or {}
     if snapshot_state(snapshot) in _ERROR_STATES:
         return True
     recovery = snapshot.get("recovery") or {}
-    return bool(recovery.get("unrecoverable"))
+    if recovery.get("unrecoverable"):
+        return True
+    if baseline_error is _UNSET:
+        return False
+    # The GUI start path can fail without ever reaching state="error": it
+    # returns early, leaving enabled False with only last_error set.
+    current = snapshot.get("last_error")
+    return bool(current) and current != baseline_error and not snapshot.get("enabled")
 
 
 def parse_request(raw_body):
@@ -203,7 +223,7 @@ def parse_request(raw_body):
 
 
 def wait_for_target(command, read_snapshot, *, timeout, monotonic, sleep,
-                    poll_interval=POLL_INTERVAL_SEC):
+                    poll_interval=POLL_INTERVAL_SEC, baseline_error=_UNSET):
     """Poll until ``command``'s target state is reached, or ``timeout`` elapses.
 
     This is what makes a sequencer instruction deterministic: the sequence must
@@ -220,7 +240,7 @@ def wait_for_target(command, read_snapshot, *, timeout, monotonic, sleep,
     while True:
         if is_at_target(snapshot, command):
             return snapshot, "reached"
-        if is_failed(snapshot, command):
+        if is_failed(snapshot, command, baseline_error):
             return snapshot, "failed"
         if monotonic() >= deadline:
             return snapshot, "timeout"
@@ -246,14 +266,25 @@ def _message(command, result, state):
     return f"Capture command failed (state is '{state}')."
 
 
-def build_result(command, snapshot, *, result, changed, waited=False, wait_seconds=0.0) -> dict:
-    """Shape a control response body. Plain values in, dict out."""
+# Outcomes where capture state genuinely moved. A timeout or a failure did not
+# change anything, and a no-op did not either — reporting `changed` for those
+# would make the field meaningless to a client deciding whether to act.
+_CHANGED_RESULTS = frozenset({RESULT_STARTED, RESULT_STOPPED})
+
+
+def build_result(command, snapshot, *, result, issued, waited=False, wait_seconds=0.0) -> dict:
+    """Shape a control response body. Plain values in, dict out.
+
+    ``issued`` says whether the command reached the app; ``changed`` is derived
+    from the outcome, so the two cannot drift apart.
+    """
     snapshot = snapshot or {}
     state = snapshot_state(snapshot)
     return {
         "command": command,
         "result": result,
-        "changed": bool(changed),
+        "changed": result in _CHANGED_RESULTS,
+        "issued": bool(issued),
         "state": state,
         "running": bool(snapshot.get("running")),
         "enabled": bool(snapshot.get("enabled")),

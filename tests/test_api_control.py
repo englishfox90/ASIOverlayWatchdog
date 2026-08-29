@@ -201,7 +201,7 @@ def test_result_for_outcome_maps_per_command():
 
 def test_build_result_shape_matches_documented_fields():
     body = ac.build_result(ac.COMMAND_START, RUNNING,
-                           result=ac.RESULT_STARTED, changed=True,
+                           result=ac.RESULT_STARTED, issued=True,
                            waited=True, wait_seconds=1.234)
     documented = {name for name, _type, _desc in ac.CONTROL_RESULT_FIELDS}
     assert set(body) == documented
@@ -212,7 +212,7 @@ def test_build_result_shape_matches_documented_fields():
 
 def test_noop_results_carry_changed_false():
     body = ac.build_result(ac.COMMAND_START, RUNNING,
-                           result=ac.RESULT_ALREADY_RUNNING, changed=False)
+                           result=ac.RESULT_ALREADY_RUNNING, issued=False)
     assert body["changed"] is False
     assert "already running" in body["message"].lower()
 
@@ -267,7 +267,7 @@ def test_openapi_control_result_schema_matches_build_result():
     spec = api_docs.build_openapi_spec(control_path="/capture")
     documented = set(spec["components"]["schemas"]["ControlResult"]["properties"])
     actual = set(ac.build_result(ac.COMMAND_START, RUNNING,
-                                 result=ac.RESULT_STARTED, changed=True))
+                                 result=ac.RESULT_STARTED, issued=True))
     assert documented == actual
 
 
@@ -285,3 +285,67 @@ def test_docs_html_renders_with_control_routes():
     html = api_docs.render_docs_page(spec) if hasattr(api_docs, "render_docs_page") \
         else api_docs.render_docs_html(spec)
     assert "/capture/start" in html
+
+
+# --- review follow-ups ----------------------------------------------------
+
+@pytest.mark.parametrize("result,changed", [
+    (ac.RESULT_STARTED, True),
+    (ac.RESULT_STOPPED, True),
+    (ac.RESULT_ALREADY_RUNNING, False),
+    (ac.RESULT_ALREADY_STOPPED, False),
+    (ac.RESULT_PENDING, False),
+    (ac.RESULT_TIMEOUT, False),
+    (ac.RESULT_FAILED, False),
+])
+def test_changed_is_true_only_when_state_actually_moved(result, changed):
+    """A timeout or a failure changed nothing — saying otherwise misleads a client."""
+    body = ac.build_result(ac.COMMAND_START, RUNNING, result=result, issued=True)
+    assert body["changed"] is changed
+
+
+def test_issued_distinguishes_a_noop_from_a_real_command():
+    noop = ac.build_result(ac.COMMAND_START, RUNNING,
+                           result=ac.RESULT_ALREADY_RUNNING, issued=False)
+    pending = ac.build_result(ac.COMMAND_START, STOPPED,
+                              result=ac.RESULT_PENDING, issued=True)
+    assert noop["issued"] is False and noop["changed"] is False
+    assert pending["issued"] is True and pending["changed"] is False
+
+
+def test_stale_error_does_not_fail_a_fresh_start():
+    """A fault from an earlier session must not fail a start before it is processed."""
+    stale = snap(enabled=False, running=False, state="stopped",
+                 last_error="camera unplugged an hour ago")
+    assert ac.is_failed(stale, ac.COMMAND_START, baseline_error="camera unplugged an hour ago") is False
+
+
+def test_new_error_during_start_is_a_failure():
+    """The GUI start path can fail without ever reaching state='error'."""
+    after = snap(enabled=False, running=False, state="stopped",
+                 last_error="could not open camera")
+    assert ac.is_failed(after, ac.COMMAND_START, baseline_error=None) is True
+
+
+def test_wait_returns_failed_on_a_new_error_rather_than_burning_the_timeout():
+    clock = _FakeClock()
+    failed = snap(enabled=False, running=False, state="stopped",
+                  last_error="could not open camera")
+    _, outcome = ac.wait_for_target(
+        ac.COMMAND_START, lambda: failed,
+        timeout=300, monotonic=clock.monotonic, sleep=clock.sleep,
+        baseline_error=None,
+    )
+    assert outcome == "failed"
+    assert clock.t == 0.0
+
+
+def test_wait_still_times_out_when_only_a_stale_error_is_present():
+    clock = _FakeClock()
+    stale = snap(enabled=False, running=False, state="stopped", last_error="old fault")
+    _, outcome = ac.wait_for_target(
+        ac.COMMAND_START, lambda: stale,
+        timeout=2, monotonic=clock.monotonic, sleep=clock.sleep,
+        baseline_error="old fault",
+    )
+    assert outcome == "timeout"
