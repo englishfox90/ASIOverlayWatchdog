@@ -131,6 +131,7 @@ class _StubRunner:
     def __init__(self):
         from services.headless_runner import HeadlessRunner
         self._paused = threading.Event()
+        self._wake = threading.Event()
         self.logs = []
         self.pushes = []
         self._handle = HeadlessRunner._handle_capture_command.__get__(self)
@@ -147,7 +148,27 @@ def test_headless_stop_pauses_without_shutting_down():
     runner = _StubRunner()
     runner._handle("stop")
     assert runner._paused.is_set()
-    assert runner.pushes and runner.pushes[-1]["enabled"] is False
+
+
+def test_headless_handler_does_not_publish_status_itself():
+    """Only the capture loop publishes.
+
+    Reporting 'stopped' from the HTTP thread would tell a waiting sequence the
+    target state was reached while the loop was still mid-exposure — the
+    sequence could park the mount under a running camera, and the loop would
+    then push 'capturing' again a moment later.
+    """
+    runner = _StubRunner()
+    runner._handle("stop")
+    assert runner.pushes == []
+
+
+def test_headless_command_wakes_the_capture_loop():
+    """Otherwise a stop is observed up to a full interval late and times out."""
+    runner = _StubRunner()
+    assert not runner._wake.is_set()
+    runner._handle("stop")
+    assert runner._wake.is_set()
 
 
 def test_headless_start_resumes():

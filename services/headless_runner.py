@@ -51,6 +51,9 @@ class HeadlessRunner:
         # pausing must not tear down the process, or a sequencer's "Stop at dawn"
         # would leave nothing running to receive "Start at dusk".
         self._paused = threading.Event()
+        # Set whenever shutdown or a pause/resume happens, so the loop's waits
+        # end immediately instead of up to a full capture interval later.
+        self._wake = threading.Event()
         self._auto_stop_timer = None
         
         # Register signal handlers for graceful shutdown
@@ -128,6 +131,7 @@ class HeadlessRunner:
         self._log("Stopping capture...")
         self.running = False
         self._shutdown_event.set()
+        self._wake.set()
         if self._auto_stop_timer is not None:
             self._auto_stop_timer.cancel()
     
@@ -207,6 +211,7 @@ class HeadlessRunner:
             library_path=library_path, image_library=self.image_library,
             control_path=control_path,
             control_token=api_auth.resolve_control_token(self.config),
+            control_allowed_hosts=api_auth.allowed_control_hosts(self.config),
         )
         # No Qt loop here, so the handler runs directly on the HTTP thread —
         # it only sets/clears an Event, which the capture loop observes.
@@ -297,6 +302,22 @@ class HeadlessRunner:
             self._log(traceback.format_exc())
             return False
     
+    def _wait(self, timeout: float):
+        """Sleep up to `timeout`, waking early on shutdown or a control command.
+
+        Without this a stop issued mid-interval is only observed when the sleep
+        ends, so a `wait: true` control call times out on any rig with an
+        interval longer than the client timeout.
+        """
+        self._wake.clear()
+        deadline = time.monotonic() + timeout
+        while not self._shutdown_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            if self._wake.wait(remaining):
+                return
+
     def _capture_loop(self):
         """Main capture loop"""
         while self.running and not self._shutdown_event.is_set():
@@ -307,14 +328,21 @@ class HeadlessRunner:
 
                 if self._paused.is_set():
                     self._push_capture_status(running=False, state="stopped", enabled=False)
-                    self._shutdown_event.wait(1)
+                    self._wait(30)
                     continue
+
+                # Publish "started" BEFORE the exposure, not after it. The loop
+                # otherwise pushes nothing until a full capture+process cycle
+                # completes, so a resume on a 20s all-sky exposure would not be
+                # observable inside the control API's default 30s wait and the
+                # NINA step would fail on a start that actually worked.
+                self._push_capture_status(running=True, state="waiting")
 
                 # Check scheduled capture window
                 if not self.zwo_camera.is_within_scheduled_window():
                     self._log("Outside scheduled capture window, waiting...")
                     self._push_capture_status(running=True, state="outside_window")
-                    self._shutdown_event.wait(60)  # Check every minute
+                    self._wait(60)  # Check every minute
                     continue
 
                 # Capture frame
@@ -340,7 +368,7 @@ class HeadlessRunner:
                 elapsed = time.time() - start_time
                 wait_time = max(0, self.zwo_camera.effective_capture_interval - elapsed)
                 if wait_time > 0:
-                    self._shutdown_event.wait(wait_time)
+                    self._wait(wait_time)
 
             except Exception as e:
                 self._log(f"ERROR in capture loop: {e}")
@@ -349,7 +377,7 @@ class HeadlessRunner:
                 self._last_error = str(e)
                 self._push_capture_status(running=False, state="error")
                 # Wait before retrying
-                self._shutdown_event.wait(5)
+                self._wait(5)
 
     def _handle_capture_command(self, command: str):
         """Execute a control-API capture command (headless host).
@@ -368,9 +396,13 @@ class HeadlessRunner:
         elif command == "stop":
             self._paused.set()
             self._log("Capture paused via control API")
-            self._push_capture_status(running=False, state="stopped", enabled=False)
         else:
             raise ValueError(f"Unknown capture command: {command!r}")
+        # Only the capture loop publishes status. Pushing 'stopped' from here
+        # would report the target state while the loop was still mid-exposure,
+        # letting a sequence park the mount under a running camera; the loop
+        # then pushed 'capturing' again a moment later.
+        self._wake.set()
 
     def _push_capture_status(self, *, running: bool, state: str, enabled: bool = True):
         """Push the current capture snapshot to the web server (headless)."""
