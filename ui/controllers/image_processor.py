@@ -117,12 +117,8 @@ class ImageProcessorWorker(QThread):
     def _trim_working_set(self):
         # Ask Windows to page out idle memory — reduces Task Manager RSS without
         # freeing virtual address space. No-op on non-Windows.
-        try:
-            import ctypes
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            ctypes.windll.kernel32.SetProcessWorkingSetSize(handle, -1, -1)
-        except Exception:
-            pass
+        from services.working_set import trim_working_set
+        trim_working_set()
 
     def queue_task(self, task: ImageProcessingTask):
         """Queue a processing task"""

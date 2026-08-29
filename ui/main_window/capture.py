@@ -3,7 +3,7 @@ import re
 import threading
 import time
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QProgressDialog
 
 from services.logger import app_logger
@@ -171,8 +171,24 @@ class _MainWindowCaptureMixin(_CameraDetectMixin, _CaptureWatchdogMixin):
                 'images_processed': self.image_count,
             })
 
+            # Trim the working set once capture is idle so the operator-visible
+            # Task Manager number reflects reality instead of sitting at the
+            # processing peak indefinitely. Delayed 3s so the processor's
+            # queue has time to drain the frame it was mid-processing when
+            # stop was requested — trimming immediately would just get
+            # re-faulted right back in. is_capturing is re-checked in the
+            # callback so a stop->start within that window doesn't page out
+            # memory mid-capture.
+            QTimer.singleShot(3000, self._trim_working_set_after_stop)
+
         except Exception as e:
             app_logger.error(f"Error stopping capture: {e}")
+
+    def _trim_working_set_after_stop(self):
+        if self.is_capturing:
+            return
+        from services.working_set import trim_working_set
+        trim_working_set()
 
     def _send_posthog_capture_started(self, mode: str):
         try:

@@ -400,6 +400,12 @@ class HeadlessRunner:
         elif command == "stop":
             self._paused.set()
             self._log("Capture paused via control API")
+            # Unlike the GUI's queued worker, capture+process here runs
+            # synchronously inside _capture_loop, so by the time _paused is
+            # observed there is no in-flight frame still being processed —
+            # a direct trim (no delay) is safe.
+            from .working_set import trim_working_set
+            trim_working_set()
         else:
             raise ValueError(f"Unknown capture command: {command!r}")
         # Only the capture loop publishes status. Pushing 'stopped' from here
