@@ -175,6 +175,7 @@ def _add_compass_overlay(img, overlay):
 
         size = overlay.get('size', 80)
         rotation = overlay.get('rotation', 0)
+        mirror = overlay.get('mirror', False)
         anchor = overlay.get('anchor', 'Bottom-Right')
         offset_x = overlay.get('offset_x', 20)
         offset_y = overlay.get('offset_y', 20)
@@ -183,7 +184,8 @@ def _add_compass_overlay(img, overlay):
         cx = x + size // 2
         cy = y + size // 2
 
-        img = draw_compass(img, rotation=rotation, size=size, cx=cx, cy=cy)
+        img = draw_compass(img, rotation=rotation, size=size, cx=cx, cy=cy,
+                           mirror=mirror)
     except Exception as e:
         app_logger.debug(f"Compass overlay skipped: {e}")
     return img

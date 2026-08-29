@@ -55,6 +55,48 @@ class TestCompassRendering:
         assert not all_same, "Different rotations should produce distinct outputs"
 
 
+class TestCompassMirror:
+    """Test the E/W mirror option"""
+
+    def test_mirror_changes_output(self):
+        """Test mirroring produces a different image from the default"""
+        normal = np.array(draw_compass(_make_image(), size=160, cx=128, cy=128))
+        mirrored = np.array(draw_compass(_make_image(), size=160, cx=128, cy=128,
+                                         mirror=True))
+        assert not np.array_equal(normal, mirrored)
+
+    def test_mirror_swaps_east_and_west_labels(self):
+        """Test the E label moves to the W side (and vice versa) when mirrored"""
+        size, cx, cy = 160, 128, 128
+        normal = draw_compass(_make_image(), size=size, cx=cx, cy=cy)
+        mirrored = draw_compass(_make_image(), size=size, cx=cx, cy=cy, mirror=True)
+
+        def _label_ink(img, x0, x1):
+            # Band sits outside the star points, so it only contains the label
+            crop = img.crop((cx + x0, cy - 20, cx + x1, cy + 20))
+            return int(np.array(crop)[:, :, :3].sum())
+
+        west_band, east_band = (-92, -58), (58, 92)
+        assert _label_ink(normal, *east_band) == _label_ink(mirrored, *west_band)
+        assert _label_ink(normal, *west_band) == _label_ink(mirrored, *east_band)
+        # Guard the assertions above against E and W rendering identically
+        assert _label_ink(normal, *east_band) != _label_ink(normal, *west_band)
+
+    def test_mirror_keeps_north_up(self):
+        """Test mirroring is left-right only — N stays where rotation puts it"""
+        size, cx, cy = 160, 128, 128
+        label_r = (size // 2) * 0.88
+        box = 18
+
+        def _north(img):
+            return np.array(img.crop((cx - box, int(cy - label_r - box),
+                                      cx + box, int(cy - label_r + box))))
+
+        normal = draw_compass(_make_image(), size=size, cx=cx, cy=cy)
+        mirrored = draw_compass(_make_image(), size=size, cx=cx, cy=cy, mirror=True)
+        assert np.array_equal(_north(normal), _north(mirrored))
+
+
 class TestCompassPosition:
     """Test compass position options"""
 

@@ -306,9 +306,16 @@ class OverlayEditorUIMixin:
         layout.addWidget(FormRow("Size", self.compass_size_spin,
                                  "Compass diameter in pixels"))
 
+        self.compass_mirror_switch = SwitchRow(
+            "Mirror E/W", "Swap East and West for mirror-flipped views")
+        self.compass_mirror_switch.toggled.connect(self._on_compass_field_changed)
+        layout.addWidget(self.compass_mirror_switch)
+
         compass_info = CaptionLabel(
             "Draws a compass rose showing N/S/E/W cardinal directions.\n"
             "Use Rotation to align North with your image orientation.\n"
+            "Enable Mirror E/W if East and West sit on the wrong sides — "
+            "rotation alone cannot fix a mirrored view.\n"
             "Position is set via the shared Anchor and Offset fields below."
         )
         compass_info.setStyleSheet(f"color: {Colors.text_muted}; padding: 4px;")

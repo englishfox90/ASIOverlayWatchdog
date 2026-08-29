@@ -259,6 +259,7 @@ class OverlaySettingsPanel(OverlayEditorUIMixin, QWidget):
             'type': 'compass',
             'rotation': 0,
             'size': 80,
+            'mirror': False,
             'anchor': 'Bottom-Right',
             'offset_x': 20,
             'offset_y': 20,
@@ -348,6 +349,7 @@ class OverlaySettingsPanel(OverlayEditorUIMixin, QWidget):
         elif overlay_type == 'compass':
             self.compass_rotation_spin.setValue(overlay.get('rotation', 0))
             self.compass_size_spin.setValue(overlay.get('size', 80))
+            self.compass_mirror_switch.set_checked(overlay.get('mirror', False))
 
         anchor = overlay.get('anchor', 'Bottom-Left')
         idx = self.anchor_combo.findText(anchor)
@@ -373,6 +375,7 @@ class OverlaySettingsPanel(OverlayEditorUIMixin, QWidget):
             w.blockSignals(block)
         self.bg_switch.switch.blockSignals(block)
         self.aspect_switch.switch.blockSignals(block)
+        self.compass_mirror_switch.switch.blockSignals(block)
 
     def _clear_editor(self):
         self._block_all_signals(True)
@@ -390,6 +393,7 @@ class OverlaySettingsPanel(OverlayEditorUIMixin, QWidget):
         self.image_height_spin.setValue(100)
         self.opacity_spin.setValue(100)
         self.aspect_switch.set_checked(True)
+        self.compass_mirror_switch.set_checked(False)
         self.anchor_combo.setCurrentIndex(0)
         self.offset_x_spin.setValue(15)
         self.offset_y_spin.setValue(15)
@@ -419,6 +423,7 @@ class OverlaySettingsPanel(OverlayEditorUIMixin, QWidget):
             elif overlay['type'] == 'compass':
                 overlay['rotation'] = self.compass_rotation_spin.value()
                 overlay['size'] = self.compass_size_spin.value()
+                overlay['mirror'] = self.compass_mirror_switch.is_checked()
 
             overlay['anchor'] = self.anchor_combo.currentText()
             overlay['offset_x'] = self.offset_x_spin.value()

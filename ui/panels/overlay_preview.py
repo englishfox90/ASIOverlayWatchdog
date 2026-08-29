@@ -301,6 +301,7 @@ class OverlayPreviewCard(CardWidget):
 
     def _render_compass_overlay(self, painter: QPainter, overlay: dict, width: int, height: int):
         rotation = overlay.get('rotation', 0)
+        mirror = overlay.get('mirror', False)
         size = overlay.get('size', 80)
         anchor = overlay.get('anchor', 'Bottom-Right')
         offset_x = overlay.get('offset_x', 20)
@@ -315,6 +316,7 @@ class OverlayPreviewCard(CardWidget):
         cy += radius
 
         rot_rad = math.radians(rotation)
+        flip = -1 if mirror else 1
         painter.setRenderHint(QPainter.Antialiasing, True)
 
         col_light = QColor(255, 255, 255, 200)
@@ -333,7 +335,7 @@ class OverlayPreviewCard(CardWidget):
         for i, angle_deg in enumerate(range(0, 360, 45)):
             is_cardinal = (i % 2 == 0)
             tip_r = cardinal_len if is_cardinal else ordinal_len
-            angle = math.radians(angle_deg) + rot_rad
+            angle = rot_rad + flip * math.radians(angle_deg)
 
             tip_x = cx + tip_r * math.sin(angle)
             tip_y = cy - tip_r * math.cos(angle)
@@ -365,7 +367,7 @@ class OverlayPreviewCard(CardWidget):
         fm = painter.fontMetrics()
 
         for label_text, angle_deg in [('N', 0), ('E', 90), ('S', 180), ('W', 270)]:
-            angle = math.radians(angle_deg) + rot_rad
+            angle = rot_rad + flip * math.radians(angle_deg)
             label_r = radius * COMPASS_LABEL_R
             lx = cx + label_r * math.sin(angle)
             ly = cy - label_r * math.cos(angle)

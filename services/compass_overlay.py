@@ -26,7 +26,7 @@ COMPASS_LABEL_R = 0.88
 def draw_compass(image, rotation=0, position='bottom-right',
                  size=DEFAULT_SIZE, color=DEFAULT_COLOR,
                  label_color=DEFAULT_LABEL_COLOR, margin=20,
-                 cx=None, cy=None):
+                 cx=None, cy=None, mirror=False):
     """Draw an 8-point star compass rose on an image.
 
     Args:
@@ -40,6 +40,10 @@ def draw_compass(image, rotation=0, position='bottom-right',
         margin: Pixel margin from image edge (ignored if cx/cy given)
         cx: Optional explicit center X coordinate
         cy: Optional explicit center Y coordinate
+        mirror: Mirror the rose left-right so E and W swap sides. Needed when
+                the camera's view of the sky is handed the other way round
+                (mirror-flipped optics, or a lens looking "down" on the sky),
+                which rotation alone cannot correct.
 
     Returns:
         Modified PIL Image (RGBA)
@@ -64,6 +68,9 @@ def draw_compass(image, rotation=0, position='bottom-right',
     draw = ImageDraw.Draw(overlay)
 
     rot_rad = math.radians(rotation)
+    # Mirroring negates the bearing while leaving `rotation` a clockwise
+    # screen rotation, so the rotation control still behaves the same way.
+    flip = -1 if mirror else 1
 
     # Derive colors from the base color
     fill_light = color
@@ -85,7 +92,7 @@ def draw_compass(image, rotation=0, position='bottom-right',
     for i, angle_deg in enumerate(range(0, 360, 45)):
         is_cardinal = (i % 2 == 0)
         tip_r = cardinal_len if is_cardinal else ordinal_len
-        angle = math.radians(angle_deg) + rot_rad
+        angle = rot_rad + flip * math.radians(angle_deg)
 
         # Tip of this point
         tip_x = cx + tip_r * math.sin(angle)
@@ -124,7 +131,7 @@ def draw_compass(image, rotation=0, position='bottom-right',
         font = ImageFont.load_default()
 
     for label_text, angle_deg in [('N', 0), ('E', 90), ('S', 180), ('W', 270)]:
-        angle = math.radians(angle_deg) + rot_rad
+        angle = rot_rad + flip * math.radians(angle_deg)
         label_r = radius * COMPASS_LABEL_R
         lx = cx + label_r * math.sin(angle)
         ly = cy - label_r * math.cos(angle)
