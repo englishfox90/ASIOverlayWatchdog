@@ -232,10 +232,10 @@ machines — excluded by D1. Stage 3 shrinks to "copy the DLL + offer an overrid
 
 ### Toolchain
 
-Needs the **.NET 8 SDK** and nothing else (`winget install Microsoft.DotNet.SDK.8`).
-This machine has the .NET 8 *runtime* and MSBuild Build Tools but **no SDK**, so
-nothing can build today. Visual Studio is not required — `dotnet build` suffices;
-VS would only add the template's token-substitution wizard.
+Needs the **.NET 8 SDK** and nothing else. Installed 2026-08-29 (`winget install
+Microsoft.DotNet.SDK.8`), now **8.0.424**. Visual Studio is not required —
+`dotnet build` suffices; VS would only add the template's token-substitution
+wizard.
 
 The template pins `NINA.Plugin` **3.0.0.2017-beta**; bump to **3.2.0.9001** to match
 the installed NINA. Note .NET 8 reaches end-of-support **10 Nov 2026**, so a TFM

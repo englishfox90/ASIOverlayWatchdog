@@ -56,7 +56,9 @@ Name: "runadmin"; Description: "Run as Administrator (recommended for USB camera
 Name: "startupreg"; Description: "Run PFR Sentinel when Windows starts (auto-resume capture after a reboot)"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
-; Source files from PyInstaller build
+; Source files from PyInstaller build.
+; This also carries nina_plugin\PFRSentinel.NINA.dll (staged by build_sentinel.bat,
+; bundled by PFRSentinel.spec) — recursesubdirs picks it up, no separate entry needed.
 Source: "..\dist\PFRSentinel\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
@@ -496,6 +498,144 @@ begin
   end;
 end;
 
+{ ===================================================================== }
+{  NINA plugin cleanup on uninstall                                      }
+{                                                                        }
+{  The plugin is installed at runtime (not by Setup) into the PER-USER   }
+{  %LOCALAPPDATA%\NINA\Plugins\<version>\PFRSentinel.NINA\, so Inno has  }
+{  no record of it and will not remove it. This mirrors the guards in    }
+{  services\nina_plugin_install.py::check_removable — a bug here deletes }
+{  someone else's plugin. A folder only qualifies when it:               }
+{    * sits exactly two levels under ...\NINA\Plugins (we build the path,}
+{      and the middle component must parse as a version number);         }
+{    * is named exactly PFRSentinel.NINA;                                }
+{    * is a real directory, not a symlink/junction (checked on BOTH the  }
+{      version folder and the plugin folder — DelTree would otherwise    }
+{      follow a link out of the plugins root);                           }
+{    * contains PFRSentinel.NINA.dll, or is empty.                       }
+{  Anything else is logged and left alone. Best-effort throughout: a     }
+{  failure must never block the uninstall.                               }
+{ ===================================================================== }
+
+function IsVersionFolderName(const Name: String): Boolean;
+{ '3.0.0' -> True. Digits and dots only, 1..4 parts, every part non-empty.
+  Matches _parse_version() in nina_plugin_install.py. }
+var
+  i, Parts, PartLen: Integer;
+  C: Char;
+begin
+  Result := False;
+  if Name = '' then Exit;
+  Parts := 1;
+  PartLen := 0;
+  for i := 1 to Length(Name) do
+  begin
+    C := Name[i];
+    if C = '.' then
+    begin
+      if PartLen = 0 then Exit;
+      Parts := Parts + 1;
+      PartLen := 0;
+    end
+    else if (C >= '0') and (C <= '9') then
+      PartLen := PartLen + 1
+    else
+      Exit;
+  end;
+  Result := (PartLen > 0) and (Parts <= 4);
+end;
+
+function IsReparsePoint(const Path: String): Boolean;
+{ Symlink or NTFS junction. $400 = FILE_ATTRIBUTE_REPARSE_POINT. }
+var
+  FindRec: TFindRec;
+begin
+  Result := False;
+  if FindFirst(Path, FindRec) then
+  try
+    Result := (FindRec.Attributes and $400) <> 0;
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
+function PluginDirLooksLikeOurs(const Dir: String): Boolean;
+{ True when the folder is empty, or contains PFRSentinel.NINA.dll. }
+var
+  FindRec: TFindRec;
+  HasAny, HasDll: Boolean;
+begin
+  HasAny := False;
+  HasDll := False;
+  if FindFirst(AddBackslash(Dir) + '*', FindRec) then
+  try
+    repeat
+      if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+      begin
+        HasAny := True;
+        if CompareText(FindRec.Name, 'PFRSentinel.NINA.dll') = 0 then
+          HasDll := True;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+  Result := (not HasAny) or HasDll;
+end;
+
+procedure RemoveOneNinaPluginDir(const Dir: String);
+begin
+  if IsReparsePoint(Dir) then
+  begin
+    Log('NINA plugin: refusing to delete ' + Dir + ' - it is a link, not a real folder.');
+    Exit;
+  end;
+  if not PluginDirLooksLikeOurs(Dir) then
+  begin
+    Log('NINA plugin: refusing to delete ' + Dir + ' - it does not contain PFRSentinel.NINA.dll.');
+    Exit;
+  end;
+  if DelTree(Dir, True, True, True) then
+    Log('NINA plugin: removed ' + Dir)
+  else
+    Log('NINA plugin: could not remove ' + Dir + ' (non-fatal - is NINA running?)');
+end;
+
+procedure RemoveNinaPlugin;
+{ Sweep every <version> folder, not just the current one: an install left under
+  an older plugin-API folder must be cleaned up too. }
+var
+  PluginsRoot, VersionDir, TargetDir: String;
+  FindRec: TFindRec;
+begin
+  PluginsRoot := ExpandConstant('{localappdata}\NINA\Plugins');
+  if not DirExists(PluginsRoot) then
+    Exit;
+  if not FindFirst(AddBackslash(PluginsRoot) + '*', FindRec) then
+    Exit;
+  try
+    repeat
+      { $10 = FILE_ATTRIBUTE_DIRECTORY }
+      if ((FindRec.Attributes and $10) <> 0) and
+         (FindRec.Name <> '.') and (FindRec.Name <> '..') and
+         IsVersionFolderName(FindRec.Name) then
+      begin
+        VersionDir := AddBackslash(PluginsRoot) + FindRec.Name;
+        if IsReparsePoint(VersionDir) then
+          Log('NINA plugin: skipping linked version folder ' + VersionDir)
+        else
+        begin
+          TargetDir := AddBackslash(VersionDir) + 'PFRSentinel.NINA';
+          if DirExists(TargetDir) then
+            RemoveOneNinaPluginDir(TargetDir);
+        end;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   ResultCode: Integer;
@@ -508,5 +648,9 @@ begin
     if FileExists(ExpandConstant('{app}\{#MyAppExeName}')) then
       ShellExec('', ExpandConstant('{app}\{#MyAppExeName}'),
                 '--unregister-startup', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    { The NINA plugin lives in per-user LOCALAPPDATA, outside the install
+      directory, so nothing else here would ever remove it. }
+    RemoveNinaPlugin;
   end;
 end;

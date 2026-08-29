@@ -245,6 +245,21 @@ added_files = [
     ('scripts/nina/README.md', 'scripts/nina'),
 ]
 
+# NINA plugin DLL — built by build_sentinel.bat from nina-plugin/ and staged
+# here. Conditional: PyInstaller aborts the whole build on a datas entry whose
+# source is missing, and a source checkout without the .NET SDK legitimately has
+# no DLL. services/nina_plugin_install.py handles the absent bundle at runtime
+# (STATUS/RESULT "bundle missing"), so skipping it degrades gracefully.
+_nina_plugin_dll = os.path.join(
+    os.path.dirname(os.path.abspath(SPEC)), 'nina_plugin', 'PFRSentinel.NINA.dll'
+)
+if os.path.isfile(_nina_plugin_dll):
+    added_files.append(('nina_plugin/PFRSentinel.NINA.dll', 'nina_plugin'))
+    print("[OK] NINA plugin DLL: bundled")
+else:
+    print("[WARN] NINA plugin DLL not found at nina_plugin/PFRSentinel.NINA.dll "
+          "- building WITHOUT the NINA plugin")
+
 # ============================================================================
 # HIDDEN IMPORTS - Only what we actually use
 # ============================================================================

@@ -100,3 +100,6 @@ ml/models/backup_*/
 [Bb]in/
 [Oo]bj/
 *.user
+
+# NINA plugin DLL staged for PyInstaller by build_sentinel.bat (build output)
+nina_plugin/
