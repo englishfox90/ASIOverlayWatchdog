@@ -37,7 +37,7 @@ def test_generate_token_is_url_safe_and_unique():
     ("Bearer abc123", "abc123"),
     ("Bearer\tabc123", "abc123"),
     ("  Bearer abc123  ", "abc123"),
-    ("bearer abc123", None),          # scheme is case-sensitive per RFC 6750 usage here
+    ("bearer abc123", "abc123"),      # RFC 7235: the auth scheme is case-insensitive
     ("Basic abc123", None),
     ("abc123", None),
     ("Bearer", None),
@@ -166,3 +166,35 @@ def test_ensure_token_is_idempotent():
     cfg = _FakeConfig({"output": {"api_token": "existing"}})
     assert api_auth.ensure_token(cfg) == "existing"
     assert cfg.saves == 0
+
+
+# --- non-ASCII credentials (review follow-up) -----------------------------
+
+@pytest.mark.parametrize("header", [
+    "Bearer éabc",        # accented text
+    "Bearer \udcff",           # a raw latin-1 byte, as http.client decodes it
+    "Bearer 中文",     # non-Latin script
+])
+def test_non_ascii_bearer_is_rejected_not_raised(header):
+    """hmac.compare_digest raises TypeError on a non-ASCII str.
+
+    Headers reach us latin-1-decoded, so without comparing bytes an
+    unauthenticated client could crash the request thread with a single byte
+    before ever being rejected.
+    """
+    assert api_auth.check_bearer(header, "s3cret") == api_auth.AUTH_INVALID
+
+
+def test_non_ascii_token_still_authenticates():
+    token = "s3cret-éè"
+    assert api_auth.check_bearer(f"Bearer {token}", token) == api_auth.AUTH_OK
+
+
+def test_scheme_is_case_insensitive():
+    for scheme in ("Bearer", "bearer", "BEARER", "BeArEr"):
+        assert api_auth.check_bearer(f"{scheme} s3cret", "s3cret") == api_auth.AUTH_OK
+
+
+def test_redact_keeps_the_key_name():
+    """A redacted log line should still read sensibly."""
+    assert api_auth.redact("api_token=s3cret") == "api_token=<redacted-token>"

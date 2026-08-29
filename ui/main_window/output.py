@@ -307,6 +307,7 @@ class _MainWindowOutputMixin:
             library_path=library_path, image_library=self.image_library,
             control_path=control_path,
             control_token=api_auth.resolve_control_token(self.config),
+            control_allowed_hosts=api_auth.allowed_control_hosts(self.config),
         )
         # Capture control must never run on the HTTP thread — the bridge queues
         # it onto the GUI thread. See ui/controllers/capture_command_bridge.py.

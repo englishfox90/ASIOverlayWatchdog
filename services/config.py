@@ -63,6 +63,8 @@ DEFAULT_CONFIG = {
         # are opt-in and fail closed without a token. See services/api_auth.py.
         "webserver_control_enabled": False,
         "webserver_control_path": "/capture",
+        # Extra Host values for control routes; see services/api_auth.py.
+        "webserver_control_allowed_hosts": [],
         "api_token": ""
     },
     

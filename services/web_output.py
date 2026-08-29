@@ -15,7 +15,7 @@ from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from PIL import Image
 from .logger import app_logger
-from . import web_control, web_library
+from . import api_auth, web_control, web_library
 
 # Maximum image size served by the web endpoint (5 MB)
 WEB_IMAGE_MAX_BYTES = 5 * 1024 * 1024
@@ -95,8 +95,18 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         with no hint that other verbs exist.
         """
         control_path = getattr(self.server, 'control_path', '/capture')
-        if not web_control.route_post(self, control_path):
-            self.send_error(404, "Path not found.")
+        try:
+            if not web_control.route_post(self, control_path):
+                self.send_error(404, "Path not found.")
+        except Exception as e:
+            # Without this a handler bug is a bare connection reset and a
+            # traceback to a stderr that is None under a windowed PyInstaller
+            # build. Answer with a redacted 500 instead.
+            app_logger.error(f"Unhandled error in control route: {api_auth.redact(e)}")
+            try:
+                self.send_error(500, "Internal error handling control request.")
+            except Exception:
+                pass
 
     @classmethod
     def update_image(cls, image_data: bytes, content_type: str, path: str = None, metadata: dict = None):
@@ -184,7 +194,9 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         elif clean_path == library_path and self._library_api_enabled():
             web_library.serve_list(self, self._library(), library_path, query_params)
         else:
-            available = ", ".join([config_path, status_path, openapi_path, docs_path, control_path])
+            available = ", ".join([config_path, status_path, openapi_path, docs_path])
+            if getattr(self.server, 'control_token', ''):
+                available += f", {control_path}"
             if self._library_api_enabled():
                 available += f", {library_path}, {library_path}/image"
             self.send_error(404, f"Path not found. Available: {available}")
@@ -399,7 +411,8 @@ class WebOutputServer:
     
     def __init__(self, host='0.0.0.0', port=8080, image_path='/latest', status_path='/status',
                  docs_path='/docs', openapi_path='/openapi.json', library_path='/library',
-                 image_library=None, control_path='/capture', control_token=''):
+                 image_library=None, control_path='/capture', control_token='',
+                 control_allowed_hosts=None):
         """
         Initialize web server.
 
@@ -417,6 +430,9 @@ class WebOutputServer:
                 (``<control_path>`` reads state, ``/start`` and ``/stop`` mutate)
             control_token: Bearer token required on every control route. Empty
                 means control fails closed — never open.
+            control_allowed_hosts: Extra Host header values accepted on control
+                routes, beyond loopback and `host`. Only needed for a non-
+                loopback bind, where the wildcard address names no host.
         """
         self.host = host
         self.port = port
@@ -428,6 +444,7 @@ class WebOutputServer:
         self.image_library = image_library
         self.control_path = control_path
         self._control_token = control_token or ''
+        self._control_allowed_hosts = list(control_allowed_hosts or ())
         # Set by the app via register_capture_command_handler(). Until then the
         # control routes 503 — the server never starts capture on its own.
         self._capture_command_handler = None
@@ -466,6 +483,7 @@ class WebOutputServer:
             self.server.control_path = self.control_path
             self.server.control_host = self.host
             self.server.control_token = self._control_token
+            self.server.control_allowed_hosts = self._control_allowed_hosts
             self.server.capture_command_handler = self._capture_command_handler
             
             # Set class variables

@@ -29,9 +29,14 @@ AUTH_MISSING = "missing"                # no Authorization header at all
 AUTH_MALFORMED = "malformed"            # header present but not `Bearer <token>`
 AUTH_INVALID = "invalid"                # well-formed but wrong token
 
-# HTTP status + client-facing message per verdict. Deliberately uniform between
-# the "wrong token" and "no token configured" cases so a caller cannot probe
-# whether the server has a token set.
+# HTTP status + client-facing message per verdict.
+#
+# The three genuine auth failures share one 401 message, so a caller cannot tell
+# a wrong token from a malformed header. AUTH_NOT_CONFIGURED is deliberately
+# distinct (503): a client that cannot authenticate because the feature is
+# switched off needs to know that, and the NINA helper maps it to its own
+# "enable the control API" exit code. That reveals only a setting the operator
+# already controls — never anything about the token.
 _VERDICT_RESPONSE = {
     AUTH_NOT_CONFIGURED: (503, "Control API is not configured on this server."),
     AUTH_MISSING: (401, "Authorization required."),
@@ -44,21 +49,26 @@ _VERDICT_RESPONSE = {
 CONFIG_SECTION = "output"
 TOKEN_KEY = "api_token"
 ENABLED_KEY = "webserver_control_enabled"
+ALLOWED_HOSTS_KEY = "webserver_control_allowed_hosts"
 
 # Hosts always accepted on control routes. The server binds loopback by
 # default; the configured host is added at request time by callers.
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
 
-_BEARER_RE = re.compile(r"^Bearer[ \t]+(\S+)$")
+# RFC 7235 makes the auth scheme case-insensitive.
+_BEARER_RE = re.compile(r"^Bearer[ \t]+(\S+)$", re.IGNORECASE)
+
+_REDACTED = "<redacted-token>"
 
 # Anything that looks like a token in free text. Applied to log lines and error
 # payloads so a token can never reach the log file (mirrors
 # services/youtube_upload.py::sanitize_exception).
 _TOKEN_PATTERNS = (
-    re.compile(r"(?i)\bBearer[ \t]+\S+"),
-    re.compile(r'(?i)("?api_token"?\s*[:=]\s*)"?[^"\s,}]+"?'),
+    # Whole match goes — the scheme word carries no information.
+    (re.compile(r"(?i)\bBearer[ \t]+\S+"), _REDACTED),
+    # Keep the key name so a redacted log line still reads sensibly.
+    (re.compile(r'(?i)("?api_token"?\s*[:=]\s*)"?[^"\s,}]+"?'), r"\1" + _REDACTED),
 )
-_REDACTED = "<redacted-token>"
 
 
 def generate_token() -> str:
@@ -76,8 +86,8 @@ def redact(text) -> str:
     Never log or return a control-API error without passing it through here.
     """
     out = str(text)
-    for pattern in _TOKEN_PATTERNS:
-        out = pattern.sub(_REDACTED, out)
+    for pattern, replacement in _TOKEN_PATTERNS:
+        out = pattern.sub(replacement, out)
     return out
 
 
@@ -122,7 +132,12 @@ def check_bearer(header_value, expected_token) -> str:
     if presented is None:
         return AUTH_MALFORMED
 
-    if hmac.compare_digest(presented, str(expected_token)):
+    # Compare bytes, not str. compare_digest raises TypeError on a non-ASCII
+    # str, and headers arrive latin-1-decoded, so an unauthenticated client
+    # could put one non-ASCII byte in the header and crash the request thread
+    # before ever being rejected.
+    if hmac.compare_digest(presented.encode("utf-8", "surrogateescape"),
+                           str(expected_token).encode("utf-8", "surrogateescape")):
         return AUTH_OK
     return AUTH_INVALID
 
@@ -153,7 +168,12 @@ def normalize_host(host_header) -> str:
     return host.rsplit(":", 1)[0] if ":" in host else host
 
 
-def host_allowed(host_header, configured_host=None) -> bool:
+# Bind addresses that name no reachable host, so they can never be a valid
+# Host header — a request to a 0.0.0.0 bind arrives as the LAN IP or a name.
+_WILDCARD_BINDS = ("0.0.0.0", "::", "[::]", "")
+
+
+def host_allowed(host_header, configured_host=None, allowed_hosts=None) -> bool:
     """Whether a request's ``Host`` header may reach a control route.
 
     This is the direct defence against DNS rebinding: a rebound page resolves
@@ -162,14 +182,34 @@ def host_allowed(host_header, configured_host=None) -> bool:
     relying on CORS side effects.
 
     An absent ``Host`` header is rejected — HTTP/1.1 requires one.
+
+    ``allowed_hosts`` is the operator's escape hatch. A wildcard bind
+    (``0.0.0.0``) names no host, so every real Host header — the LAN IP, a
+    Tailscale MagicDNS name — would otherwise be rejected with no way to permit
+    it. Adding a name here is an explicit decision to widen the control surface
+    beyond loopback.
     """
     host = normalize_host(host_header)
     if not host:
         return False
     if host in LOOPBACK_HOSTS:
         return True
+
     configured = normalize_host(configured_host)
-    return bool(configured) and host == configured
+    if configured and configured not in _WILDCARD_BINDS and host == configured:
+        return True
+
+    for allowed in allowed_hosts or ():
+        if host == normalize_host(allowed):
+            return True
+    return False
+
+
+def allowed_control_hosts(config):
+    """Extra Host values accepted on control routes (empty by default)."""
+    section = config.get(CONFIG_SECTION, {}) or {}
+    hosts = section.get(ALLOWED_HOSTS_KEY) or []
+    return [str(h) for h in hosts if str(h).strip()]
 
 
 def get_token(config) -> str:
