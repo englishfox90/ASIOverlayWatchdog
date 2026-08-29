@@ -24,6 +24,10 @@ class _FakeServer:
     def __init__(self, bind_ok, *args, **kwargs):
         self._bind_ok = bind_ok
         self.running = False
+        self.command_handler = None
+
+    def register_capture_command_handler(self, handler):
+        self.command_handler = handler
 
     def start(self):
         self.running = bool(self._bind_ok["value"])

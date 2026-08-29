@@ -13,6 +13,7 @@ import threading
 import time
 from datetime import datetime
 
+from . import api_auth
 from .logger import app_logger
 from .config import Config
 from .camera import ZWOCamera
@@ -46,6 +47,10 @@ class HeadlessRunner:
         self._last_error = None          # Most recent capture error (for /status health)
         self._last_webserver_retry = 0.0  # Throttles web-server bind re-attempts
         self._shutdown_event = threading.Event()
+        # Set = capture paused by the control API. Distinct from _shutdown_event:
+        # pausing must not tear down the process, or a sequencer's "Stop at dawn"
+        # would leave nothing running to receive "Start at dusk".
+        self._paused = threading.Event()
         self._auto_stop_timer = None
         
         # Register signal handlers for graceful shutdown
@@ -195,10 +200,17 @@ class HeadlessRunner:
 
         self._log(f"Starting web server on {host}:{port}...")
 
+        control_path = output_config.get('webserver_control_path', '/capture')
+
         self.web_server = WebOutputServer(
             host, port, image_path, status_path, docs_path,
             library_path=library_path, image_library=self.image_library,
+            control_path=control_path,
+            control_token=api_auth.resolve_control_token(self.config),
         )
+        # No Qt loop here, so the handler runs directly on the HTTP thread —
+        # it only sets/clears an Event, which the capture loop observes.
+        self.web_server.register_capture_command_handler(self._handle_capture_command)
         if self.web_server.start():
             self._log(f"✓ Web server running: {self.web_server.get_url()}")
             self._log(f"  Status endpoint: {self.web_server.get_status_url()}")
@@ -293,6 +305,11 @@ class HeadlessRunner:
                 # Tailscale/LAN IP wasn't up yet at logon autostart).
                 self._ensure_webserver()
 
+                if self._paused.is_set():
+                    self._push_capture_status(running=False, state="stopped", enabled=False)
+                    self._shutdown_event.wait(1)
+                    continue
+
                 # Check scheduled capture window
                 if not self.zwo_camera.is_within_scheduled_window():
                     self._log("Outside scheduled capture window, waiting...")
@@ -334,7 +351,28 @@ class HeadlessRunner:
                 # Wait before retrying
                 self._shutdown_event.wait(5)
 
-    def _push_capture_status(self, *, running: bool, state: str):
+    def _handle_capture_command(self, command: str):
+        """Execute a control-API capture command (headless host).
+
+        Invoked on an HTTP request thread. Only touches a threading.Event, so
+        there is nothing to marshal — the capture loop picks the change up on
+        its next iteration and pushes the resulting snapshot, which is what the
+        waiting HTTP client polls.
+
+        'stop' pauses rather than shutting the runner down; process lifetime is
+        owned by the signal handler and --auto-stop, not by the API.
+        """
+        if command == "start":
+            self._paused.clear()
+            self._log("Capture resumed via control API")
+        elif command == "stop":
+            self._paused.set()
+            self._log("Capture paused via control API")
+            self._push_capture_status(running=False, state="stopped", enabled=False)
+        else:
+            raise ValueError(f"Unknown capture command: {command!r}")
+
+    def _push_capture_status(self, *, running: bool, state: str, enabled: bool = True):
         """Push the current capture snapshot to the web server (headless)."""
         if not self.web_server or not self.web_server.running:
             return
@@ -365,7 +403,7 @@ class HeadlessRunner:
                 effective_interval = interval
 
             snapshot = api_status.build_capture_snapshot(
-                mode="camera", enabled=True, running=running, state=state,
+                mode="camera", enabled=enabled, running=running, state=state,
                 interval_seconds=interval, effective_interval_seconds=effective_interval,
                 schedule=schedule,
                 last_capture_epoch=getattr(self, '_last_capture_epoch', None),

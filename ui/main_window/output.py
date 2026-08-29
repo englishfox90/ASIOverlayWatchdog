@@ -8,9 +8,11 @@ from datetime import datetime, timezone
 
 from PySide6.QtCore import QTimer
 
+from services import api_auth
 from services.logger import app_logger
 from services.notifications import ERROR, LIFECYCLE, PERIODIC_IMAGE, NotificationEvent
 from services.web_output import WebOutputServer
+from ui.controllers.capture_command_bridge import CaptureCommandBridge
 
 
 class _MainWindowOutputMixin:
@@ -298,10 +300,17 @@ class _MainWindowOutputMixin:
         docs_path = output_config.get('webserver_docs_path', '/docs')
         library_path = output_config.get('webserver_library_path', '/library')
 
+        control_path = output_config.get('webserver_control_path', '/capture')
+
         self.web_server = WebOutputServer(
             host, port, image_path, status_path, docs_path,
             library_path=library_path, image_library=self.image_library,
+            control_path=control_path,
+            control_token=api_auth.resolve_control_token(self.config),
         )
+        # Capture control must never run on the HTTP thread — the bridge queues
+        # it onto the GUI thread. See ui/controllers/capture_command_bridge.py.
+        self.web_server.register_capture_command_handler(self._capture_command_bridge())
         if self.web_server.start():
             url = self.web_server.get_url()
             status_url = self.web_server.get_status_url()
@@ -375,6 +384,16 @@ class _MainWindowOutputMixin:
     def _stop_capture_status_timer(self):
         if self._capture_status_timer is not None and self._capture_status_timer.isActive():
             self._capture_status_timer.stop()
+
+    def _capture_command_bridge(self):
+        """The GUI-thread marshaller the HTTP control routes hand commands to.
+
+        Built once and kept, so repeated web-server restarts reuse the same
+        QObject rather than accumulating children on the window.
+        """
+        if getattr(self, '_command_bridge', None) is None:
+            self._command_bridge = CaptureCommandBridge(self)
+        return self._command_bridge
 
     def push_capture_status(self):
         """Build and push the current capture snapshot to the web server.
