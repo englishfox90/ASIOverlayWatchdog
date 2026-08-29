@@ -7,8 +7,8 @@ using System.Runtime.InteropServices;
 [assembly: Guid("e2e840b9-b5e2-4f67-8699-0173b5f9dc0a")]
 
 // [MANDATORY] Assembly versioning - increment for each release build.
-[assembly: AssemblyVersion("1.0.0.1")]
-[assembly: AssemblyFileVersion("1.0.0.1")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 // [MANDATORY] AssemblyTitle is the name NINA shows in the plugin list, and is also the
 // prefix of the options DataTemplate key ("PFR Sentinel_Options" in Options.xaml).
