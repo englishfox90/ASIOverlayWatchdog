@@ -36,9 +36,9 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 try:
-    from ml.image_preprocess import resize_for_model
+    from ml.image_preprocess import resize_for_model, as_gray_float32
 except ImportError:  # run as a script: ml/ is on path, not the project root
-    from image_preprocess import resize_for_model
+    from image_preprocess import resize_for_model, as_gray_float32
 
 
 @dataclass
@@ -217,22 +217,16 @@ class RoofClassifier:
         Preprocess image for model input.
         
         Args:
-            image: Raw image array (any size, grayscale or RGB)
-            
+            image: Raw image array (any size, grayscale or RGB), or a
+                precomputed 2D float32 luminance plane shared across the
+                per-frame classifiers — that one is used as-is and never
+                written to.
+
         Returns:
             Preprocessed image array (1, 1, H, W)
         """
-        # Handle RGB by converting to grayscale
-        if len(image.shape) == 3:
-            if image.shape[2] == 3:
-                # RGB to grayscale
-                image = 0.299 * image[:,:,0] + 0.587 * image[:,:,1] + 0.114 * image[:,:,2]
-            else:
-                image = image[:,:,0]
-        
-        # Convert to float
-        image = image.astype(np.float32)
-        
+        image = as_gray_float32(image)
+
         # Resize
         image = resize_for_model(image, self.image_size)
 
@@ -254,24 +248,16 @@ class RoofClassifier:
         Extract metadata features from image.
         
         Args:
-            image: Raw image array
+            image: Raw image array, or a precomputed 2D float32 luminance plane
+                (used as-is, read-only)
             is_astronomical_night: Override for astronomical night flag
             hour: Override for hour (0-23)
-            
+
         Returns:
             Metadata feature array (1, 4)
         """
-        # Handle RGB
-        if len(image.shape) == 3:
-            if image.shape[2] == 3:
-                gray = 0.299 * image[:,:,0] + 0.587 * image[:,:,1] + 0.114 * image[:,:,2]
-            else:
-                gray = image[:,:,0]
-        else:
-            gray = image
-        
-        gray = gray.astype(np.float32)
-        
+        gray = as_gray_float32(image)
+
         # Calculate corner to center ratio
         h, w = gray.shape
         corner_size = min(h, w) // 8
@@ -322,7 +308,8 @@ class RoofClassifier:
         Predict roof state from image.
         
         Args:
-            image: Raw image array (grayscale or RGB, any size)
+            image: Raw image array (grayscale or RGB, any size), or a
+                precomputed 2D float32 luminance plane. The array is only read.
             metadata: Optional dict with 'corner_to_center_ratio', 'median_lum', etc.
             is_astronomical_night: Override flag (computed from time if None)
             hour: Override hour (current time if None)

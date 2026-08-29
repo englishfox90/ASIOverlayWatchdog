@@ -152,3 +152,84 @@ class TestProductionPredictionAPI:
         }
         assert set(result.keys()) == expected_keys
         assert result["model_version"] == "sky_classifier_v1"
+
+
+class TestSharedGrayPlane:
+    """Both classifiers take the one float32 luminance plane MLService builds
+    per frame, instead of each converting the RGB frame themselves."""
+
+    @staticmethod
+    def _rgb_frame(size: int = 512) -> np.ndarray:
+        rng = np.random.default_rng(seed=99)
+        frame = rng.integers(300, 9000, size=(size, size, 3), dtype=np.uint16)
+        frame[100:110, 200:210, :] = 60000  # a few saturated stars
+        return frame
+
+    @staticmethod
+    def _roof_meta():
+        return {"corner_to_center_ratio": 0.9, "median_lum": 0.05,
+                "is_astronomical_night": True, "hour": 2}
+
+    @classmethod
+    def _sky_meta(cls):
+        return {**cls._roof_meta(), "moon_illumination": 40.0, "moon_is_up": True}
+
+    def test_roof_prediction_is_identical_for_rgb_and_precomputed_gray(self):
+        _require(ROOF_ONNX)
+        from ml.image_preprocess import to_gray_float32
+        from ml.roof_classifier import RoofClassifier
+
+        clf = RoofClassifier.load(str(ROOF_ONNX))
+        frame = self._rgb_frame()
+        from_rgb = clf.predict(frame, self._roof_meta())
+        from_gray = clf.predict(to_gray_float32(frame), self._roof_meta())
+
+        assert from_rgb.roof_open == from_gray.roof_open
+        assert from_rgb.raw_logit == from_gray.raw_logit
+
+    def test_sky_prediction_is_identical_for_rgb_and_precomputed_gray(self):
+        _require(SKY_ONNX)
+        from ml.image_preprocess import to_gray_float32
+        from ml.sky_classifier import SkyClassifier
+
+        clf = SkyClassifier.load(str(SKY_ONNX))
+        frame = self._rgb_frame()
+        from_rgb = clf.predict(frame, self._sky_meta())
+        from_gray = clf.predict(to_gray_float32(frame), self._sky_meta())
+
+        assert from_rgb.sky_condition == from_gray.sky_condition
+        assert from_rgb.stars_visible == from_gray.stars_visible
+        assert from_rgb.moon_visible == from_gray.moon_visible
+        assert from_rgb.sky_probabilities == from_gray.sky_probabilities
+        assert from_rgb.star_density == from_gray.star_density
+
+    def test_neither_classifier_writes_into_the_shared_plane(self):
+        # The sky stretch runs in place on its own copy. If it ever reached the
+        # shared plane, the roof classifier and the corner-analysis features
+        # would silently read stretched data.
+        _require(ROOF_ONNX)
+        _require(SKY_ONNX)
+        from ml.image_preprocess import to_gray_float32
+        from ml.roof_classifier import RoofClassifier
+        from ml.sky_classifier import SkyClassifier
+
+        gray = to_gray_float32(self._rgb_frame())
+        untouched = gray.copy()
+
+        RoofClassifier.load(str(ROOF_ONNX)).predict(gray, self._roof_meta())
+        np.testing.assert_array_equal(gray, untouched)
+
+        SkyClassifier.load(str(SKY_ONNX)).predict(gray, self._sky_meta())
+        np.testing.assert_array_equal(gray, untouched)
+
+    def test_roof_metadata_extraction_accepts_a_precomputed_gray(self):
+        _require(ROOF_ONNX)
+        from ml.image_preprocess import to_gray_float32
+        from ml.roof_classifier import RoofClassifier
+
+        clf = RoofClassifier.load(str(ROOF_ONNX))
+        frame = self._rgb_frame()
+        np.testing.assert_array_equal(
+            clf.extract_metadata(frame, True, 3),
+            clf.extract_metadata(to_gray_float32(frame), True, 3),
+        )

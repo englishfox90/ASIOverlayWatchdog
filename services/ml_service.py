@@ -224,9 +224,26 @@ class MLService:
             'moon_visible': None,
         }
         
-        # Build analysis context from image
+        # Build analysis context from image. This runs first and releases its
+        # own plane before the shared luminance plane below is allocated, so the
+        # two full-frame float32 planes are never resident together.
         corner_analysis = self._compute_corner_analysis(image_array)
         time_context = self._compute_time_context()
+
+        # One luminance plane per frame, shared by both classifiers. They used
+        # to build one each, in float64 — three 101 MB temporaries per
+        # conversion, which is where the bulk of the per-frame peak came from.
+        # Neither writes into it.
+        gray = image_array
+        if self.is_available():
+            try:
+                # Deferred like every other ml.* import here: `ml` is a namespace
+                # package that the frozen build may not carry, and this service
+                # has to stay importable without it.
+                from ml.image_preprocess import to_gray_float32
+                gray = to_gray_float32(image_array)
+            except Exception as e:
+                app_logger.debug(f"ML Service: grayscale conversion failed: {e}")
         
         # Roof prediction
         roof_enabled = config.get('roof_classifier', True)
@@ -239,7 +256,7 @@ class MLService:
                     'hour': time_context.get('hour', 12),
                 }
                 
-                roof_result = self._roof_classifier.predict(image_array, roof_meta)
+                roof_result = self._roof_classifier.predict(gray, roof_meta)
                 results['roof_status'] = 'Open' if roof_result.roof_open else 'Closed'
                 results['roof_confidence'] = round(float(roof_result.confidence), 3)
                 
@@ -265,7 +282,7 @@ class MLService:
                     f"ML Service: sky moon_illum={sky_meta['moon_illumination']:.0f}% "
                     f"moon_up={sky_meta['moon_is_up']}")
 
-                sky_result = self._sky_classifier.predict(image_array, sky_meta)
+                sky_result = self._sky_classifier.predict(gray, sky_meta)
                 results['sky_condition'] = sky_result.sky_condition
                 results['sky_confidence'] = round(float(sky_result.sky_confidence), 3)
                 results['stars_visible'] = sky_result.stars_visible
@@ -285,7 +302,15 @@ class MLService:
         return self._last_results.copy()
     
     def _compute_corner_analysis(self, image_array: np.ndarray) -> Dict[str, float]:
-        """Compute corner-to-center analysis for ML features."""
+        """Compute corner-to-center analysis for ML features.
+
+        Deliberately builds its own plane instead of borrowing the shared
+        luminance one: these features are the channel *mean*, not Rec.601 luma,
+        and the trained roof model is sensitive to both of them. Switching to
+        luma moves corner_to_center_ratio by up to ~9% on real frames. The plane
+        is private and dies before the shared one is allocated, so the two are
+        never resident at the same time and this costs no extra peak.
+        """
         try:
             # Convert to grayscale if needed. Accumulate in float32, not numpy's
             # default float64 for integer input: a 3552x3552 frame costs 50 MB
@@ -345,7 +370,7 @@ class MLService:
                 # lets np.median partition *gray* in place instead of copying a
                 # whole frame (48 MB at 3552x3552); safe only because this is
                 # the last read of gray — corner_med and center_med are already
-                # reduced to scalars above, and gray dies with this frame.
+                # reduced to scalars above, and gray is private to this call.
                 'frame_med': float(np.median(gray, overwrite_input=True)),
                 'corner_to_center_ratio': float(ratio),
             }

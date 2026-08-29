@@ -52,9 +52,9 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 try:
-    from ml.image_preprocess import resize_for_model
+    from ml.image_preprocess import resize_for_model, crop_for_model, as_gray_float32
 except ImportError:  # run as a script: ml/ is on path, not the project root
-    from image_preprocess import resize_for_model
+    from image_preprocess import resize_for_model, crop_for_model, as_gray_float32
 
 
 # Sky condition classes (must match training — collapsed to 3, see sky_dataset.py)
@@ -228,40 +228,54 @@ class SkyClassifier:
         return cls(model_path, image_size)
     
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
-        """Preprocess image for model input."""
-        # Handle RGB by converting to grayscale
-        if len(image.shape) == 3:
-            if image.shape[2] == 3:
-                image = 0.299 * image[:,:,0] + 0.587 * image[:,:,1] + 0.114 * image[:,:,2]
-            else:
-                image = image[:,:,0]
-        
-        image = image.astype(np.float32)
-        
+        """Preprocess image for model input.
+
+        Accepts a raw frame (2D or RGB, any integer/float dtype) or a
+        precomputed 2D float32 luminance plane shared with the roof classifier.
+        The input is never written to.
+
+        The percentile/clip/arcsinh chain must run at full resolution before the
+        resize — that order is part of the trained model's contract.
+        """
+        gray = as_gray_float32(image)
+
+        # Percentiles come from the whole frame, so take them before cropping.
+        p1, p99 = np.percentile(gray, [1, 99])
+
+        # One fresh working copy, and only of the region resize_for_model will
+        # actually read. `gray` may be shared with the roof classifier and the
+        # corner-analysis features, so the stretch below must not touch it;
+        # cropping first also makes the copy divide evenly into blocks, which
+        # turns the reshape inside block_average_resize into a view instead of a
+        # second full-size copy.
+        work = np.array(crop_for_model(gray, self.image_size),
+                        dtype=np.float32, order='C', copy=True)
+
         # Normalize
-        p1, p99 = np.percentile(image, [1, 99])
         if p99 > p1:
-            image = (image - p1) / (p99 - p1)
-        image = np.clip(image, 0, 1)
-        
+            np.subtract(work, p1, out=work)
+            np.divide(work, p99 - p1, out=work)
+        np.clip(work, 0, 1, out=work)
+
         # Arcsinh stretch
         stretch = 10.0
-        image = np.arcsinh(image * stretch) / np.arcsinh(stretch)
-        
+        np.multiply(work, stretch, out=work)
+        np.arcsinh(work, out=work)
+        np.divide(work, np.arcsinh(stretch), out=work)
+
         # Resize
-        image = resize_for_model(image, self.image_size)
+        work = resize_for_model(work, self.image_size)
 
         # Add batch and channel dimensions
-        image = image[np.newaxis, np.newaxis, :, :]
-
-        return image
+        return work[np.newaxis, np.newaxis, :, :]
 
     def predict(self, image: np.ndarray, metadata: Optional[dict] = None) -> SkyPrediction:
         """
         Predict sky condition and celestial objects.
         
         Args:
-            image: Raw image array
+            image: Raw image array, or a precomputed 2D float32 luminance plane
+                (read-only — the stretch works on its own copy)
             metadata: Optional metadata dict with:
                 - corner_to_center_ratio
                 - median_lum
