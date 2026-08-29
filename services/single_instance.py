@@ -10,6 +10,8 @@ connects to the running instance to ask it to surface its window, then exits.
 
 Requires a QCoreApplication/QApplication instance to already exist.
 """
+import time
+
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
@@ -18,6 +20,10 @@ from services.logger import app_logger
 # Stable, app-specific name. Scoped per user by the OS, which is what we want —
 # two different Windows users may each run their own instance.
 _SERVER_NAME = "PFRSentinel-single-instance-v1"
+
+# How long the receiver waits for a command payload. Matches request_shutdown's
+# own timeout: the sender is patient, so the receiver must be too.
+_READ_TIMEOUT_MS = 1500
 
 
 class SingleInstanceGuard(QObject):
@@ -89,9 +95,27 @@ class SingleInstanceGuard(QObject):
         # Read the small command payload. "quit" asks for a clean shutdown
         # (installer upgrade path); anything else (or nothing) means "surface
         # the window" — the behaviour a second app launch relies on.
+        #
+        # Wait up to _READ_TIMEOUT_MS across repeated slices rather than a single
+        # 200ms one. The sender allows 1500ms, and a GUI thread busy with a frame
+        # or ML inference can easily take longer than 200ms to reach this handler.
+        # Losing that race silently downgraded a "quit" into an "activate", so an
+        # installer upgrade would proceed while the app still held its files and
+        # the camera — and it surfaced as an intermittent test failure.
         command = b""
-        if conn.waitForReadyRead(200):
-            command = bytes(conn.readAll())
+        deadline = time.monotonic() + _READ_TIMEOUT_MS / 1000.0
+        while True:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                break
+            if conn.waitForReadyRead(remaining_ms):
+                command = bytes(conn.readAll())
+                break
+            # waitForReadyRead normally blocks the whole budget, but it can
+            # return early. Keep waiting unless the peer has actually gone,
+            # which also stops this spinning on a dead socket.
+            if conn.state() != QLocalSocket.LocalSocketState.ConnectedState:
+                break
         conn.disconnectFromServer()
         if command.strip().lower().startswith(b"quit"):
             app_logger.info("Single-instance: received quit command — shutting down")
