@@ -106,10 +106,16 @@ class MeteorController(QObject):
             return
         self._diag.frame_received()
 
-        # Roof gate — invalidate the whole pipeline when confirmed closed, so a
-        # stale pre-closure candidate can't be released after reopening.
+        # Roof gate — detection is only meaningful when the roof is *confidently*
+        # open (matching the ASCOM-safety "SAFE only for a confident Open"
+        # policy). Suspend when the roof is known and not open — 'Closed' OR an
+        # uncertain 'N/A' — and invalidate the whole pipeline so a stale
+        # pre-closure candidate can't be released after reopening. When no roof
+        # classifier is running at all (roof_status absent) detection is allowed,
+        # so this never silently disables setups without roof detection.
         ml_results = getattr(self._main_window, 'last_ml_results', None) or {}
-        roof_closed = ml_results.get('roof_status') == 'Closed'
+        roof_status = ml_results.get('roof_status')
+        roof_closed = roof_status is not None and roof_status != 'Open'
         self._diag.roof_gate(roof_closed)
         if roof_closed:
             if self._stack and self._detection_semaphore.acquire(blocking=False):
@@ -184,7 +190,18 @@ class MeteorController(QObject):
             return
 
         transient = self._stack.transient_map()
-        hot = self._stack.hot_mask()
+        # Suppress bright scene structure before Hough. structure_mask is a
+        # superset of hot_mask that also covers the Moon-drift crescent and the
+        # mount's slew envelope — the dominant pier-camera false-positive class
+        # (see services/meteor/frame_stack.py). Falls back to hot_mask when the
+        # user disables it.
+        if cfg.get("structure_mask", True):
+            hot = self._stack.structure_mask(
+                min_fraction=float(cfg.get("structure_mask_fraction", 0.5)),
+                dilate_px=int(cfg.get("structure_mask_dilate_px", 3)),
+            )
+        else:
+            hot = self._stack.hot_mask()
         frame_idx_snap = self._frame_idx
 
         threading.Thread(
@@ -343,12 +360,12 @@ class MeteorController(QObject):
         with self._lock:
             self._session_detections += len(detections)
             self._last_detection_time = timestamp
-            new_list = ([event] + self._recent_events)[:_MAX_RECENT_EVENTS]
-            evicted = self._recent_events[_MAX_RECENT_EVENTS - 1:]
-            self._recent_events = new_list
-
-        for old in evicted:
-            self._evict_event_files(old)
+            # Trim the in-memory UI list to the most recent N, but DO NOT delete
+            # the thumbnail/annotated files for those that scroll off it. The
+            # JSONL log stores no image, so the crop is the only on-disk record
+            # of a detection — files are removed only on explicit user
+            # rejection (on_detection_rejected). See _evict_event_files.
+            self._recent_events = ([event] + self._recent_events)[:_MAX_RECENT_EVENTS]
 
         app_logger.info(
             f"Meteor: {len(detections)} detection(s), "
@@ -484,14 +501,13 @@ class MeteorController(QObject):
                 self._detection_semaphore.release()
 
         with self._lock:
-            old_events = list(self._recent_events)
             self._session_frames = 0
             self._session_detections = 0
             self._last_detection_time = None
+            # Clear the in-memory list only — 24/7 use stops capture every dawn /
+            # roof-close, and deleting the session's thumbnails here wiped every
+            # unconfirmed detection daily. Files persist until explicit rejection.
             self._recent_events = []
-
-        for ev in old_events:
-            self._evict_event_files(ev)
 
         self._emit_status()
 

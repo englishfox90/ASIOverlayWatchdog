@@ -69,6 +69,27 @@
 >   detector and streak-profile scoring are **historical** — kept for design
 >   context but no longer implemented.
 
+> **Update (2026-08-29): structure mask + roof/thumbnail hardening.** Three
+> pier-camera fixes, no re-introduction of the removed streak library:
+> - **`FrameStack.structure_mask()`** — a superset of `hot_mask` that also
+>   suppresses *moving* bright structure: the Moon-drift crescent (bright in
+>   only the newer or older stack frames) and the mount-slew envelope (a bright
+>   edge at position A early, B late). It marks any pixel bright above
+>   background in ≥ `structure_mask_fraction` of the stacked frames and dilates
+>   by `structure_mask_dilate_px` to bridge the A→B gap. A one-frame meteor
+>   lights ≤ `1/maxlen` of the stack, well under the fraction, so it is never
+>   masked. The controller uses it before Hough in place of `hot_mask` unless
+>   `meteor.structure_mask` is false. New config keys: `structure_mask`,
+>   `structure_mask_fraction` (0.5), `structure_mask_dilate_px` (3).
+> - **Roof gate tightened** to "confidently open": detection is suspended on a
+>   `Closed` *or* an uncertain `N/A` roof reading, but still runs when no roof
+>   classifier is reporting at all.
+> - **Thumbnails persist.** `_report_detections` and `on_capture_stopped` no
+>   longer delete detection crops when they scroll off the 20-item UI list or
+>   when capture stops (which happens every dawn / roof-close in 24/7 use). The
+>   JSONL log stores no image, so the crop is the only on-disk record; files are
+>   removed only on explicit user rejection.
+
 ---
 
 ## The Problem

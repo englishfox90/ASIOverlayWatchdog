@@ -118,6 +118,68 @@ class TestFrameStack:
         assert masked[32, 30] > 50, (
             f"Streak must survive hot-mask suppression: value={masked[32, 30]}")
 
+    # -- structure_mask: slew / Moon-drift envelope ---------------------------
+
+    def test_structure_mask_defaults_recover_hot_mask_superset(self):
+        """A perfectly static edge is masked by structure_mask just as by
+        hot_mask (structure_mask is a superset)."""
+        fs = FrameStack(maxlen=6)
+        for _ in range(6):
+            frame = _gray(fill=25)
+            frame[40, :] = 120
+            fs.push(frame)
+        mask = fs.structure_mask(threshold=5, min_fraction=0.5, dilate_px=0)
+        assert mask[40, 32] == 255
+        assert mask[10, 32] == 0
+
+    def test_structure_mask_catches_partial_slew_edge(self):
+        """A bright edge present in only half the frames (a mid-stack slew)
+        survives hot_mask but must be caught by structure_mask."""
+        fs = FrameStack(maxlen=6)
+        for i in range(6):
+            frame = _gray(fill=25)
+            frame[40, :] = 120 if i < 3 else 25   # bright in only 3/6 frames
+            fs.push(frame)
+        assert fs.hot_mask(threshold=5)[40, 32] == 0, "hot_mask misses partial edge"
+        mask = fs.structure_mask(threshold=5, min_fraction=0.5, dilate_px=0)
+        assert mask[40, 32] == 255, "structure_mask must catch a 3/6-frame edge"
+
+    def test_structure_mask_dilation_bridges_slew_gap(self):
+        """Edge at row 40 early, row 44 late (a slew): dilation must bridge the
+        gap so the whole swept band — including the transient residue between
+        the two positions — is suppressed."""
+        fs = FrameStack(maxlen=6)
+        for i in range(6):
+            frame = _gray(fill=25)
+            frame[40 if i < 3 else 44, :] = 120
+            fs.push(frame)
+        mask = fs.structure_mask(threshold=5, min_fraction=0.4, dilate_px=3)
+        assert mask[42, 32] == 255, "Gap between the two slew positions must be masked"
+
+    def test_structure_mask_spares_single_frame_meteor(self):
+        """A one-frame streak (1/6 frames) is below any sane min_fraction and
+        must NOT be masked — otherwise every real meteor is erased."""
+        fs = FrameStack(maxlen=6)
+        for _ in range(5):
+            fs.push(_gray(fill=25))
+        streak = _gray(fill=25)
+        streak[32, 10:54] = 200
+        fs.push(streak)
+        mask = fs.structure_mask(threshold=5, min_fraction=0.5, dilate_px=3)
+        assert mask[32, 30] == 0, "Single-frame meteor must survive structure_mask"
+
+    def test_structure_mask_ignores_uniform_background(self):
+        fs = FrameStack(maxlen=6)
+        for _ in range(6):
+            fs.push(_gray(fill=25))
+        mask = fs.structure_mask(threshold=5, min_fraction=0.5, dilate_px=3)
+        assert mask.max() == 0
+
+    def test_structure_mask_too_few_frames_is_zero(self):
+        fs = FrameStack(maxlen=6)
+        fs.push(_gray(fill=25))
+        assert fs.structure_mask().max() == 0
+
     def test_push_evicts_oldest_frame(self):
         fs = FrameStack(maxlen=3)
         for i in range(4):

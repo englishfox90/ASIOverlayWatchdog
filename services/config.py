@@ -325,6 +325,12 @@ DEFAULT_CONFIG = {
         "exclusion_zones": [],          # [{x,y,w,h,note}] — user-rejected regions
         # --- Temporal stack detector (Phase 2+) ---
         "stack_frames": 6,              # FrameStack ring-buffer depth
+        # Structure mask — suppress the Moon-drift crescent and mount slew
+        # envelope (a superset of the static hot-pixel mask). The dominant
+        # false-positive class on obstructed pier cameras. See frame_stack.py.
+        "structure_mask": True,         # False → fall back to static hot_mask only
+        "structure_mask_fraction": 0.5, # Bright in ≥ this fraction of stack frames → suppress
+        "structure_mask_dilate_px": 3,  # Dilate the mask to bridge slew gaps / crescent lips
         "detection_long_side": 1280,    # Detection working resolution (long side, px)
         "noise_sensitivity": "normal",  # low | normal | high → diff-noise threshold mapping
         "min_brightness": 10,           # Min mean transient value along trail (0 = off)

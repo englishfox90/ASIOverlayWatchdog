@@ -14,6 +14,7 @@ For N=6, 1280×960 frames: ≈ 7 MB frames + 9 MB sum ≈ 16 MB. Fine.
 """
 from typing import Optional
 
+import cv2
 import numpy as np
 
 
@@ -132,3 +133,44 @@ class FrameStack:
         limits = backgrounds[:, None, None] + float(threshold)
         hot = np.all(stacked.astype(np.float32) > limits, axis=0)
         return hot.astype(np.uint8) * 255
+
+    def structure_mask(self, threshold: int = 5, min_fraction: float = 0.5,
+                       dilate_px: int = 3) -> np.ndarray:
+        """
+        Binary mask (255 = suppress) for the *slew/drift envelope* of bright
+        scene structure — a superset of :meth:`hot_mask`.
+
+        ``hot_mask`` demands a pixel exceed its frame background in EVERY frame,
+        so it only catches perfectly-static equipment edges. The dominant
+        false-positive class on the pier camera is *moving* bright structure:
+
+          * the Moon drifts ~0.25°/min, so its leading/trailing edge sweeps a
+            crescent that is bright in only the newer or older frames;
+          * the mount slews between exposures, so a tube/cable edge sits at
+            position A early in the stack and position B later.
+
+        In the ``max−mean`` transient map these motion residuals survive and
+        HoughLinesP fits them as ~50 px "streaks". This mask marks any pixel
+        bright above background in at least *min_fraction* of the stacked
+        frames (so a half-stack crescent or either slew position qualifies),
+        then dilates by *dilate_px* to bridge the A→B gap and swallow the
+        crescent lip. A genuine one-frame meteor lights ≤ ``1/maxlen`` of the
+        stack, well under any sane *min_fraction*, so it is never masked.
+
+        Set *dilate_px*=0 and *min_fraction*=1.0 to recover ``hot_mask``.
+        Returns a zero mask if the stack has fewer than 2 frames.
+        """
+        if len(self._frames) < 2:
+            shape = self._frames[0].shape if self._frames else (1, 1)
+            return np.zeros(shape, np.uint8)
+        stacked = np.array(self._frames, dtype=np.uint8)
+        backgrounds = np.median(
+            stacked.reshape(stacked.shape[0], -1), axis=1).astype(np.float32)
+        limits = backgrounds[:, None, None] + float(threshold)
+        over = stacked.astype(np.float32) > limits           # (N, H, W) bool
+        fraction = over.mean(axis=0)                          # (H, W) in [0, 1]
+        mask = (fraction >= float(min_fraction)).astype(np.uint8) * 255
+        if dilate_px > 0 and mask.any():
+            k = 2 * int(dilate_px) + 1
+            mask = cv2.dilate(mask, np.ones((k, k), np.uint8), iterations=1)
+        return mask
