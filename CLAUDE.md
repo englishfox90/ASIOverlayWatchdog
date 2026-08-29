@@ -148,6 +148,10 @@ pytest
 | `test_settings.py` | 11 | `config` — JSON save/load, merge, defaults |
 | `test_webserver.py` | 13 | `web_output` — HTTP server, ETag, status JSON (`requires_network`) |
 | `test_ml_classifiers.py` | 6 | `ml.roof_classifier` / `ml.sky_classifier` + production `ui/controllers/ml_prediction.py` — ONNX load + inference smoke tests (`requires_ml_models`) |
+| `test_api_auth.py` | 43 | `api_auth` — bearer compare, Host allow-list, token minting, redaction |
+| `test_api_control.py` | 51 | `api_control` — command validation, idempotency, `wait` semantics, OpenAPI catalog |
+| `test_web_control.py` | 33 | `web_control` — control routes, auth matrix, no-CORS regression guard |
+| `test_capture_command_bridge.py` | 11 | `CaptureCommandBridge` + headless handler — GUI-thread marshalling |
 
 Standalone (not in pytest suite):
 - `ml/test_classifier.py` — interactive accuracy eval against a user-specific labelled dataset (walks `D:/Pier Camera ML Data`). Use this to validate a new model checkpoint, not for CI.
@@ -176,6 +180,7 @@ Standalone (not in pytest suite):
 - [`docs/METEOR_DETECTION_PLAN.md`](docs/METEOR_DETECTION_PLAN.md) — meteor detection rework for the long-exposure regime; read before touching `services/meteor/`
 - [`docs/FEATURE_HARDENING_PLAN.md`](docs/FEATURE_HARDENING_PLAN.md) — prioritized hardening backlog (web server, ASCOM roof safety file, timelapse) from the 2026-06-28 deep review; P0/P1/P2 + sizing + file:line pointers
 - [`docs/ALLSKY_POLE_ANCHOR_PLAN.md`](docs/ALLSKY_POLE_ANCHOR_PLAN.md) — pole-anchor (Polaris) ground truth + model admission gates; fixes the wrong-basin model that poisons refinement
+- [`docs/NINA_INTEGRATION_PLAN.md`](docs/NINA_INTEGRATION_PLAN.md) — NINA dockable widget + capture control API + sequencer instructions; read before touching the web control/API surface
 
 Developer-facing technical reference (feature design, build/release tooling, vendor SDK) lives in [`docs/dev/`](docs/dev/README.md). End-user content is on the project wiki.
 
