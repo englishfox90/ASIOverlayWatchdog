@@ -21,18 +21,16 @@ class TestTrimWorkingSetNonWindows:
         monkeypatch.setattr(sys, "platform", "linux")
         assert trim_working_set() is False
 
-    def test_never_raises_when_ctypes_windll_missing(self, monkeypatch):
-        # sys.platform stays 'win32' here (as it is on this dev box) but
-        # ctypes.windll is unavailable on non-Windows Pythons — simulate that
-        # by making the attribute access raise, and confirm we swallow it.
+    def test_never_raises_when_kernel32_cannot_load(self, monkeypatch):
+        # sys.platform says win32 but the DLL can't be loaded (e.g. a
+        # sandboxed or non-Windows ctypes) — confirm the failure is swallowed.
         monkeypatch.setattr(sys, "platform", "win32")
         import ctypes
 
-        class _NoWindll:
-            def __getattr__(self, name):
-                raise AttributeError(name)
+        def _no_dll(*a, **k):
+            raise OSError("kernel32 unavailable")
 
-        monkeypatch.setattr(ctypes, "windll", _NoWindll(), raising=False)
+        monkeypatch.setattr(ctypes, "WinDLL", _no_dll, raising=False)
         assert trim_working_set() is False
 
 
@@ -62,7 +60,7 @@ class TestTrimWorkingSetWindows:
             ]
 
         psapi = ctypes.WinDLL("psapi.dll")
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.WinDLL("kernel32")  # private: never prototype the global cache
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
         psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
         psapi.GetProcessMemoryInfo.argtypes = [
@@ -185,3 +183,14 @@ class TestHeadlessStopTrimsWorkingSet:
 
         runner._paused.clear.assert_called_once()
         mock_trim.assert_not_called()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only working-set API")
+def test_trim_does_not_poison_the_global_ctypes_kernel32_cache():
+    # Regression: prototyping ctypes.windll.kernel32.GetCurrentProcess leaked a
+    # 64-bit HANDLE restype into the process-wide cache, and the untyped call
+    # in services/performance.py then raised ctypes.ArgumentError.
+    from services.performance import get_memory_usage_mb
+
+    assert trim_working_set() is True
+    assert get_memory_usage_mb() > 0

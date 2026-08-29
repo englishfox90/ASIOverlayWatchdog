@@ -58,11 +58,23 @@ def get_memory_usage_mb():
                 ("PeakPagefileUsage", ctypes.c_size_t),
             ]
 
+        # Private DLL handles with explicit prototypes. Untyped, the 64-bit
+        # pseudo-handle from GetCurrentProcess() is truncated to a C int and
+        # GetProcessMemoryInfo silently fails (this returned -1.0 on every
+        # frozen build); and prototyping ctypes.windll's shared objects would
+        # leak the types into every other caller in the process.
+        kernel32 = ctypes.WinDLL('kernel32')
+        psapi = ctypes.WinDLL('psapi')
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD,
+        ]
+
         counters = PROCESS_MEMORY_COUNTERS()
         counters.cb = ctypes.sizeof(counters)
-        handle = ctypes.windll.kernel32.GetCurrentProcess()
-        if ctypes.windll.psapi.GetProcessMemoryInfo(
-            handle, ctypes.byref(counters), counters.cb
+        if psapi.GetProcessMemoryInfo(
+            kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
         ):
             return counters.WorkingSetSize / (1024 * 1024)
     except (ImportError, AttributeError):

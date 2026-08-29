@@ -33,7 +33,12 @@ def trim_working_set() -> bool:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.windll.kernel32
+        # A PRIVATE kernel32 handle, not ctypes.windll.kernel32: that object is
+        # a process-wide cache, and the prototypes set below would leak onto
+        # it — services/performance.py then calls GetCurrentProcess()
+        # unprototyped and its untyped psapi call rejects the 64-bit HANDLE
+        # with ctypes.ArgumentError after the first trim.
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 
         # Explicit argtypes/restype matter here: without them ctypes marshals
         # the raw literal -1 as a 32-bit int on a 64-bit HANDLE/SIZE_T ABI,
