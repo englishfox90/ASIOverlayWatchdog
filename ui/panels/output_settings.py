@@ -4,7 +4,7 @@ Settings for file output, web server, and Discord
 """
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame,
-    QFileDialog, QSizePolicy
+    QFileDialog, QSizePolicy, QApplication
 )
 from PySide6.QtCore import Qt, Signal
 from qfluentwidgets import (
@@ -139,6 +139,48 @@ class OutputSettingsPanel(IntegrationCardsMixin, QScrollArea):
         web_card.add_row("API Docs", self.api_docs_link,
                          "Interactive reference for /latest, /status, /openapi.json")
         self._update_api_docs_url()
+
+        # --- Capture control API ---
+        # Mutating routes, so opt-in and token-gated. Lets NINA (or curl, or a
+        # phone bookmark) start and stop capture.
+        self.control_enabled_switch = SwitchRow(
+            "Enable Capture Control API",
+            "Let NINA and other local tools start/stop capture"
+        )
+        self.control_enabled_switch.toggled.connect(self._on_control_enabled_changed)
+        web_card.add_widget(self.control_enabled_switch)
+
+        token_row = QHBoxLayout()
+        token_row.setSpacing(Spacing.sm)
+
+        # Read-only: the token is generated, never typed. Masked by default so
+        # it can't be shoulder-surfed off a screenshot of the settings page.
+        self.control_token_input = LineEdit()
+        self.control_token_input.setReadOnly(True)
+        self.control_token_input.setEchoMode(LineEdit.Password)
+        self.control_token_input.setPlaceholderText("Enable the control API to generate a token")
+        token_row.addWidget(self.control_token_input, 1)
+
+        self.show_token_btn = PushButton("Show")
+        self.show_token_btn.setCheckable(True)
+        self.show_token_btn.clicked.connect(self._toggle_token_visibility)
+        token_row.addWidget(self.show_token_btn)
+
+        self.copy_token_btn = PushButton("Copy")
+        self.copy_token_btn.setIcon(mdi('content-copy'))
+        self.copy_token_btn.clicked.connect(self._copy_control_token)
+        token_row.addWidget(self.copy_token_btn)
+
+        self.regen_token_btn = PushButton("Regenerate")
+        self.regen_token_btn.setIcon(mdi('refresh'))
+        self.regen_token_btn.clicked.connect(self._regenerate_control_token)
+        token_row.addWidget(self.regen_token_btn)
+
+        token_widget = QWidget()
+        token_widget.setLayout(token_row)
+        web_card.add_row("API Token", token_widget,
+                         "The bundled NINA scripts read this automatically — "
+                         "you only need to copy it for other tools")
 
         layout.addWidget(web_card)
         
@@ -279,6 +321,73 @@ class OutputSettingsPanel(IntegrationCardsMixin, QScrollArea):
             self.main_window.config.set('output', output)
             self.settings_changed.emit()
 
+    # === CAPTURE CONTROL API ===
+
+    def _on_control_enabled_changed(self, checked):
+        if self._loading_config:
+            return
+        if not (self.main_window and hasattr(self.main_window, 'config')):
+            return
+        output = self.main_window.config.get('output', {})
+        output['webserver_control_enabled'] = checked
+        self.main_window.config.set('output', output)
+        # Persist + reconcile the server first, then mint — minting reads the
+        # flag we just wrote.
+        self.settings_changed.emit()
+        self._sync_control_token(mint=checked)
+
+        if checked and not self.web_enabled_switch.is_checked():
+            # The control routes ride on the web server; enabling one without
+            # the other silently does nothing.
+            self._notify_main_window(
+                "Capture control needs the web server — enable it above.", "warning"
+            )
+
+    def _toggle_token_visibility(self):
+        if self.show_token_btn.isChecked():
+            self.control_token_input.setEchoMode(LineEdit.Normal)
+            self.show_token_btn.setText("Hide")
+        else:
+            self.control_token_input.setEchoMode(LineEdit.Password)
+            self.show_token_btn.setText("Show")
+
+    def _copy_control_token(self):
+        token = self.control_token_input.text()
+        if not token:
+            self._notify_main_window(
+                "No token yet — enable the capture control API first.", "warning"
+            )
+            return
+        QApplication.clipboard().setText(token)
+        self._notify_main_window("API token copied to clipboard")
+
+    def _regenerate_control_token(self):
+        """Mint a fresh token, invalidating the old one."""
+        if not (self.main_window and hasattr(self.main_window, 'regenerate_control_token')):
+            return
+        self.main_window.regenerate_control_token()
+        self._sync_control_token(mint=False)
+        self._notify_main_window(
+            "New API token generated — any tool using the old one must be updated."
+        )
+
+    def _sync_control_token(self, mint=False):
+        """Refresh the token field from config, optionally minting one first.
+
+        Minting and pushing the token to a live server belong to the main
+        window (panels stay layout-only); this just reflects the result.
+        """
+        if mint and self.main_window and hasattr(self.main_window, 'ensure_control_token'):
+            self.main_window.ensure_control_token()
+        token = ''
+        if self.main_window and hasattr(self.main_window, 'config'):
+            token = self.main_window.config.get('output', {}).get('api_token', '') or ''
+        self.control_token_input.setText(token)
+
+    def _notify_main_window(self, message, category='info'):
+        if self.main_window and hasattr(self.main_window, '_notify'):
+            self.main_window._notify(message, category)
+
     def _update_api_docs_url(self):
         """Point the API Docs link at the current host/port (browser-friendly)."""
         if not hasattr(self, 'api_docs_link'):
@@ -341,6 +450,9 @@ class OutputSettingsPanel(IntegrationCardsMixin, QScrollArea):
             self.web_host_input.setText(output.get('webserver_host', '127.0.0.1'))
             self.web_port_spin.setValue(output.get('webserver_port', 8080))
             self.web_path_input.setText(output.get('webserver_path', '/latest'))
+            self.control_enabled_switch.set_checked(
+                output.get('webserver_control_enabled', False))
+            self.control_token_input.setText(output.get('api_token', '') or '')
             self._update_api_docs_url()
 
             # Discord

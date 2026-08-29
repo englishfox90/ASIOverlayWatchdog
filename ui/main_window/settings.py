@@ -6,6 +6,45 @@ from services.logger import app_logger
 class _MainWindowSettingsMixin:
 
     # =========================================================================
+    # CAPTURE CONTROL API TOKEN
+    # =========================================================================
+
+    def ensure_control_token(self) -> str:
+        """Mint the capture-control token if the API is enabled, and return it.
+
+        Owned by the window rather than the panel: panels stay layout-only, and
+        pushing the token to a live server is app state, not presentation.
+        Returns "" when the control API is disabled — which is what keeps the
+        control routes failing closed.
+        """
+        from services import api_auth
+        token = api_auth.resolve_control_token(self.config)
+        self._apply_control_token(token)
+        return token
+
+    def regenerate_control_token(self) -> str:
+        """Replace the control token, invalidating the previous one."""
+        from services import api_auth
+        output = dict(self.config.get('output', {}) or {})
+        output['api_token'] = api_auth.generate_token()
+        self.config.set('output', output)
+        self.config.save()
+        return self.ensure_control_token()
+
+    def _apply_control_token(self, token):
+        """Push a token change to an already-running server.
+
+        _ensure_output_servers_started() only reconciles the *enabled* flag, so
+        without this a toggle or a regenerate would not take effect until the
+        next restart — the classic "I changed it and nothing happened" bug.
+        """
+        if getattr(self, 'web_server', None) is not None:
+            try:
+                self.web_server.set_control_token(token)
+            except Exception as e:
+                app_logger.error(f"Could not apply control token to web server: {e}")
+
+    # =========================================================================
     # SETTINGS
     # =========================================================================
 
