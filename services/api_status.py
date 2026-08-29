@@ -53,6 +53,10 @@ CAPTURE_FIELDS = [
     ("recovery", "object",
      "Auto-recovery state: {in_progress, attempts, unrecoverable}."),
     ("last_error", "string", "Most recent capture error message, or null."),
+    ("last_error_epoch", "number",
+     "Unix timestamp of the most recent capture error, or null. Lets a client "
+     "tell a NEW failure from the same fault reported again — the message text "
+     "cannot, because a repeated fault reads identically."),
 ]
 
 
@@ -67,6 +71,7 @@ def build_capture_snapshot(
     schedule=None,
     last_capture_epoch=None,
     last_error=None,
+    last_error_epoch=None,
     recovery=None,
 ) -> dict:
     """Normalize the discrete capture snapshot the feeders push to the server.
@@ -84,6 +89,7 @@ def build_capture_snapshot(
         "schedule": schedule,
         "last_capture_epoch": last_capture_epoch,
         "last_error": last_error,
+        "last_error_epoch": last_error_epoch,
         "recovery": recovery or {"in_progress": False, "attempts": 0, "unrecoverable": False},
     }
 

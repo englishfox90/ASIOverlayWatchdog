@@ -86,6 +86,7 @@ class MainWindow(
         self.web_server = None
         self.image_library = None
         self._last_capture_error = None  # Most recent capture error, for /status health
+        self._last_capture_error_epoch = None  # When it happened — see _set_capture_error
         self._capture_status_timer = None  # Periodic /status snapshot push
         self._web_server_retry_timer = None  # Re-attempts a failed web-server bind
         self.weather_service = None

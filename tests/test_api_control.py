@@ -316,25 +316,45 @@ def test_issued_distinguishes_a_noop_from_a_real_command():
 def test_stale_error_does_not_fail_a_fresh_start():
     """A fault from an earlier session must not fail a start before it is processed."""
     stale = snap(enabled=False, running=False, state="stopped",
-                 last_error="camera unplugged an hour ago")
-    assert ac.is_failed(stale, ac.COMMAND_START, baseline_error="camera unplugged an hour ago") is False
+                 last_error="camera unplugged an hour ago", last_error_epoch=1000.0)
+    assert ac.is_failed(stale, ac.COMMAND_START, baseline_error_epoch=1000.0) is False
 
 
 def test_new_error_during_start_is_a_failure():
     """The GUI start path can fail without ever reaching state='error'."""
     after = snap(enabled=False, running=False, state="stopped",
-                 last_error="could not open camera")
-    assert ac.is_failed(after, ac.COMMAND_START, baseline_error=None) is True
+                 last_error="could not open camera", last_error_epoch=2000.0)
+    assert ac.is_failed(after, ac.COMMAND_START, baseline_error_epoch=None) is True
+
+
+def test_the_same_fault_reported_again_is_still_a_failure():
+    """The bug this rework exists for.
+
+    Retrying a disconnected camera produces a byte-identical message, so the
+    old text comparison read the repeat as stale and burned the full timeout
+    before returning 504 instead of failing immediately.
+    """
+    ERR = "No ZWO cameras detected. Check USB connections."
+    before = 1000.0
+    after = snap(enabled=False, running=False, state="stopped",
+                 last_error=ERR, last_error_epoch=1500.0)
+    assert ac.is_failed(after, ac.COMMAND_START, baseline_error_epoch=before) is True
+
+
+def test_an_unstamped_error_is_not_treated_as_new():
+    """Missing stamp — stay conservative and let the timeout decide."""
+    s = snap(enabled=False, running=False, state="stopped", last_error="boom")
+    assert ac.is_failed(s, ac.COMMAND_START, baseline_error_epoch=None) is False
 
 
 def test_wait_returns_failed_on_a_new_error_rather_than_burning_the_timeout():
     clock = _FakeClock()
     failed = snap(enabled=False, running=False, state="stopped",
-                  last_error="could not open camera")
+                  last_error="could not open camera", last_error_epoch=2000.0)
     _, outcome = ac.wait_for_target(
         ac.COMMAND_START, lambda: failed,
         timeout=300, monotonic=clock.monotonic, sleep=clock.sleep,
-        baseline_error=None,
+        baseline_error_epoch=None,
     )
     assert outcome == "failed"
     assert clock.t == 0.0
@@ -342,10 +362,11 @@ def test_wait_returns_failed_on_a_new_error_rather_than_burning_the_timeout():
 
 def test_wait_still_times_out_when_only_a_stale_error_is_present():
     clock = _FakeClock()
-    stale = snap(enabled=False, running=False, state="stopped", last_error="old fault")
+    stale = snap(enabled=False, running=False, state="stopped",
+                 last_error="old fault", last_error_epoch=1000.0)
     _, outcome = ac.wait_for_target(
         ac.COMMAND_START, lambda: stale,
         timeout=2, monotonic=clock.monotonic, sleep=clock.sleep,
-        baseline_error="old fault",
+        baseline_error_epoch=1000.0,
     )
     assert outcome == "timeout"

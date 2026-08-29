@@ -45,6 +45,8 @@ class HeadlessRunner:
         self.image_count = 0
         self._last_capture_epoch = None  # Unix ts of last successful frame (for /status)
         self._last_error = None          # Most recent capture error (for /status health)
+        self._last_error_epoch = None    # When it happened — lets the control API tell a
+                                         # new failure from the same fault reported again
         self._last_webserver_retry = 0.0  # Throttles web-server bind re-attempts
         self._shutdown_event = threading.Event()
         # Set = capture paused by the control API. Distinct from _shutdown_event:
@@ -357,6 +359,7 @@ class HeadlessRunner:
                 self.image_count += 1
                 self._last_capture_epoch = time.time()
                 self._last_error = None
+                self._last_error_epoch = None
                 self._log(f"Frame {self.image_count}: {metadata.get('FILENAME', 'unknown')} "
                          f"(capture: {capture_time:.2f}s, process: {process_time:.2f}s)")
                 self._push_capture_status(running=True, state="capturing")
@@ -375,6 +378,7 @@ class HeadlessRunner:
                 import traceback
                 self._log(traceback.format_exc())
                 self._last_error = str(e)
+                self._last_error_epoch = time.time()
                 self._push_capture_status(running=False, state="error")
                 # Wait before retrying
                 self._wait(5)
@@ -440,6 +444,7 @@ class HeadlessRunner:
                 schedule=schedule,
                 last_capture_epoch=getattr(self, '_last_capture_epoch', None),
                 last_error=getattr(self, '_last_error', None),
+                last_error_epoch=getattr(self, '_last_error_epoch', None),
             )
             self.web_server.update_capture_status(snapshot)
         except Exception as e:

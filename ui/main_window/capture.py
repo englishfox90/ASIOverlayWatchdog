@@ -109,7 +109,7 @@ class _MainWindowCaptureMixin(_CameraDetectMixin, _CaptureWatchdogMixin):
             self.app_bar.set_capturing(True)
             self._lock_camera_picker(True)
             self.app_bar.set_status('waiting')
-            self._last_capture_error = None
+            self._set_capture_error(None)
             self.push_capture_status()
             self.capture_started.emit()
             self._notify(f"Capture started ({mode} mode)")
@@ -278,7 +278,7 @@ class _MainWindowCaptureMixin(_CameraDetectMixin, _CaptureWatchdogMixin):
 
     def _on_camera_error(self, error_msg: str):
         app_logger.error(f"Camera error received: {error_msg}")
-        self._last_capture_error = error_msg
+        self._set_capture_error(error_msg)
         self.push_capture_status()
         self._notify(f"Camera error: {error_msg}", "error")
 
@@ -332,7 +332,7 @@ class _MainWindowCaptureMixin(_CameraDetectMixin, _CaptureWatchdogMixin):
             self.app_bar.set_capturing(True)
             self._lock_camera_picker(True)
             self.app_bar.set_status('waiting')
-            self._last_capture_error = None
+            self._set_capture_error(None)
             self.push_capture_status()
 
     def _update_camera_capabilities(self):

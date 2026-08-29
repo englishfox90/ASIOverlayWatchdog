@@ -143,14 +143,19 @@ def is_at_target(snapshot, command: str) -> bool:
     return False
 
 
-def is_failed(snapshot, command: str, baseline_error=_UNSET) -> bool:
+def is_failed(snapshot, command: str, baseline_error_epoch=_UNSET) -> bool:
     """Whether the command has failed outright, so waiting further is pointless.
 
-    ``baseline_error`` is ``last_error`` as it stood when the command was
-    issued. A *new* error appearing while we wait is a real failure; the stale
-    one already there is not — without that distinction, any start after a
-    previous camera fault would report failure before the app had even
-    processed the command.
+    ``baseline_error_epoch`` is ``last_error_epoch`` as it stood when the
+    command was issued; an error stamped later than that belongs to this
+    command.
+
+    Keying on the timestamp rather than the message is load-bearing. A stale
+    fault must not fail a fresh start, but the same fault reported *again* must
+    — and a repeated fault produces an identical string, so comparing text
+    cannot separate the two. Retrying a disconnected camera is exactly the case
+    where both happen at once: it used to hang for the full timeout and return
+    504 instead of failing immediately.
     """
     if command != COMMAND_START:
         return False
@@ -160,12 +165,16 @@ def is_failed(snapshot, command: str, baseline_error=_UNSET) -> bool:
     recovery = snapshot.get("recovery") or {}
     if recovery.get("unrecoverable"):
         return True
-    if baseline_error is _UNSET:
+    if baseline_error_epoch is _UNSET:
         return False
     # The GUI start path can fail without ever reaching state="error": it
     # returns early, leaving enabled False with only last_error set.
-    current = snapshot.get("last_error")
-    return bool(current) and current != baseline_error and not snapshot.get("enabled")
+    if snapshot.get("enabled") or not snapshot.get("last_error"):
+        return False
+    stamp = snapshot.get("last_error_epoch")
+    if stamp is None:
+        return False
+    return baseline_error_epoch is None or stamp > baseline_error_epoch
 
 
 def parse_request(raw_body):
@@ -223,7 +232,7 @@ def parse_request(raw_body):
 
 
 def wait_for_target(command, read_snapshot, *, timeout, monotonic, sleep,
-                    poll_interval=POLL_INTERVAL_SEC, baseline_error=_UNSET):
+                    poll_interval=POLL_INTERVAL_SEC, baseline_error_epoch=_UNSET):
     """Poll until ``command``'s target state is reached, or ``timeout`` elapses.
 
     This is what makes a sequencer instruction deterministic: the sequence must
@@ -240,7 +249,7 @@ def wait_for_target(command, read_snapshot, *, timeout, monotonic, sleep,
     while True:
         if is_at_target(snapshot, command):
             return snapshot, "reached"
-        if is_failed(snapshot, command, baseline_error):
+        if is_failed(snapshot, command, baseline_error_epoch):
             return snapshot, "failed"
         if monotonic() >= deadline:
             return snapshot, "timeout"
@@ -248,7 +257,7 @@ def wait_for_target(command, read_snapshot, *, timeout, monotonic, sleep,
         snapshot = read_snapshot()
 
 
-def _message(command, result, state):
+def _message(command, result, state, last_error=None):
     if result == RESULT_ALREADY_RUNNING:
         return "Capture is already running."
     if result == RESULT_ALREADY_STOPPED:
@@ -262,7 +271,13 @@ def _message(command, result, state):
         return f"Capture {verb} requested; state not confirmed (wait was false)."
     if result == RESULT_TIMEOUT:
         target = "running" if command == COMMAND_START else "stopped"
-        return f"Timed out waiting for capture to reach '{target}' (state is '{state}')."
+        msg = f"Timed out waiting for capture to reach '{target}' (state is '{state}')."
+        return f"{msg} Last error: {last_error}" if last_error else msg
+    # Surface the real cause. "failed (state is 'stopped')" tells an operator
+    # nothing; "No ZWO cameras detected" tells them what to go and fix, and it
+    # is what the NINA helper prints into the sequence log.
+    if last_error:
+        return str(last_error)
     return f"Capture command failed (state is '{state}')."
 
 
@@ -290,7 +305,7 @@ def build_result(command, snapshot, *, result, issued, waited=False, wait_second
         "enabled": bool(snapshot.get("enabled")),
         "waited": bool(waited),
         "wait_seconds": round(float(wait_seconds), 2),
-        "message": _message(command, result, state),
+        "message": _message(command, result, state, snapshot.get("last_error")),
     }
 
 

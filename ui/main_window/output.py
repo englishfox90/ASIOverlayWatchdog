@@ -3,6 +3,7 @@ import os
 import queue
 import random
 import threading
+import time
 import traceback
 from datetime import datetime, timezone
 
@@ -246,7 +247,7 @@ class _MainWindowOutputMixin:
 
     def _on_processing_error(self, error_msg: str):
         self.app_bar.set_status(None)
-        self._last_capture_error = error_msg
+        self._set_capture_error(error_msg)
         self.push_capture_status()
         app_logger.error(f"Image processing error: {error_msg}")
 
@@ -409,6 +410,17 @@ class _MainWindowOutputMixin:
         except Exception as e:
             app_logger.error(f"Error pushing capture status: {e}")
 
+    def _set_capture_error(self, message):
+        """Record a capture error, and when it happened.
+
+        The timestamp is what lets the control API tell a NEW failure from the
+        same fault reported again. Comparing the message cannot: a repeated
+        fault reads identically, which is exactly the retry-a-disconnected-
+        camera case.
+        """
+        self._last_capture_error = message
+        self._last_capture_error_epoch = time.time() if message else None
+
     def _build_capture_status(self) -> dict:
         """Assemble the discrete capture snapshot for the status API.
 
@@ -432,7 +444,8 @@ class _MainWindowOutputMixin:
         if not enabled:
             return api_status.build_capture_snapshot(
                 mode="idle", enabled=False, running=False, state="stopped",
-                last_error=self._last_capture_error, recovery=recovery,
+                last_error=self._last_capture_error,
+                last_error_epoch=self._last_capture_error_epoch, recovery=recovery,
             )
 
         if mode_cfg == 'watch':
@@ -440,7 +453,8 @@ class _MainWindowOutputMixin:
             state = "capturing" if running else "stopped"
             return api_status.build_capture_snapshot(
                 mode="watch", enabled=True, running=running, state=state,
-                last_error=self._last_capture_error, recovery=recovery,
+                last_error=self._last_capture_error,
+                last_error_epoch=self._last_capture_error_epoch, recovery=recovery,
             )
 
         # Camera mode
@@ -487,7 +501,8 @@ class _MainWindowOutputMixin:
             interval_seconds=interval, effective_interval_seconds=effective_interval,
             schedule=schedule,
             last_capture_epoch=(cc.last_successful_frame_epoch() if cc else None),
-            last_error=self._last_capture_error, recovery=recovery,
+            last_error=self._last_capture_error,
+            last_error_epoch=self._last_capture_error_epoch, recovery=recovery,
         )
 
     # =========================================================================

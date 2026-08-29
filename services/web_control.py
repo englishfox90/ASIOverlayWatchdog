@@ -192,9 +192,10 @@ def serve_command(handler, command: str):
                     ERR_CONTROL_UNAVAILABLE)
         return
 
-    # Snapshot the error as it stands BEFORE the command, so a stale fault from
-    # an earlier session can't be mistaken for this command failing.
-    baseline_error = snapshot.get("last_error")
+    # Stamp of the error as it stands BEFORE the command, so a stale fault is
+    # ignored while the SAME fault happening again still counts as this command
+    # failing. Comparing the message text cannot do that.
+    baseline_error_epoch = snapshot.get("last_error_epoch")
 
     try:
         command_handler(command)
@@ -220,7 +221,7 @@ def serve_command(handler, command: str):
         timeout=params["timeout"],
         monotonic=time.monotonic,
         sleep=time.sleep,
-        baseline_error=baseline_error,
+        baseline_error_epoch=baseline_error_epoch,
     )
     elapsed = time.monotonic() - started
     result = api_control.result_for_outcome(command, outcome)
