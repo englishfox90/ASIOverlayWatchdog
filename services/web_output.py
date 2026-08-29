@@ -15,7 +15,7 @@ from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from PIL import Image
 from .logger import app_logger
-from . import web_library
+from . import web_control, web_library
 
 # Maximum image size served by the web endpoint (5 MB)
 WEB_IMAGE_MAX_BYTES = 5 * 1024 * 1024
@@ -87,6 +87,17 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
     # services/api_status.py.
     capture_status = {}
 
+    def do_POST(self):
+        """Handle POST requests — capture control only.
+
+        Control routes are authenticated and CORS-free; see
+        services/web_control.py for the security posture. Anything else 404s
+        with no hint that other verbs exist.
+        """
+        control_path = getattr(self.server, 'control_path', '/capture')
+        if not web_control.route_post(self, control_path):
+            self.send_error(404, "Path not found.")
+
     @classmethod
     def update_image(cls, image_data: bytes, content_type: str, path: str = None, metadata: dict = None):
         """
@@ -142,6 +153,7 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         docs_path = getattr(self.server, 'docs_path', '/docs')
         openapi_path = getattr(self.server, 'openapi_path', '/openapi.json')
         library_path = getattr(self.server, 'library_path', '/library')
+        control_path = getattr(self.server, 'control_path', '/capture')
 
         # Parse URL to strip query parameters (e.g., ?t=1764384123178)
         parsed_url = urlparse(self.path)
@@ -165,12 +177,14 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
             self._serve_openapi()
         elif clean_path == docs_path:
             self._serve_docs()
+        elif clean_path == control_path:
+            web_control.serve_capture_state(self)
         elif clean_path == library_path + '/image' and self._library_api_enabled():
             web_library.serve_image(self, self._library(), query_params)
         elif clean_path == library_path and self._library_api_enabled():
             web_library.serve_list(self, self._library(), library_path, query_params)
         else:
-            available = ", ".join([config_path, status_path, openapi_path, docs_path])
+            available = ", ".join([config_path, status_path, openapi_path, docs_path, control_path])
             if self._library_api_enabled():
                 available += f", {library_path}, {library_path}/image"
             self.send_error(404, f"Path not found. Available: {available}")
@@ -319,12 +333,17 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         # so the docs never describe an endpoint that 404s.
         library_path = getattr(self.server, 'library_path', '/library') \
             if self._library_api_enabled() else None
+        # Control routes are advertised only when a token is configured — with
+        # none they fail closed, so documenting them would describe a 503.
+        control_path = getattr(self.server, 'control_path', '/capture') \
+            if getattr(self.server, 'control_token', '') else None
         return api_docs.build_openapi_spec(
             image_path=self.server.config_path,
             status_path=self.server.status_path,
             docs_path=getattr(self.server, 'docs_path', '/docs'),
             openapi_path=getattr(self.server, 'openapi_path', '/openapi.json'),
             library_path=library_path,
+            control_path=control_path,
         )
 
     def _serve_openapi(self):
@@ -380,7 +399,7 @@ class WebOutputServer:
     
     def __init__(self, host='0.0.0.0', port=8080, image_path='/latest', status_path='/status',
                  docs_path='/docs', openapi_path='/openapi.json', library_path='/library',
-                 image_library=None):
+                 image_library=None, control_path='/capture', control_token=''):
         """
         Initialize web server.
 
@@ -394,6 +413,10 @@ class WebOutputServer:
             library_path: Base URL path for the image library endpoints
                 (``<library_path>`` lists, ``<library_path>/image`` fetches)
             image_library: Optional ImageLibrary the library endpoints read from
+            control_path: Base URL path for the capture-control endpoints
+                (``<control_path>`` reads state, ``/start`` and ``/stop`` mutate)
+            control_token: Bearer token required on every control route. Empty
+                means control fails closed — never open.
         """
         self.host = host
         self.port = port
@@ -403,6 +426,11 @@ class WebOutputServer:
         self.openapi_path = openapi_path
         self.library_path = library_path
         self.image_library = image_library
+        self.control_path = control_path
+        self._control_token = control_token or ''
+        # Set by the app via register_capture_command_handler(). Until then the
+        # control routes 503 — the server never starts capture on its own.
+        self._capture_command_handler = None
         self.server = None
         self.server_thread = None
         self.running = False
@@ -435,6 +463,10 @@ class WebOutputServer:
             self.server.openapi_path = self.openapi_path
             self.server.library_path = self.library_path
             self.server.image_library = self.image_library
+            self.server.control_path = self.control_path
+            self.server.control_host = self.host
+            self.server.control_token = self._control_token
+            self.server.capture_command_handler = self._capture_command_handler
             
             # Set class variables
             ImageHTTPHandler.server_start_time = time.time()
@@ -536,6 +568,33 @@ class WebOutputServer:
         if not self.running:
             return
         ImageHTTPHandler.update_capture_status(snapshot)
+
+    def register_capture_command_handler(self, handler):
+        """Register the callable that executes a capture command.
+
+        The inverse of update_capture_status(): status is *pushed* into the
+        server, control is *pulled* back out through a handler the app owns.
+        The server stays ignorant of capture either way.
+
+        ``handler(command)`` is invoked on an HTTP request thread with
+        ``'start'`` or ``'stop'``. It is the handler's job to marshal onto the
+        thread that owns capture — QueuedConnection under the GUI, a direct
+        call under HeadlessRunner — and to return promptly. Confirmation of the
+        resulting state comes from the pushed snapshot, not the return value.
+        """
+        self._capture_command_handler = handler
+        if self.server is not None:
+            self.server.capture_command_handler = handler
+
+    def set_control_token(self, token):
+        """Set the bearer token required on control routes.
+
+        Safe to call before or after start(). An empty token disables control
+        (fail closed) rather than opening it.
+        """
+        self._control_token = token or ''
+        if self.server is not None:
+            self.server.control_token = self._control_token
 
     @staticmethod
     def _downsize_image(image_data_bytes: bytes, content_type: str):

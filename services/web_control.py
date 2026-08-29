@@ -1,0 +1,218 @@
+"""
+HTTP route handlers for the capture-control endpoints.
+
+Delegated from ``services/web_output.py`` exactly as ``services/web_library.py``
+already is, so the server module stays under the size cap.  This file owns the
+socket-facing half of capture control; the decision logic is in
+``services/api_control.py`` and the auth logic in ``services/api_auth.py``,
+both pure and unit-tested.
+
+**The load-bearing constraint:** these functions run on an HTTP request thread.
+They must never call ``start_capture()`` / ``stop_capture()`` directly — that
+would touch Qt state from the wrong thread.  Instead the app registers a
+command handler at startup (the mirror of how it pushes a status snapshot), and
+that handler marshals onto the thread which owns capture:
+
+* ``MainWindow``     -> ``QMetaObject.invokeMethod(..., Qt.QueuedConnection)``
+* ``HeadlessRunner`` -> a direct call into its own capture lifecycle
+
+**Security posture.** These are the first mutating routes on a server whose
+read-only endpoints accepted wildcard CORS and no ``Host`` validation as an
+explicit accepted risk (W4).  Control routes do not inherit that:
+
+1. a bearer token is required on every request, even on loopback;
+2. no ``Access-Control-Allow-Origin`` header is ever sent, so a browser cannot
+   read a response even if it manages to issue the request;
+3. the ``Host`` header must be loopback or the configured host, which closes
+   DNS rebinding directly rather than relying on the CORS side effect;
+4. with no token configured the routes fail closed.
+
+``POST`` is deliberately absent from ``do_OPTIONS``'s allow-list in
+``web_output.py``: the missing preflight is part of the defence.
+"""
+from __future__ import annotations
+
+import json
+import time
+
+from . import api_auth, api_control
+from .logger import app_logger
+
+
+def _send_json(handler, status: int, payload: dict):
+    """Write a JSON response with no CORS header.
+
+    The absent ``Access-Control-Allow-Origin`` is load-bearing, not an
+    oversight — see the module docstring.
+    """
+    try:
+        body = json.dumps(payload, indent=2).encode("utf-8")
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", len(body))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        handler.wfile.write(body)
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        app_logger.debug("Client disconnected during control response")
+    except Exception as e:
+        app_logger.error(f"Error serving control response: {api_auth.redact(e)}")
+
+
+def _send_error(handler, status: int, message: str):
+    _send_json(handler, status, {"error": message, "status": status})
+
+
+def _configured_host(handler):
+    return getattr(handler.server, "control_host", None) or getattr(handler.server, "host", None)
+
+
+def authorize(handler) -> bool:
+    """Gate a control request. Writes the rejection itself and returns False.
+
+    Host is checked before the token so a rebinding probe never even reaches
+    the constant-time compare.
+    """
+    if not api_auth.host_allowed(handler.headers.get("Host"),
+                                 _configured_host(handler)):
+        app_logger.warning(
+            "Rejected control request with disallowed Host header "
+            f"'{api_auth.redact(handler.headers.get('Host'))}'"
+        )
+        _send_error(handler, 403, "Host not allowed.")
+        return False
+
+    token = getattr(handler.server, "control_token", "") or ""
+    verdict = api_auth.check_bearer(handler.headers.get("Authorization"), token)
+    if verdict == api_auth.AUTH_OK:
+        return True
+
+    status, message = api_auth.verdict_response(verdict)
+    # The verdict is safe to log; the presented credential is not.
+    app_logger.warning(f"Control request denied ({verdict}) for {handler.path}")
+    _send_error(handler, status, message)
+    return False
+
+
+def _read_body(handler):
+    """Read the request body, or ``(None, error)`` if it is unreadable/oversized."""
+    try:
+        length = int(handler.headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        return None, (400, "Invalid Content-Length.")
+    if length < 0:
+        return None, (400, "Invalid Content-Length.")
+    if length > api_control.MAX_BODY_BYTES:
+        return None, (413, "Request body too large.")
+    if length == 0:
+        return b"", None
+    try:
+        return handler.rfile.read(length), None
+    except Exception as e:
+        app_logger.debug(f"Error reading control body: {api_auth.redact(e)}")
+        return None, (400, "Could not read request body.")
+
+
+def _read_snapshot(handler_cls):
+    return handler_cls.capture_status or {}
+
+
+def serve_capture_state(handler):
+    """``GET /capture`` — the ``capture`` + ``health`` blocks, behind the token.
+
+    A convenience alias so a control client needs only one path prefix; the
+    same data is already in ``/status``.
+    """
+    if not authorize(handler):
+        return
+    payload = handler._build_status_dict()
+    _send_json(handler, 200, {
+        "capture": payload.get("capture", {}),
+        "health": payload.get("health", {}),
+        "timestamp": payload.get("timestamp"),
+    })
+
+
+def serve_command(handler, command: str):
+    """``POST /capture/start`` | ``POST /capture/stop``.
+
+    Idempotent by contract: a sequence that re-runs Start, or fires Stop twice
+    on abort, gets a 200 no-op rather than an error.
+    """
+    if not authorize(handler):
+        return
+
+    raw_body, error = _read_body(handler)
+    if error:
+        _send_error(handler, *error)
+        return
+
+    params, error = api_control.parse_request(raw_body)
+    if error:
+        _send_error(handler, *error)
+        return
+
+    handler_cls = type(handler)
+    snapshot = _read_snapshot(handler_cls)
+
+    if api_control.is_at_target(snapshot, command):
+        result = (api_control.RESULT_ALREADY_RUNNING
+                  if command == api_control.COMMAND_START
+                  else api_control.RESULT_ALREADY_STOPPED)
+        _send_json(handler, 200, api_control.build_result(
+            command, snapshot, result=result, changed=False))
+        return
+
+    command_handler = getattr(handler.server, "capture_command_handler", None)
+    if not callable(command_handler):
+        app_logger.error(f"Control command '{command}' rejected — no handler registered")
+        _send_error(handler, 503, "Capture control is not available on this server.")
+        return
+
+    try:
+        command_handler(command)
+    except Exception as e:
+        app_logger.error(f"Capture command '{command}' failed: {api_auth.redact(e)}")
+        _send_json(handler, 500, api_control.build_result(
+            command, _read_snapshot(handler_cls),
+            result=api_control.RESULT_FAILED, changed=False))
+        return
+
+    app_logger.info(f"Capture control: '{command}' issued via HTTP API")
+
+    if not params["wait"]:
+        _send_json(handler, 200, api_control.build_result(
+            command, _read_snapshot(handler_cls),
+            result=api_control.RESULT_PENDING, changed=True))
+        return
+
+    started = time.monotonic()
+    snapshot, outcome = api_control.wait_for_target(
+        command,
+        lambda: _read_snapshot(handler_cls),
+        timeout=params["timeout"],
+        monotonic=time.monotonic,
+        sleep=time.sleep,
+    )
+    elapsed = time.monotonic() - started
+    result = api_control.result_for_outcome(command, outcome)
+    _send_json(
+        handler,
+        api_control.http_status_for_result(result),
+        api_control.build_result(command, snapshot, result=result, changed=True,
+                                 waited=True, wait_seconds=elapsed),
+    )
+
+
+def route_post(handler, control_path: str) -> bool:
+    """Dispatch a POST to a control route. Returns False if the path isn't ours."""
+    path = handler.path.split("?", 1)[0].rstrip("/") or "/"
+    control_path = (control_path or "/capture").rstrip("/")
+
+    if path == f"{control_path}/start":
+        serve_command(handler, api_control.COMMAND_START)
+        return True
+    if path == f"{control_path}/stop":
+        serve_command(handler, api_control.COMMAND_STOP)
+        return True
+    return False

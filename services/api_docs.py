@@ -7,13 +7,15 @@ dependency-free HTML reference at ``/docs`` (human-readable, fully offline — n
 CDN, no JS, suitable for an isolated observatory PC).
 
 The ``capture`` response schema is generated from ``api_status.CAPTURE_FIELDS``,
-the same catalog the live payload is built from, so the docs cannot drift from
-what ``/status`` actually returns.
+and the control routes from ``api_control.CONTROL_ROUTES`` — the same catalogs
+the live payloads are built from, so the docs cannot drift from what the server
+actually returns.
 """
 from __future__ import annotations
 
 import html as _html
 
+from .api_control import CONTROL_RESULT_FIELDS, CONTROL_ROUTES
 from .api_status import CAPTURE_FIELDS
 
 try:
@@ -28,6 +30,69 @@ def _capture_schema_properties() -> dict:
     for name, typ, desc in CAPTURE_FIELDS:
         props[name] = {"type": typ, "description": desc, "nullable": True}
     return props
+
+
+def _control_paths(control_path: str) -> dict:
+    """OpenAPI ``paths`` entries for the capture-control endpoints.
+
+    Generated from api_control.CONTROL_ROUTES so the documented surface and the
+    routed surface are the same list.
+    """
+    paths = {}
+    for route in CONTROL_ROUTES:
+        path = control_path + route["path"][len("/capture"):]
+        op = {
+            "summary": route["summary"],
+            "description": route["description"],
+            "security": [{"bearerAuth": []}],
+            "responses": {
+                "200": {
+                    "description": "Command accepted (including idempotent no-ops)",
+                    "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/ControlResult"}}},
+                },
+                "401": {"description": "Missing or invalid bearer token"},
+                "403": {"description": "Host header not allowed"},
+                "503": {"description": "Control API not enabled, or no capture handler registered"},
+            },
+        }
+        if route["method"] == "post":
+            op["requestBody"] = {
+                "required": False,
+                "content": {"application/json": {"schema": {
+                    "type": "object",
+                    "properties": {
+                        "wait": {"type": "boolean", "default": True,
+                                 "description": "Block until the target state is reached."},
+                        "timeout": {"type": "integer", "default": 30, "minimum": 1,
+                                    "maximum": 300,
+                                    "description": "Seconds to wait when 'wait' is true."},
+                    },
+                }}},
+            }
+            op["responses"]["400"] = {"description": "Malformed request body"}
+            op["responses"]["504"] = {"description": "Timed out waiting for the target state"}
+            op["responses"]["500"] = {"description": "Capture reported a failure"}
+        else:
+            op["responses"]["200"] = {
+                "description": "Current capture + health blocks",
+                "content": {"application/json": {"schema": {"type": "object"}}},
+            }
+        paths.setdefault(path, {})[route["method"]] = op
+    return paths
+
+
+def _control_schemas() -> dict:
+    """OpenAPI schema for a control response, from the shared field catalog."""
+    return {
+        "ControlResult": {
+            "type": "object",
+            "properties": {
+                name: {"type": typ, "description": desc}
+                for name, typ, desc in CONTROL_RESULT_FIELDS
+            },
+        }
+    }
 
 
 def _library_paths(library_path: str) -> dict:
@@ -227,11 +292,13 @@ def _webhook_schemas() -> dict:
 
 def build_openapi_spec(*, image_path: str = "/latest", status_path: str = "/status",
                        docs_path: str = "/docs", openapi_path: str = "/openapi.json",
-                       library_path: str | None = None) -> dict:
+                       library_path: str | None = None,
+                       control_path: str | None = None) -> dict:
     """Build the OpenAPI 3.0 spec describing the live server's actual routes.
 
-    ``library_path`` is included only when the image library API is enabled;
-    pass None to omit those routes so the docs never describe a 404.
+    ``library_path`` is included only when the image library API is enabled and
+    ``control_path`` only when the capture-control API is; pass None to omit
+    those routes so the docs never describe a 404.
     """
     spec = {
         "openapi": "3.0.3",
@@ -323,6 +390,17 @@ def build_openapi_spec(*, image_path: str = "/latest", status_path: str = "/stat
     if library_path:
         spec["paths"].update(_library_paths(library_path))
         spec["components"]["schemas"].update(_library_schemas())
+
+    if control_path:
+        spec["paths"].update(_control_paths(control_path))
+        spec["components"]["schemas"].update(_control_schemas())
+        spec["components"].setdefault("securitySchemes", {})["bearerAuth"] = {
+            "type": "http", "scheme": "bearer",
+            "description": (
+                "Control-API token from config (output.api_token). Required on "
+                "every control route, including on loopback."
+            ),
+        }
 
     # Documentation-only: Hermes is an outbound client callback, never a route
     # this server serves, so it's unconditional (not gated like the library).

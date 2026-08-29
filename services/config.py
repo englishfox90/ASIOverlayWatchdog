@@ -56,7 +56,14 @@ DEFAULT_CONFIG = {
         "webserver_path": "/latest",
         "webserver_status_path": "/status",
         "webserver_docs_path": "/docs",
-        "webserver_library_path": "/library"
+        "webserver_library_path": "/library",
+
+        # Capture-control API (POST /capture/start | /capture/stop). Off by
+        # default: these are the only mutating routes on the server, so they
+        # are opt-in and fail closed without a token. See services/api_auth.py.
+        "webserver_control_enabled": False,
+        "webserver_control_path": "/capture",
+        "api_token": ""
     },
     
     # ZWO Camera settings
