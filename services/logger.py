@@ -35,6 +35,40 @@ class SafeTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
             self.rolloverAt = self.computeRollover(int(time.time()))
 
 
+def _safe_console_write(text):
+    """Print `text` to stdout, tolerating any encoding or stream state.
+
+    Console output here is a best-effort dev convenience — the GUI queue and
+    the UTF-8 file handler are the sources of truth and both take the raw
+    `text` untouched. This only degrades what appears on a plain-ASCII
+    console; it must never be the thing that takes down a logging call.
+
+    Two real failure modes, both hit in production:
+    - A PyInstaller windowed build (`console=False`) has `sys.stdout` as
+      None, so a bare `print()` raises AttributeError.
+    - Windows defaults a redirected/piped stdout to cp1252, and log messages
+      routinely contain glyphs (warning signs, arrows, checkmarks, emoji)
+      that codec can't encode, raising UnicodeEncodeError from inside the
+      logging path.
+    """
+    stream = sys.stdout
+    if stream is None:
+        return
+    try:
+        print(text, file=stream)
+        return
+    except UnicodeEncodeError:
+        pass
+    except Exception:
+        return
+    try:
+        encoding = getattr(stream, 'encoding', None) or 'utf-8'
+        safe_text = text.encode(encoding, errors='replace').decode(encoding, errors='replace')
+        print(safe_text, file=stream)
+    except Exception:
+        pass
+
+
 class AppLogger:
     """Thread-safe logger with GUI queue and 7-day rotating file logs"""
     
@@ -119,9 +153,9 @@ class AppLogger:
                 mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
                 if mtime < cutoff:
                     log_file.unlink()
-                    print(f"Deleted old log file: {log_file.name}")
+                    _safe_console_write(f"Deleted old log file: {log_file.name}")
             except Exception as e:
-                print(f"Error cleaning up old log: {e}")
+                _safe_console_write(f"Error cleaning up old log: {e}")
     
     def get_log_dir(self):
         """Get the log directory path for UI display"""
@@ -139,8 +173,8 @@ class AppLogger:
         # Queue for GUI
         self.message_queue.put(formatted_message)
         
-        # Console
-        print(formatted_message)
+        # Console (best-effort; see _safe_console_write)
+        _safe_console_write(formatted_message)
         
         # File logging
         log_level = getattr(logging, level, logging.INFO)
@@ -151,7 +185,7 @@ class AppLogger:
             try:
                 self.error_callback(message)
             except Exception as e:
-                print(f"Error in Discord callback: {e}")
+                _safe_console_write(f"Error in Discord callback: {e}")
 
     
     def info(self, message):
