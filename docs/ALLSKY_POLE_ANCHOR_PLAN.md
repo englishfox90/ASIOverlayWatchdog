@@ -261,3 +261,60 @@ was therefore validated at tol_scale ≈ 0.89). Fixes:
 Still open: P7 proper (model-derived references once a model is trusted). The
 `detect_stars` PIL path is also unstretched — a linear median-2 frame found 67
 stars vs 200 stretched on the moonlit `lum_20260107` frame; not changed here.
+
+#### Update 2026-09-05 (issue #10, part 2) — the pole gate vetoed a good model
+
+Same rig, same night: `validate_pole` vetoed a converged refinement
+(cx≈1835, cy≈1611, a1≈1283, RMS 7.6–7.9 px, n=4561, 3/3 anchor frames) **16
+times**, because `find_pole` returned six mutually exclusive positions across
+20 runs — (1822,2765)×6, (988,1792)×4, (1905,685)×4, (1646,667)×3, … — on a
+camera that cannot have moved. The vetoes triggered seedless basin escapes
+whose candidates (a1≈1008–1044, 0.79–0.81× the truth) passed anchors and the
+a1-vs-sky-circle gate; only the same untrustworthy pole check kept them out.
+
+**Measured on the 130 real reference frames (26 rolling 35–83 min windows):**
+
+| Scenario | Old finder (brightest in-band) | New finder (rotation support) |
+|---|---|---|
+| Real frames, stable sky_r | Polaris 26/26, 3 px | Polaris 26/26, 3 px |
+| Real frames, sky_r swinging as in the #10 log | **None 26/26** (edge margin excludes Polaris at median r≈1000) | None 26/26 |
+| + tracking-mount light, 1.0× arc, 2× Polaris flux | **light 26/26**, self-consistent, 1037 px off; sign vote decisive-wrong in 3/26 | Polaris 26/26 |
+| + hosting-site set (tracking + jittery static + slewing) | 3 clusters (static LED 21, slewing 4, tracking 1) | Polaris 26/26 |
+| Polaris hidden (+ any of the above) | contaminant every run | **None 26/26** |
+| Polaris hidden + light 200 / 290 px from the pole | light 26 / 26 | light 8 / 2 of 26 (floor 2.5) |
+
+Rotation support = (detections explained by the correct-direction sidereal
+rotation about the candidate) / (wrong direction). Polaris: 4.17–5.52 in
+every window. Contaminants far from the pole: 1.00–1.35. The support
+landscape is broad (±200 px, and asymmetric — 150 px off can score higher
+than the pole itself), so it discriminates Polaris from *distant* lights,
+not from lights within ~200 px of a hidden pole; a local-peak test was
+measured and rejected for that reason.
+
+So: the sky-circle fix removed the run-to-run *eligibility* churn (the
+swinging radius moved the edge margin, not just the band — a mechanism the
+original analysis missed), but not the wrong winner. Changes:
+
+- `pole_finder`: rank in-band candidates by rotation support, brightest among
+  near-ties; withhold the estimate below `POLE_MIN_ROTATION_RATIO = 2.5`.
+- `pole_consensus.PoleHistory` (new, owned by `CalibrationService`): the
+  measured pole is UNKNOWN when recent estimates form >1 cluster (link = half
+  the gate tolerance, 70 px ref), when found in <½ of recent runs, and
+  `east_left` is asserted only when a decisive vote repeats. NOT a stability
+  test — the dominant #10 contaminant was stable to ±1 px.
+- `model_admission` (new): `FisheyeModel.provenance = 'guided'` (set by
+  guided calibration, inherited by admitted same-basin refinements) outranks
+  the measured pole; a guided incumbent locks mirror, plate scale (±10 %) and
+  pole position (140 px scaled) for any automatic replacement. Any incumbent
+  passing the lens-polynomial and a1 gates locks mirror and plate scale —
+  this is what keeps the 0.79–0.81× escape candidates out once the pole gate
+  no longer fires. `east_left_hint` for the cold-start search comes from a
+  credible incumbent or the repeated consensus vote, never a single run.
+- `CalibrationService._on_refine_done`: a guided incumbent's anchor RMS is
+  not compared against a multi-image joint RMS (V5-vs-multi-3h finding); a
+  same-basin multi-image candidate replaces it on rank alone.
+
+Residual risk (documented, not fixed): a bright in-band light within ~200 px
+of a *hidden* pole can still clear the floor; a stable single contaminant is
+unimodal by definition. Both are covered for a user who has run guided
+calibration, and neither can move the plate scale.

@@ -287,6 +287,7 @@ class TestGuidedCalibration:
 
         assert m.rms_residual < 3.0, f"RMS {m.rms_residual:.1f}px"
         assert m.east_left is True
+        assert m.provenance == 'guided'   # human-anchored basin (model_admission)
         assert abs(m.a1 - 643.0) < 25
         assert abs(m.axis_alt - 82.5) < 3.0
         # azimuth difference modulo 360

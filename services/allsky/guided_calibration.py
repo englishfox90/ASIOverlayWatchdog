@@ -203,6 +203,9 @@ def calibrate_from_anchors(
     model.n_matches = len(used)
     model.rms_residual = float(rms)
     model.calibrated_at = datetime.now(timezone.utc).isoformat()
+    # Human-identified anchors outrank every model-free measurement in the
+    # admission gates (see model_admission.py) — mark the basin as such.
+    model.provenance = 'guided'
     if note:
         model.guided_note = note   # session-only; surfaced in the status msg
         log.warning(f"Guided calibration rescue: {note}")

@@ -33,8 +33,12 @@ from .fisheye import FisheyeModel
 from .catalogs import get_bright_stars
 from .coords import radec_to_altaz
 from .calibration import calibrate, CalibrationError
-from .calibration_validate import median_frame_resolution, validate_pole
+from .calibration_quality import CalibrationQuality, model_quality  # re-exported for existing callers
+from .calibration_validate import median_frame_resolution
+from .model_admission import (
+    admit_candidate, admit_manual, east_left_hint, inherit_provenance, is_guided)
 from .multi_calibrate import median_sky_r, refine_from_detections
+from .pole_consensus import PoleHistory
 from .pole_finder import find_pole
 
 # ---------------------------------------------------------------------------
@@ -70,80 +74,6 @@ ESCAPE_COOLDOWN_S = 600     # bootstrap fits are expensive; don't spam them
 
 
 # ---------------------------------------------------------------------------
-# Quality assessment
-# ---------------------------------------------------------------------------
-
-class CalibrationQuality:
-    """
-    Calibration quality levels with display metadata.
-
-    Each level has a value string, numeric rank (for comparison), a
-    user-facing description, and background/text colour pair for the UI
-    badge (dark-theme palette).
-    """
-
-    # (value, rank, description, badge_bg, badge_text)
-    _LEVELS = {
-        'none':        (0, 'Not calibrated',
-                        '#1E1E1E', '#706F6A'),
-        'preliminary': (1, 'Single image — rough overlay',
-                        '#2D2305', '#FFD166'),
-        'acceptable':  (2, 'Multi-image — improving',
-                        '#2D1A05', '#FF9F43'),
-        'good':        (3, 'Multi-image — accurate',
-                        '#132D21', '#3DD68C'),
-        'excellent':   (4, 'Long baseline — best accuracy',
-                        '#0D2D1A', '#4ADE80'),
-    }
-
-    NONE        = 'none'
-    PRELIMINARY = 'preliminary'
-    ACCEPTABLE  = 'acceptable'
-    GOOD        = 'good'
-    EXCELLENT   = 'excellent'
-
-    ALL = (NONE, PRELIMINARY, ACCEPTABLE, GOOD, EXCELLENT)
-
-    @classmethod
-    def rank(cls, value: str) -> int:
-        return cls._LEVELS.get(value, cls._LEVELS['none'])[0]
-
-    @classmethod
-    def description(cls, value: str) -> str:
-        return cls._LEVELS.get(value, cls._LEVELS['none'])[1]
-
-    @classmethod
-    def badge_colors(cls, value: str) -> tuple:
-        """Return (background_hex, text_hex) for the UI badge."""
-        entry = cls._LEVELS.get(value, cls._LEVELS['none'])
-        return entry[2], entry[3]
-
-
-def model_quality(
-    model: Optional[FisheyeModel],
-    n_images: int = 1,
-    span_minutes: float = 0.0,
-) -> str:
-    """
-    Assess calibration quality from model metrics.
-
-    Returns one of the CalibrationQuality level strings:
-    'none', 'preliminary', 'acceptable', 'good', 'excellent'.
-    """
-    if model is None or not model.is_valid():
-        return CalibrationQuality.NONE
-    rms = model.rms_residual
-    n = model.n_matches
-    if n_images >= 20 and span_minutes >= 60 and rms <= 8.0:
-        return CalibrationQuality.EXCELLENT
-    if n_images >= 10 and n >= 100 and rms <= 12.0:
-        return CalibrationQuality.GOOD
-    if n_images >= 3 and n >= 30 and rms <= 15.0:
-        return CalibrationQuality.ACCEPTABLE
-    return CalibrationQuality.PRELIMINARY
-
-
-# ---------------------------------------------------------------------------
 # Background workers
 # ---------------------------------------------------------------------------
 
@@ -154,10 +84,13 @@ class _RefineWorker(QThread):
     failed = Signal(str)                   # error message
 
     def __init__(self, frames, seed_model, n_images: int, span_min: float,
-                 lat: float = 0.0, parent=None):
+                 lat: float = 0.0, incumbent=None, pole_history=None,
+                 parent=None):
         super().__init__(parent)
         self._frames = frames
-        self._seed = seed_model
+        self._seed = seed_model            # None = seedless (cold start / escape)
+        self._incumbent = incumbent        # model the result would replace
+        self._pole_history = pole_history or PoleHistory()
         self._n_images = n_images
         self._span_min = span_min
         self._lat = lat
@@ -165,11 +98,14 @@ class _RefineWorker(QThread):
     def run(self):
         try:
             # Model-free ground truth from the same buffer: the measured
-            # celestial pole (position + field-rotation direction). None is
-            # normal (short span / cloudy pole) and simply skips the checks.
+            # celestial pole, filtered through the cross-run consensus. None
+            # is normal (short span, cloudy or hidden pole, contaminated
+            # field) and simply skips the pole check.
+            sky_r = median_sky_r(self._frames)
             pole = None
             try:
-                pole = find_pole(self._frames, self._lat)
+                pole = self._pole_history.resolve(
+                    find_pole(self._frames, self._lat), sky_r)
             except Exception as e:
                 log.debug(f"Pole estimation failed (non-fatal): {e}")
 
@@ -177,14 +113,16 @@ class _RefineWorker(QThread):
                 self._frames,
                 self._seed,
                 max_residual_px=MAX_RESIDUAL_PX,
-                east_left_hint=pole.east_left if pole else None,
+                east_left_hint=east_left_hint(self._incumbent, pole, sky_r),
             )
             pole_w, pole_h = median_frame_resolution(self._frames)
-            pole_ok, pole_msg = validate_pole(
-                model, self._lat, pole, sky_r=median_sky_r(self._frames),
+            ok, msg = admit_candidate(
+                model, self._incumbent, self._lat, pole, sky_r,
                 pole_image_width=pole_w, pole_image_height=pole_h)
-            if not pole_ok:
-                raise CalibrationError(f"pole check failed: {pole_msg}")
+            if not ok:
+                raise CalibrationError(f"admission check failed: {msg}")
+            inherit_provenance(model, self._incumbent)
+            log.info(f"Refinement admitted: {msg}")
             self.finished.emit(model, self._n_images, self._span_min)
         except Exception as e:
             self.failed.emit(str(e))
@@ -260,6 +198,9 @@ class CalibrationService(QObject):
         self._consecutive_refine_failures = 0
         self._last_escape_time = 0.0
         self._escape_attempt = False
+        # Cross-run pole consensus (pole_consensus.py). Survives set_model /
+        # clear_model: it describes the field, not the model.
+        self._pole_history = PoleHistory()
         self._lat = 0.0
         self._lon = 0.0
         self._check_refine.connect(self._maybe_refine)
@@ -404,14 +345,14 @@ class CalibrationService(QObject):
                        'sky_cx': f.get('sky_cx'), 'sky_cy': f.get('sky_cy'),
                        'sky_r': f.get('sky_r')} for f in self._frames]
             pole_w, pole_h = median_frame_resolution(self._frames)
+        sky_r = median_sky_r(frames)
         try:
-            pole = find_pole(frames, self._lat)
+            pole = self._pole_history.resolve(find_pole(frames, self._lat), sky_r)
         except Exception as e:
             log.debug(f"Pole estimation failed (non-fatal): {e}")
             return True, "pole estimation unavailable"
-        return validate_pole(model, self._lat, pole,
-                             sky_r=median_sky_r(frames),
-                             pole_image_width=pole_w, pole_image_height=pole_h)
+        return admit_manual(model, self._lat, pole, sky_r,
+                            pole_image_width=pole_w, pole_image_height=pole_h)
 
     @property
     def current_quality(self) -> str:
@@ -543,7 +484,8 @@ class CalibrationService(QObject):
 
         self._refine_worker = _RefineWorker(
             frames_copy, None if cold_start else self._model, n, span_min,
-            lat=self._lat, parent=self,
+            lat=self._lat, incumbent=self._model,
+            pole_history=self._pole_history, parent=self,
         )
         self._refine_worker.finished.connect(self._on_refine_done)
         self._refine_worker.failed.connect(self._on_refine_failed)
@@ -639,6 +581,17 @@ class CalibrationService(QObject):
                 f"model (RMS {self._model.rms_residual:.1f}px) with the "
                 f"re-calibrated one (RMS {model.rms_residual:.1f}px)."
             )
+        elif is_guided(self._model) and self._model.n_images <= 1 and n_images >= 3:
+            # The original guided solve's RMS is over a handful of clicked
+            # anchors; a multi-image fit's is over thousands of matches across
+            # the sky. They are not comparable, and the multi-image fit is the
+            # better whole-sky model (ALLSKY_CALIBRATION_PLAN: multi-3h beat
+            # the 9-anchor V5 fit despite the higher reported RMS). The
+            # candidate was admitted as the same basin, so a rank upgrade is
+            # enough. Once replaced, both sides carry joint RMS and the normal
+            # guard applies again.
+            improved = (CalibrationQuality.rank(new_q)
+                        > CalibrationQuality.rank(self._quality))
         else:
             # Reject if the new model is more than 15% worse by RMS — a
             # quality-rank upgrade is not sufficient justification for

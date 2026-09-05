@@ -186,6 +186,81 @@ class TestBasinEscape:
         ok, msg = svc.validate_against_pole(_model(rms=5.0, n_matches=50))
         assert ok
 
+    def test_guided_model_passes_manual_gate_regardless_of_pole(self):
+        """Issue #10: user anchors outrank a pole measured from a field of
+        pier/mount lights — a guided result is never vetoed by the pole."""
+        from services.allsky.pole_finder import PoleEstimate
+        svc = self._service()
+        contaminant = PoleEstimate(x=1822.0, y=2765.0, east_left=False, sign=1,
+                                   n_frames=12, span_minutes=60.0, drift_px=3.0,
+                                   flux=9000.0, sign_votes=(500, 300))
+        svc._pole_history.resolve(contaminant, 1563.0)
+        guided = _model(rms=2.4, n_matches=7, n_images=1, span_minutes=0.0)
+        guided.provenance = 'guided'
+        ok, msg = svc.validate_against_pole(guided)
+        assert ok and 'guided' in msg
+
+
+class TestGuidedIncumbentRefinement:
+    """Once a guided model is the incumbent, same-basin multi-image
+    refinements (admitted by model_admission continuity) must be able to
+    replace it: anchor RMS over 7 clicks and joint RMS over thousands of
+    matches are not comparable, and the multi-image fit is the better
+    whole-sky model (ALLSKY_CALIBRATION_PLAN)."""
+
+    def _service(self):
+        from services.allsky.calibration_service import CalibrationService
+        svc = CalibrationService()
+        svc._save_model = lambda m: None
+        return svc
+
+    def _guided_incumbent(self, svc):
+        guided = _model(rms=2.4, n_matches=7, n_images=1, span_minutes=0.0)
+        guided.provenance = 'guided'
+        svc._model = guided
+        svc._quality = model_quality(guided, 1, 0.0)   # preliminary
+        svc._refine_gen = svc._model_generation
+        return guided
+
+    def test_multi_image_refinement_replaces_guided_solve(self):
+        svc = self._service()
+        self._guided_incumbent(svc)
+        refined = _model(rms=7.7, n_matches=4561, n_images=40, span_minutes=80.0)
+        refined.provenance = 'guided'        # inherited by the worker on admission
+        svc._on_refine_done(refined, 40, 80.0)
+        assert svc.current_model is refined
+        assert svc.current_quality == CalibrationQuality.EXCELLENT
+        assert svc.current_model.provenance == 'guided'
+
+    def test_after_replacement_normal_rms_guard_applies(self):
+        svc = self._service()
+        self._guided_incumbent(svc)
+        refined = _model(rms=7.7, n_matches=4561, n_images=40, span_minutes=80.0)
+        refined.provenance = 'guided'
+        svc._on_refine_done(refined, 40, 80.0)
+        worse = _model(rms=12.0, n_matches=5000, n_images=45, span_minutes=90.0)
+        worse.provenance = 'guided'
+        svc._refine_gen = svc._model_generation
+        svc._on_refine_done(worse, 45, 90.0)
+        assert svc.current_model is refined
+
+    def test_single_image_result_does_not_replace_guided(self):
+        svc = self._service()
+        guided = self._guided_incumbent(svc)
+        single = _model(rms=6.0, n_matches=40, n_images=1, span_minutes=0.0)
+        svc._on_refine_done(single, 1, 0.0)
+        assert svc.current_model is guided
+
+    def test_refine_worker_accepts_incumbent_and_history(self):
+        from services.allsky.calibration_service import _RefineWorker
+        from services.allsky.pole_consensus import PoleHistory
+        inc = _model(rms=5.0, n_matches=50)
+        w = _RefineWorker([], inc, 5, 30.0, lat=39.0, incumbent=inc,
+                          pole_history=PoleHistory())
+        assert w._incumbent is inc
+        w2 = _RefineWorker([], None, 5, 30.0)
+        assert w2._incumbent is None and w2._pole_history is not None
+
 
 # ---------------------------------------------------------------------------
 # Calibration reset (user-initiated) — service + controller

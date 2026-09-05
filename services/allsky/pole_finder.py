@@ -24,6 +24,21 @@ Contaminant rejection (validated against sample_images, 2026-07-01):
     distortion biases the aggregate fixed-point estimate by 100+ px. It is
     only used to vote on the rotation sign, which it gets right robustly.
 
+Rotation support (issue #10, 2026-09-05): the drift band cannot separate
+Polaris from a light on a *tracking* mount (or a static LED whose centroid
+jitters 2–5 px in a stretched preview) — both sit inside the band, and
+"brightest in-band track" then picks the light every run, self-consistently
+(measured: 26/26 runs on the reference frames with one synthetic 2×-flux
+tracking light). The discriminator is that the star field demonstrably
+rotates about the true pole and not about a contaminant: rotating each
+frame's detections about the candidate by ±(sidereal × gap), the correct
+direction explained 4.2–5.5× as many detections as the wrong one at Polaris
+in every 35–83 min window, versus 1.0–1.35× at the contaminant positions
+(neither direction explains anything). Candidates are therefore ranked by
+that ratio, and no estimate is returned unless the winner clears
+POLE_MIN_ROTATION_RATIO — a contaminated field yields *no* pole rather than
+a wrong one.
+
 Operates on the CalibrationService buffer format: a list of dicts with keys
 'dt' (aware datetime) and 'detected' ([(x, y, flux), ...]); 'sky_cx'/'sky_cy'/
 'sky_r' are used when present.
@@ -89,6 +104,22 @@ MIN_LATITUDE_DEG = 20.0
 # this many absolute matches to be trusted for east_left.
 SIGN_MIN_RATIO = 1.3
 SIGN_MIN_MARGIN = 8
+
+# A stationary track only counts as the pole if the field rotates about it
+# decisively: the winning direction must explain at least this many times
+# as many detections as the losing one (plus SIGN_MIN_MARGIN absolute). On
+# the reference frames the true pole scored 4.17–5.52 across 26 windows of
+# 35–83 min; in-band contaminants far from the pole scored 1.00–1.35, and
+# one 200 px / 290 px from a *hidden* pole cleared 2.0 in 26 / 12 of 26 runs
+# but 2.5 in only 8 / 2. The support landscape is broad (±200 px) so no
+# floor removes near-pole lights entirely; 2.5 keeps a 1.67× margin under
+# the weakest genuine ratio. Erring high is the safe side: a withheld pole
+# skips an optional gate, a wrong pole vetoes good models.
+POLE_MIN_ROTATION_RATIO = 2.5
+# Candidates whose ratio is within this fraction of the best are considered
+# tied and the brightest wins (a faint star within ~1° of the pole scores the
+# same as Polaris; Polaris is the better position anchor).
+_ROTATION_TIE_FRACTION = 0.9
 
 # Frames sampled from large buffers (clustering and voting are O(frames²)ish).
 _MAX_SAMPLE_FRAMES = 12
@@ -157,13 +188,32 @@ def find_pole(
             for f in sample]
 
     tol = CLUSTER_TOL_REF_PX * tol_scale(sky_r)
-    candidate = _best_stationary_candidate(
+    candidates = _stationary_candidates(
         dets, sample, sky_cx, sky_cy, sky_r, tol, span_min)
-    if candidate is None:
+    if not candidates:
         return None
-    pole_x, pole_y, drift, flux, n_hits = candidate
 
-    sign, votes = _rotation_sign(sample, dets, pole_x, pole_y, sky_r)
+    # Rank by rotation support, brightest among near-ties (see module doc).
+    scored = []
+    for cand in candidates:
+        votes = _rotation_votes(sample, dets, cand[0], cand[1], sky_r)
+        scored.append((_vote_ratio(votes), cand[3], cand, votes))
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    best_ratio = scored[0][0]
+    tied = [t for t in scored if t[0] >= _ROTATION_TIE_FRACTION * best_ratio]
+    _ratio, _flux, (pole_x, pole_y, drift, flux, n_hits), votes = max(
+        tied, key=lambda t: t[1])
+    if not _decisive(votes, POLE_MIN_ROTATION_RATIO):
+        log.info(
+            f"Pole estimate withheld: no stationary candidate is a rotation "
+            f"centre (best support {best_ratio:.2f}x at "
+            f"({pole_x:.0f}, {pole_y:.0f}), votes {votes}, "
+            f"{len(candidates)} in-band candidate(s), need "
+            f"{POLE_MIN_ROTATION_RATIO}x) — field contaminated or Polaris hidden"
+        )
+        return None
+
+    sign = _sign_from_votes(votes)
     east_left = None
     if sign != 0:
         # Empirical calibration (northern hemisphere, reference rig):
@@ -195,7 +245,7 @@ def _sample_frames(frames: List[dict], k: int) -> List[dict]:
     return [frames[i] for i in dict.fromkeys(idx.tolist())]
 
 
-def _best_stationary_candidate(
+def _stationary_candidates(
     dets: List[np.ndarray],
     sample: List[dict],
     sky_cx: float,
@@ -203,12 +253,14 @@ def _best_stationary_candidate(
     sky_r: float,
     tol: float,
     span_min: float,
-) -> Optional[Tuple[float, float, float, float, int]]:
-    """Brightest detection track that stays put — Polaris.
+) -> List[Tuple[float, float, float, float, int]]:
+    """Every detection track that stays put within the drift band.
 
-    Seeds come from three probe frames (first / middle / last) so a pole star
-    occluded at the window start is still found; presence is then counted
-    against every sampled frame.
+    Returns [(x, y, drift, flux, n_hits), ...]. Seeds come from three probe
+    frames (first / middle / last) so a pole star occluded at the window
+    start is still found; presence is then counted against every sampled
+    frame. Which survivor is the pole is decided by rotation support in
+    find_pole — brightness alone picks a tracking-mount light every time.
     """
     probes = [dets[0], dets[len(dets) // 2], dets[-1]]
     seeds = np.vstack(probes)[:, :2]
@@ -225,7 +277,7 @@ def _best_stationary_candidate(
     max_drift = DRIFT_BAND[1] * arc
     edge_r = sky_r - max(40.0, EDGE_MARGIN_FRACTION * sky_r)
 
-    best = None  # (flux, x, y, drift, n_hits)
+    out: List[Tuple[float, float, float, float, int]] = []
     need = int(np.ceil(PRESENCE_FRACTION * len(dets)))
     for sx, sy in seeds:
         if np.hypot(sx - sky_cx, sy - sky_cy) > edge_r:
@@ -244,28 +296,25 @@ def _best_stationary_candidate(
         if not (min_drift <= drift <= max_drift):
             continue
         flux = float(np.median(h[:, 2]))
-        if best is None or flux > best[0]:
-            best = (flux, float(h[:, 0].mean()), float(h[:, 1].mean()),
-                    drift, len(hits))
-    if best is None:
-        return None
-    flux, x, y, drift, n_hits = best
-    return x, y, drift, flux, n_hits
+        out.append((float(h[:, 0].mean()), float(h[:, 1].mean()),
+                    drift, flux, len(hits)))
+    return out
 
 
-def _rotation_sign(
+def _rotation_votes(
     sample: List[dict],
     dets: List[np.ndarray],
     pole_x: float,
     pole_y: float,
     sky_r: float,
-) -> Tuple[int, Tuple[int, int]]:
-    """Vote on the field-rotation direction around the measured pole.
+) -> Tuple[int, int]:
+    """Count detections explained by ±sidereal rotation about a candidate.
 
     For each long-baseline frame pair, rotate the earlier detections about the
-    pole by ±(sidereal × gap) and count how many land on a detection in the
-    later frame. Fisheye distortion degrades the *count* symmetrically, so the
-    comparison stays valid even though the rotation model is approximate.
+    candidate by ±(sidereal × gap) and count how many land on a detection in
+    the later frame. Fisheye distortion degrades the *count* symmetrically, so
+    the comparison stays valid even though the rotation model is approximate.
+    Returns (matches for +1, matches for -1).
     """
     tol = 20.0 * tol_scale(sky_r)
     votes = {1: 0, -1: 0}
@@ -280,12 +329,37 @@ def _rotation_sign(
                 rot = _rotate(a, pole_x, pole_y, sign * theta)
                 d2 = ((rot[:, None, :] - b[None, :, :]) ** 2).sum(-1)
                 votes[sign] += int((d2.min(axis=1) <= tol * tol).sum())
+    return votes[1], votes[-1]
 
-    plus, minus = votes[1], votes[-1]
-    win, lose = max(plus, minus), min(plus, minus)
-    if win >= SIGN_MIN_RATIO * max(lose, 1) and win - lose >= SIGN_MIN_MARGIN:
-        return (1 if plus > minus else -1), (plus, minus)
-    return 0, (plus, minus)
+
+def _vote_ratio(votes: Tuple[int, int]) -> float:
+    win, lose = max(votes), min(votes)
+    return win / max(lose, 1)
+
+
+def _decisive(votes: Tuple[int, int], min_ratio: float) -> bool:
+    win, lose = max(votes), min(votes)
+    return win >= min_ratio * max(lose, 1) and win - lose >= SIGN_MIN_MARGIN
+
+
+def _sign_from_votes(votes: Tuple[int, int]) -> int:
+    """Field-rotation direction (+1/-1), or 0 when the vote is inconclusive."""
+    if not _decisive(votes, SIGN_MIN_RATIO):
+        return 0
+    plus, minus = votes
+    return 1 if plus > minus else -1
+
+
+def _rotation_sign(
+    sample: List[dict],
+    dets: List[np.ndarray],
+    pole_x: float,
+    pole_y: float,
+    sky_r: float,
+) -> Tuple[int, Tuple[int, int]]:
+    """Vote on the field-rotation direction around a point: (sign, votes)."""
+    votes = _rotation_votes(sample, dets, pole_x, pole_y, sky_r)
+    return _sign_from_votes(votes), votes
 
 
 def _rotate(pts: np.ndarray, cx: float, cy: float, ang: float) -> np.ndarray:
