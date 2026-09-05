@@ -30,12 +30,18 @@ from services.logger import app_logger as log
 # ---------------------------------------------------------------------------
 
 # The all-sky match tolerances (50/35/40 px etc.) were tuned at the reference
-# resolution, where the trimmed sky-circle radius is ~1563 px (a 3552x3552 ASI
-# frame). Pixel tolerances that are correct at that radius are too loose on a
-# resized frame and too tight on a larger one, so matching behaviour drifted
-# with resize_percent. Expressing every tolerance as `ref_px * tol_scale(sky_r)`
-# makes it track the actual sky radius. At the reference radius the scale is
-# 1.0, so native-resolution behaviour is unchanged.
+# resolution (a 3552x3552 ASI frame). Pixel tolerances that are correct at that
+# radius are too loose on a resized frame and too tight on a larger one, so
+# matching behaviour drifted with resize_percent. Expressing every tolerance as
+# `ref_px * tol_scale(sky_r)` makes it track the actual sky radius.
+#
+# Provenance (issue #10 investigation): 1563 is 0.88 x 1776 — the frame-centred
+# FALLBACK estimate_sky_circle returns when its edge scan fails, not a measured
+# radius. The measured trimmed radius on the reference frames is ~1386 px, so
+# at native resolution tol_scale is ~0.89, and every gate parameter since the
+# 2026-07-01 anchor-gate sweep was validated at that effective scale. Changing
+# this constant rescales every tolerance on every rig; leave it unless the
+# whole tolerance set is re-validated together.
 REF_SKY_R_PX = 1563.0
 
 # Inward trim applied by estimate_sky_circle (star_centroid.py). The triangle
@@ -291,11 +297,44 @@ def validate_lens_polynomial(model) -> Tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 # The linear coefficient a1 IS the plate scale (px/rad); the sky-circle fit is
-# an independent measurement of the same physical quantity. They must agree.
-# Measured on the reference rig: a known-good model sits at ratio ~1.09; the
-# wrong-basin model that shipped sat at 0.57 (sky compressed to half size).
-# Lens focal scale never changes on a rig, so a wide band is safe.
-A1_SCALE_BAND = (0.7, 1.5)
+# an independent measurement of a related quantity: the radius of the
+# ILLUMINATED disc. a1_from_sky_radius() converts that radius to a1 by assuming
+# the disc edge is the horizon (theta = 90 deg). On a real rig the edge sits
+# above the horizon — the lens overfills the sensor (reference rig: the
+# horizon circle is ~2006 px on a 1776 px half-frame), or piers, domes and
+# buildings vignette the low sky (issue #10 rig: aperture ends near 23 deg
+# altitude). Both make the implied a1 an UNDER-estimate, never an over-estimate,
+# so the ratio model.a1 / implied is a one-sided physical quantity:
+#
+#   ratio = (pi/2) / theta_edge,   i.e.  edge altitude = 90 * (1 - 1/ratio) deg
+#
+# Measured ratios: reference rig known-good model 1.23 (edge ~17 deg); issue #10
+# rig, guided solve at RMS 2.4 px, ~1.35 (edge ~23 deg); the wrong-basin model
+# that shipped 0.57 — its horizon lay INSIDE the illuminated disc, which is
+# impossible. That low side is the failure mode this gate exists for.
+#
+# Floor: ratio < 1 is unphysical; 0.7 leaves 30% for estimator noise (measured
+# +/-4% on the reference frames after the exposure-invariance fix) and for
+# horizon glow pushing the measured edge outward.
+A1_SCALE_MIN = 0.7
+# Above this the model says the illuminated edge sits above 30 deg altitude:
+# plausible only with heavy obstruction, so the fit is accepted with a WARNING
+# rather than silently. The sky circle is a weak prior on a1, not a constraint.
+A1_SCALE_OBSTRUCTED = 1.5
+# Hard ceiling: an illuminated edge above 40 deg altitude is a 100 deg field,
+# not an all-sky camera. A 1.5x wrong-scale basin on the most obstructed real
+# rig we have (1.35 x 1.5 = 2.0) and the double-scale case (2.05) both fall
+# outside it; a correct fit on that rig keeps ~30% headroom below it.
+A1_SCALE_MAX = 1.8
+
+
+def implied_edge_altitude_deg(ratio: float) -> float:
+    """Altitude (deg) at which a model with a1 = ratio x a1_from_sky_radius(r)
+    places the illuminated disc's edge. 0 deg at ratio 1 (edge is the horizon);
+    negative below 1 (horizon inside the lit disc — unphysical)."""
+    if ratio <= 0:
+        return -90.0
+    return 90.0 * (1.0 - 1.0 / ratio)
 
 
 def validate_a1_scale(model, sky_r: Optional[float]) -> Tuple[bool, str]:
@@ -304,19 +343,38 @@ def validate_a1_scale(model, sky_r: Optional[float]) -> Tuple[bool, str]:
     A wrong-basin fit routinely converges with a1 at ~half the value the sky
     circle implies (the dense star field offers coincidental matches at any
     scale). The sky-circle estimate is model-free, so this is a hard physical
-    cross-check. Skipped (ok=True) when sky_r is unknown.
+    cross-check on the low side. On the high side it is only a weak prior —
+    see the band constants — so an obstructed-aperture ratio between
+    A1_SCALE_OBSTRUCTED and A1_SCALE_MAX passes with a logged warning.
+    Skipped (ok=True) when sky_r is unknown (None/0: never measured).
     """
     if not sky_r or sky_r <= 0:
         return True, "sky radius unknown — a1 scale check skipped"
     expected = a1_from_sky_radius(sky_r)
     ratio = float(getattr(model, 'a1', 0.0)) / expected
-    if A1_SCALE_BAND[0] <= ratio <= A1_SCALE_BAND[1]:
-        return True, f"a1 scale ratio {ratio:.2f} consistent with sky circle"
-    return False, (
-        f"a1={model.a1:.0f} is {ratio:.2f}x the sky-circle-implied scale "
-        f"(~{expected:.0f}) — outside [{A1_SCALE_BAND[0]}, {A1_SCALE_BAND[1]}]; "
-        "the fit landed at the wrong plate scale"
-    )
+    edge_alt = implied_edge_altitude_deg(ratio)
+    if ratio < A1_SCALE_MIN:
+        return False, (
+            f"a1={model.a1:.0f} is {ratio:.2f}x the sky-circle-implied scale "
+            f"(~{expected:.0f}) — below {A1_SCALE_MIN}: the model's horizon lies "
+            "inside the illuminated disc; the fit landed at the wrong plate scale"
+        )
+    if ratio > A1_SCALE_MAX:
+        return False, (
+            f"a1={model.a1:.0f} is {ratio:.2f}x the sky-circle-implied scale "
+            f"(~{expected:.0f}) — above {A1_SCALE_MAX}: it puts the illuminated "
+            f"edge at {edge_alt:.0f}° altitude, which is not an all-sky field; "
+            "the fit landed at the wrong plate scale"
+        )
+    if ratio > A1_SCALE_OBSTRUCTED:
+        msg = (f"a1 scale ratio {ratio:.2f} implies the illuminated edge sits at "
+               f"{edge_alt:.0f}° altitude — accepted as an obstructed aperture "
+               f"(limit {A1_SCALE_MAX})")
+        log.warning(f"Calibration: {msg}. If the horizon is actually visible in "
+                    "the frame, this fit is at the wrong plate scale.")
+        return True, msg
+    return True, (f"a1 scale ratio {ratio:.2f} consistent with sky circle "
+                  f"(illuminated edge ~{edge_alt:.0f}° altitude)")
 
 
 # ---------------------------------------------------------------------------

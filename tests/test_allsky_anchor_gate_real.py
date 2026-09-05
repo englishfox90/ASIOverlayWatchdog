@@ -18,7 +18,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from services.allsky.calibration_validate import validate_bright_anchors
+from services.allsky.calibration_validate import (
+    validate_a1_scale, validate_bright_anchors)
 from services.allsky.fisheye import FisheyeModel
 
 REPO = os.path.join(os.path.dirname(__file__), '..')
@@ -33,7 +34,7 @@ def frame_data():
     if not (os.path.exists(FRAME) and os.path.exists(CAL)):
         pytest.skip('sample_images reference data not present')
 
-    from services.allsky.star_centroid import detect_stars, estimate_sky_circle
+    from services.allsky.star_centroid import detect_stars, measure_sky_circle
     from services.allsky.catalogs import get_bright_stars
     from services.allsky.coords import radec_to_altaz
 
@@ -44,7 +45,9 @@ def frame_data():
     img = ((data.astype(np.float32) - lo) / max(hi - lo, 1) * 255
            ).clip(0, 255).astype(np.uint8)
 
-    cx, cy, r = estimate_sky_circle(img)
+    circle = measure_sky_circle(img)
+    assert circle is not None, "reference frame must yield a measured sky circle"
+    cx, cy, r = circle
     det = detect_stars(img, max_stars=200, sky_cx=cx, sky_cy=cy, sky_radius=r)
 
     m = re.search(r'_(\d{8})_(\d{6})', os.path.basename(FRAME))
@@ -60,6 +63,33 @@ def frame_data():
             ah.append((s, float(alt), float(az)))
     ah.sort(key=lambda x: x[0]['vmag'])
     return {'above_horizon': ah, 'detected': det, 'sky_r': r}
+
+
+def _incident_model():
+    """The 2026-06-23 shipped wrong-basin fit, scaled to this frame size,
+    with the mirror corrected so only the gate under test can reject it."""
+    s = 3552.0 / 2628.0
+    return FisheyeModel(
+        cx=1154.452083684348 * s, cy=1322.8234646056446 * s,
+        a1=480.5981324229242 * s, a3=19.99999999975631 * s,
+        a5=-12.349397496767505 * s, roll=-0.20656450436385085,
+        axis_alt=78.18606880664784, axis_az=12.576781341950102,
+        east_left=True)
+
+
+def test_known_good_model_passes_a1_gate(frame_data):
+    """The sky circle is a weak prior on a1: the known-good model's ratio
+    against the MEASURED radius is ~1.23 (the horizon circle overfills the
+    sensor on this rig) and must pass without the obstruction warning."""
+    ok, msg = validate_a1_scale(FisheyeModel.load(CAL), frame_data['sky_r'])
+    assert ok, msg
+    assert 'obstructed' not in msg
+
+
+def test_incident_model_fails_a1_gate(frame_data):
+    ok, msg = validate_a1_scale(_incident_model(), frame_data['sky_r'])
+    assert not ok
+    assert 'skipped' not in msg
 
 
 def test_known_good_model_passes(frame_data):
@@ -91,17 +121,8 @@ def test_rolled_model_fails(frame_data):
 
 
 def test_incident_wrong_basin_model_fails(frame_data):
-    """The 2026-06-23 shipped wrong-basin fit (scaled to this frame size),
-    with the mirror corrected so the anchor gate itself is what's tested."""
-    s = 3552.0 / 2628.0
-    model = FisheyeModel(
-        cx=1154.452083684348 * s, cy=1322.8234646056446 * s,
-        a1=480.5981324229242 * s, a3=19.99999999975631 * s,
-        a5=-12.349397496767505 * s, roll=-0.20656450436385085,
-        axis_alt=78.18606880664784, axis_az=12.576781341950102,
-        east_left=True)
     ok, msg = validate_bright_anchors(
-        model, frame_data['above_horizon'], frame_data['detected'],
+        _incident_model(), frame_data['above_horizon'], frame_data['detected'],
         sky_r=frame_data['sky_r'])
     assert not ok
     assert 'skipping' not in msg

@@ -12,13 +12,20 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+from services.allsky import calibration_validate as cv_module
 from services.allsky.calibration_validate import (
+    A1_SCALE_MAX,
+    A1_SCALE_MIN,
+    A1_SCALE_OBSTRUCTED,
     A3_MAX,
     A3_MIN,
     REF_SKY_R_PX,
+    a1_from_sky_radius,
+    implied_edge_altitude_deg,
     score_matches_with_spread,
     tol_scale,
     validate_a1_scale,
@@ -368,6 +375,77 @@ class TestValidateA1Scale:
     def test_double_scale_rejected(self):
         ok, _ = validate_a1_scale(FisheyeModel(a1=2400.0), 1563.0)
         assert not ok
+
+    def test_known_good_model_accepted_at_measured_radius(self, monkeypatch):
+        """The reference rig's known-good a1 against the radius the estimator
+        actually measures on its frames (~1386, ratio ~1.23) — the horizon
+        circle overfills the sensor there, so the ratio is legitimately > 1."""
+        warned = []
+        monkeypatch.setattr(cv_module.log, 'warning', lambda m: warned.append(m))
+        ok, msg = validate_a1_scale(FisheyeModel(a1=1277.18), 1386.0)
+        assert ok, msg
+        assert 'consistent' in msg
+        assert warned == []
+
+    def test_obstructed_aperture_rig_accepted_without_warning(self):
+        """Issue #10 rig: aperture ends near 23 deg altitude, so the stable
+        sky-circle-implied a1 (~950 from r~1260) sits 1.35x below the true
+        1283 proven by a guided solve at RMS 2.4 px. Must pass cleanly."""
+        ok, msg = validate_a1_scale(FisheyeModel(a1=1283.0), 1260.0)
+        assert ok, msg
+        assert 'consistent' in msg
+
+    def test_heavily_obstructed_ratio_accepted_with_warning(self, monkeypatch):
+        """Between A1_SCALE_OBSTRUCTED and A1_SCALE_MAX the sky circle is a
+        weak prior: accept, but say so at WARNING."""
+        warned = []
+        monkeypatch.setattr(cv_module.log, 'warning', lambda m: warned.append(m))
+        expected = a1_from_sky_radius(1000.0)
+        ok, msg = validate_a1_scale(FisheyeModel(a1=expected * 1.65), 1000.0)
+        assert ok, msg
+        assert 'obstructed' in msg
+        assert len(warned) == 1 and 'wrong plate scale' in warned[0]
+
+    def test_ratio_above_ceiling_rejected(self):
+        expected = a1_from_sky_radius(1000.0)
+        ok, msg = validate_a1_scale(FisheyeModel(a1=expected * 1.9), 1000.0)
+        assert not ok
+        assert 'not an all-sky field' in msg
+
+    def test_ratio_below_floor_names_the_physics(self):
+        expected = a1_from_sky_radius(1000.0)
+        ok, msg = validate_a1_scale(FisheyeModel(a1=expected * 0.65), 1000.0)
+        assert not ok
+        assert 'inside the illuminated disc' in msg
+
+    def test_band_edges(self):
+        expected = a1_from_sky_radius(1000.0)
+        assert validate_a1_scale(FisheyeModel(a1=expected * A1_SCALE_MIN), 1000.0)[0]
+        assert validate_a1_scale(FisheyeModel(a1=expected * A1_SCALE_MAX), 1000.0)[0]
+        assert not validate_a1_scale(FisheyeModel(a1=expected * (A1_SCALE_MIN - 0.01)), 1000.0)[0]
+        assert not validate_a1_scale(FisheyeModel(a1=expected * (A1_SCALE_MAX + 0.01)), 1000.0)[0]
+
+    def test_collapsed_dark_frame_radius_would_reject_correct_model(self):
+        """Documents why the estimator had to be fixed upstream: the r=577
+        reading from the issue #10 log implies a1~432, so the correct
+        a1=1283 is 2.97x and no sane band admits it. The gate is only as
+        good as the radius it is given."""
+        ok, _ = validate_a1_scale(FisheyeModel(a1=1283.0), 577.0)
+        assert not ok
+
+
+class TestImpliedEdgeAltitude:
+    def test_ratio_one_is_the_horizon(self):
+        assert implied_edge_altitude_deg(1.0) == pytest.approx(0.0)
+
+    def test_band_constants_map_to_altitudes(self):
+        assert implied_edge_altitude_deg(A1_SCALE_OBSTRUCTED) == pytest.approx(30.0)
+        assert implied_edge_altitude_deg(A1_SCALE_MAX) == pytest.approx(40.0)
+        assert implied_edge_altitude_deg(2.0) == pytest.approx(45.0)
+
+    def test_below_one_is_unphysical(self):
+        assert implied_edge_altitude_deg(0.7) < 0
+        assert implied_edge_altitude_deg(0.0) == -90.0
 
 
 # ===================================================================

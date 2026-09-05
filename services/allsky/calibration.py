@@ -29,7 +29,7 @@ except Exception as _e:
     _scipy_import_error = f"{type(_e).__name__}: {_e}"
     log.error(f"scipy import failed at module load: {_scipy_import_error}")
 
-from .star_centroid import detect_stars, estimate_sky_circle
+from .star_centroid import detect_stars, fallback_sky_circle, measure_sky_circle
 from .fisheye import FisheyeModel
 from .catalogs import get_bright_stars
 from .coords import radec_to_altaz
@@ -85,17 +85,31 @@ def calibrate(
         dt = datetime.now(timezone.utc)
 
     # --- Step 1: Auto-detect sky circle, then detect stars inside it ---
-    # estimate_sky_circle is called once here so both detection and the
-    # initial optical-centre guess use the same circle.
+    # The sky circle is measured once here so both detection and the initial
+    # optical-centre guess use the same circle.
+    # _sky_r_ref is the radius the scale-dependent gates and tolerances see:
+    # None when the circle was never measured, so they run at native scale
+    # instead of judging the fit against an assumed frame-filling disc.
+    _sky_r_ref: Optional[float]
     if sky_radius_px is not None:
         img_h, img_w = _get_image_size(image)
         _sky_cx = image_cx if image_cx is not None else img_w / 2.0
         _sky_cy = image_cy if image_cy is not None else img_h / 2.0
         _sky_r  = sky_radius_px
-    else:
-        _sky_cx, _sky_cy, _sky_r = estimate_sky_circle(image)
-        log.info(f"Calibration: sky circle estimated at "
+        _sky_r_ref = _sky_r
+    elif (circle := measure_sky_circle(image)) is not None:
+        _sky_cx, _sky_cy, _sky_r = circle
+        _sky_r_ref = _sky_r
+        log.info(f"Calibration: sky circle measured at "
                  f"({_sky_cx:.0f}, {_sky_cy:.0f}) r={_sky_r:.0f}px")
+    else:
+        img_h, img_w = _get_image_size(image)
+        _sky_cx, _sky_cy, _sky_r = fallback_sky_circle(img_w, img_h)
+        _sky_r_ref = None
+        log.warning(
+            "Calibration: sky circle NOT measured (no illuminated disc found) — "
+            f"detecting inside a frame-centred fallback r={_sky_r:.0f}px; the "
+            "a1-scale gate is skipped and tolerances run at native scale")
 
     detected = detect_stars(
         image, max_stars=max_stars,
@@ -129,7 +143,7 @@ def calibrate(
 
     # Resolution-independent match tolerances: scale every pixel tolerance by
     # the actual sky radius relative to the reference resolution (F10).
-    _tol_scale = tol_scale(_sky_r)
+    _tol_scale = tol_scale(_sky_r_ref)
 
     # --- Step 4: Grid search for best initial a1 ---
     model, matches = _find_best_initial_model(
@@ -187,9 +201,9 @@ def calibrate(
     #       rejects spurious density-noise fits that look fine on average
     #       but miss Sirius/Vega/etc. by 100+ px.
     poly_ok, poly_msg = validate_lens_polynomial(model)
-    scale_ok, scale_msg = validate_a1_scale(model, _sky_r)
+    scale_ok, scale_msg = validate_a1_scale(model, _sky_r_ref)
     anch_ok, anch_msg = validate_bright_anchors(
-        model, above_horizon, detected, sky_r=_sky_r)
+        model, above_horizon, detected, sky_r=_sky_r_ref)
     if not (poly_ok and scale_ok and anch_ok):
         reason = "; ".join(m for ok, m in ((poly_ok, poly_msg),
                                            (scale_ok, scale_msg),

@@ -10,10 +10,14 @@ All-sky fisheye images have a circular sky region surrounded by black
 corners. ``estimate_sky_circle()`` detects that circle automatically
 so detections are restricted to the actual sky, avoiding equipment,
 buildings and corner noise.  ``detect_stars()`` calls it automatically
-when no sky circle is supplied.
+when no sky circle is supplied.  ``measure_sky_circle()`` is the same
+measurement without the frame-centred fallback (returns None instead) for
+callers that must not mistake an assumed radius for a measured one.
 """
 import numpy as np
 from typing import List, Tuple, Optional
+
+from services.logger import app_logger as log
 
 try:
     import cv2
@@ -28,21 +32,43 @@ except ImportError:
     _PIL_AVAILABLE = False
 
 
-def estimate_sky_circle(
+# Radius returned when the boundary cannot be measured, as a fraction of the
+# half-frame: a fisheye whose horizon circle slightly overfills the sensor,
+# trimmed by the default trim_fraction. It is an ASSUMPTION about the rig, not
+# a measurement, which is why the fallback path always logs at WARNING and
+# why measure_sky_circle() exists for callers that must tell the two apart.
+SKY_CIRCLE_FALLBACK_FRACTION = 0.88
+
+_N_SCAN_RAYS = 72
+
+# Minimum fraction of scan rays that must find a boundary point for the
+# circle fit to be trusted.
+_MIN_EDGE_RAY_FRACTION = 1.0 / 3.0
+
+
+def fallback_sky_circle(width: int, height: int) -> Tuple[float, float, float]:
+    """Frame-centred sky circle assumed when the boundary cannot be measured."""
+    half = min(width, height) / 2.0
+    return width / 2.0, height / 2.0, half * SKY_CIRCLE_FALLBACK_FRACTION
+
+
+def measure_sky_circle(
     image,
     trim_fraction: float = 0.15,
-) -> Tuple[float, float, float]:
+) -> Optional[Tuple[float, float, float]]:
     """
-    Automatically estimate the sky circle in an all-sky fisheye image.
+    Measure the sky circle in an all-sky fisheye image, or return None.
 
-    The fisheye lens produces a circular sky region surrounded by
+    The fisheye lens produces a circular illuminated region surrounded by
     black/dark corners.  This function finds that circle by:
-      1. Heavy Gaussian blur — suppresses stars, planets, equipment
-      2. Adaptive threshold using corner floor vs mid-ring sky brightness
-      3. Radial scan from outside→in to find the boundary edge points
-      4. Outlier filtering (removes mount shadows and bright-building outliers)
-      5. Algebraic circle fit to recover the true (possibly off-centre) optical centre
-      6. Inward trim by trim_fraction to exclude horizon buildings/equipment
+      1. Percentile stretch (p1 -> 0, p99 -> 255) so the threshold below is
+         relative to the frame's own brightness range rather than absolute
+      2. Heavy Gaussian blur — suppresses stars, planets, equipment
+      3. Threshold derived from the dark-corner floor and mid-ring sky level
+      4. Radial scan from outside->in to find the boundary edge points
+      5. Outlier filtering (removes mount shadows and bright-building outliers)
+      6. Algebraic circle fit to recover the true (possibly off-centre) optical centre
+      7. Inward trim by trim_fraction to exclude horizon buildings/equipment
 
     Args:
         image: PIL Image, numpy uint8 array (H×W or H×W×3), or file path.
@@ -51,62 +77,110 @@ def estimate_sky_circle(
                        Range: 0.0 (use raw fit) to 0.40 (very aggressive crop).
 
     Returns:
-        (cx, cy, radius) in pixels.
-        Falls back to (w/2, h/2, min(w,h)*0.45) on failure.
+        (cx, cy, radius) in pixels, or None when the image is unreadable or
+        too few scan rays found a boundary (no illuminated disc to measure).
+        Use estimate_sky_circle() to get a frame-centred fallback instead.
     """
     if not _CV2_AVAILABLE:
         raise RuntimeError("opencv-python is required for sky circle detection")
 
     gray = _to_gray(image)
     if gray is None:
-        return 960.0, 540.0, 480.0
+        return None
+    circle, _n_edges = _scan_sky_circle(gray, trim_fraction)
+    return circle
 
+
+def estimate_sky_circle(
+    image,
+    trim_fraction: float = 0.15,
+) -> Tuple[float, float, float]:
+    """
+    Sky circle for an all-sky fisheye image, with a frame-centred fallback.
+
+    Same measurement as measure_sky_circle(). When the boundary cannot be
+    measured this returns fallback_sky_circle() and logs a WARNING saying so
+    — the returned radius is then an assumption about the rig, not a
+    measurement, and must not be read as one. Callers that gate on the
+    radius (a1 plausibility, match tolerances) should prefer
+    measure_sky_circle() and treat None as "unknown".
+
+    Args:
+        image: PIL Image, numpy uint8 array (H×W or H×W×3), or file path.
+        trim_fraction: see measure_sky_circle().
+
+    Returns:
+        (cx, cy, radius) in pixels.
+    """
+    if not _CV2_AVAILABLE:
+        raise RuntimeError("opencv-python is required for sky circle detection")
+
+    gray = _to_gray(image)
+    if gray is None:
+        log.warning("Sky circle NOT measured: unsupported image input — "
+                    "assuming a 1920x1080 frame-centred circle")
+        return fallback_sky_circle(1920, 1080)
+
+    circle, n_edges = _scan_sky_circle(gray, trim_fraction)
+    if circle is not None:
+        return circle
+
+    h, w = gray.shape
+    cx, cy, r = fallback_sky_circle(w, h)
+    log.warning(
+        f"Sky circle NOT measured: boundary found on only {n_edges}/{_N_SCAN_RAYS} "
+        f"scan rays (no illuminated disc against the frame corners). Using the "
+        f"frame-centred fallback ({cx:.0f}, {cy:.0f}) r={r:.0f}px — an assumption, "
+        "not a measurement."
+    )
+    return cx, cy, r
+
+
+def _scan_sky_circle(
+    gray: np.ndarray,
+    trim_fraction: float,
+) -> Tuple[Optional[Tuple[float, float, float]], int]:
+    """Radial edge scan + circle fit. Returns ((cx, cy, r) or None, n_edge_rays)."""
     h, w = gray.shape
     half = min(h, w) / 2.0
 
-    # ---------------------------------------------------------------
-    # Strategy: radial edge scan + algebraic circle fit
-    #
-    # Shoot 72 rays outward from the image centre; find where the blurred
-    # signal drops below 12% of the mid-ring sky brightness.  Collect those
-    # edge points, filter outliers (bright buildings push some edges out),
-    # then fit a circle with algebraic least-squares to recover the TRUE
-    # optical centre — which is often physically off-centre in the frame.
-    #
-    # KEY: sample sky brightness from the 20–40% radial band, NOT from the
-    # image centre.  The centre is often blocked by a telescope mount/pier
-    # which gives near-zero brightness → thresh collapses to the 6.0 floor
-    # → buildings at the edge are never detected as outside-sky → all 72
-    # edges land at max_r → circle fit returns the image centre.
-    # Sampling from the mid-ring where open sky is reliably visible gives a
-    # realistic reference brightness so the threshold actually fires.
-    # ---------------------------------------------------------------
+    # The threshold below has absolute floors (in 8-bit levels) that only make
+    # sense when the frame uses its dynamic range. A correctly exposed all-sky
+    # frame straight from the camera has a sky median near 2/255 (issue #10):
+    # on it the floors dominate, the boundary is found wherever the blurred
+    # signal happens to cross ~10 ADU, and a fixed camera read radii between
+    # 569px and the fallback on a single night. Stretching to the frame's own
+    # p1-p99 range first makes the scan invariant to exposure scale. The
+    # stretch is idempotent on already-stretched input (FITS path).
+    gray = percentile_stretch(gray)
+
     k = max(51, (min(h, w) // 20)) | 1
     blurred = cv2.GaussianBlur(gray, (k, k), 0).astype(np.float32)
 
     img_cx = w / 2.0
     img_cy = h / 2.0
-    n_angles = 72
+    n_angles = _N_SCAN_RAYS
     max_r = int(min(img_cx, img_cy, w - img_cx, h - img_cy) * 0.99)
     step = 2
 
     edge_pts: List[Tuple[float, float]] = []
     raw_radii: List[float] = []
 
-    # Compute two reference levels that bracket the fisheye boundary:
+    # Two reference levels bracket the fisheye boundary:
     #
     # corner_ref: typical brightness of genuinely dark outside-sky pixels.
     #   p10 of the full blurred image captures the dark corners/margins, even
     #   if ~30% of pixels are inside the bright sky circle.
     #
-    # sky_ref: typical brightness well inside the fisheye circle.
-    #   Sampled from the 20–40% radial band (above the telescope-mount shadow)
-    #   over all angles combined so shadow angles don't dominate.
+    # sky_ref: typical brightness well inside the fisheye circle, sampled from
+    #   the 20-40% radial band over all angles combined. NOT the image centre:
+    #   that is often blocked by a telescope mount/pier, which would collapse
+    #   the reference to near-zero and leave every ray ending at max_r.
     #
-    # thresh_global: sits at 50% above the corner floor (corner_ref × 1.5) OR
-    #   45% of the way from corner to sky — whichever is lower — ensuring it
-    #   clears the JPEG noise floor / ambient corner glow while still being
-    #   below the dimmest in-sky regions near the horizon.
+    # thresh_global: the lower of (corner_ref x 1.5) and 45% of the way from
+    #   corner to sky, floored at corner_ref + 5. With black corners this is
+    #   ~10/255 of the stretched range — the level a blurred sky must exceed
+    #   to count as inside the disc.
     flat_blurred = blurred.flatten()
     corner_ref = float(np.percentile(flat_blurred, 10))
     corner_ref = max(corner_ref, 5.0)
@@ -126,8 +200,8 @@ def estimate_sky_circle(
     sky_ref = max(sky_ref, corner_ref * 1.5, 15.0)
 
     thresh_global = min(
-        corner_ref * 1.5,                                    # 50% above corner floor
-        corner_ref + (sky_ref - corner_ref) * 0.45,         # 45% into sky-corner gap
+        corner_ref * 1.5,
+        corner_ref + (sky_ref - corner_ref) * 0.45,
     )
     thresh_global = max(thresh_global, corner_ref + 5.0)
 
@@ -145,15 +219,15 @@ def estimate_sky_circle(
                 edge_pts.append((float(ex), float(ey)))
                 break
 
-    if len(edge_pts) < n_angles // 3:
-        return img_cx, img_cy, half * 0.88
+    if len(edge_pts) < n_angles * _MIN_EDGE_RAY_FRACTION:
+        return None, len(edge_pts)
 
     # Filter outliers in BOTH directions:
     #   High outliers: bright buildings just outside the fisheye push the edge
-    #     outward → cut anything > 1.15× median.
+    #     outward -> cut anything > 1.15x median.
     #   Low outliers: telescope mount / pier blocks some rays well inside the
     #     sky circle, making the scan return the last bright point of the pier
-    #     body rather than the fisheye boundary → cut anything < 0.50× median.
+    #     body rather than the fisheye boundary -> cut anything < 0.50x median.
     median_r = float(np.median(raw_radii))
     clean_pts = [pt for pt, r in zip(edge_pts, raw_radii)
                  if median_r * 0.50 <= r <= median_r * 1.15]
@@ -177,7 +251,7 @@ def estimate_sky_circle(
     radius = r_fit * (1.0 - trim_fraction)
     radius = min(radius, half * 0.92)
 
-    return cx_fit, cy_fit, radius
+    return (cx_fit, cy_fit, radius), len(edge_pts)
 
 
 def detect_stars(

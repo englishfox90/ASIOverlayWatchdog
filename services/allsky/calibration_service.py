@@ -28,7 +28,7 @@ from PySide6.QtCore import QObject, Signal, QThread
 
 from services.logger import app_logger as log
 
-from .star_centroid import detect_stars, estimate_sky_circle
+from .star_centroid import detect_stars, measure_sky_circle
 from .fisheye import FisheyeModel
 from .catalogs import get_bright_stars
 from .coords import radec_to_altaz
@@ -434,7 +434,12 @@ class CalibrationService(QObject):
     def _detect_frame(image, dt, lat, lon) -> Optional[dict]:
         """Detect stars and compute catalog AltAz for one frame."""
         try:
-            sky_cx, sky_cy, sky_r = estimate_sky_circle(image)
+            circle = measure_sky_circle(image)
+            if circle is None:
+                log.debug("CalibrationService: no measurable sky circle "
+                          "(no illuminated disc) — skipping frame")
+                return None
+            sky_cx, sky_cy, sky_r = circle
             detected = detect_stars(
                 image, max_stars=200,
                 sky_cx=sky_cx, sky_cy=sky_cy, sky_radius=sky_r,

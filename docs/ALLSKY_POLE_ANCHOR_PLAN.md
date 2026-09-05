@@ -229,3 +229,35 @@ Design:
 - Prerequisite evidence before implementing: one full night of refinement logs
   from the healthy 2026-07-02 model (do refinements match? does the a1 gate
   reject any? how much does the estimator wobble frame-to-frame?).
+
+#### Update 2026-09-05 (issue #10) — the estimator wobble had a root cause
+
+The "r = 1250–1344 across attempts" above was not noise: `estimate_sky_circle`
+thresholded the *raw linear* frame with absolute 8-bit floors, so its radius
+was a function of exposure. A fixed camera on the #10 rig read
+569 / 577 / 578 / 964 / 982 / 1029 / 1145 / 1563 px across one night, and the
+1563 was the `half × 0.88` edge-scan fallback — numerically identical to
+`REF_SKY_R_PX`, which itself turns out to be that fallback, not a measurement
+(the estimator reads ~1386 px on the reference frames; the 2026-07-01 gate sweep
+was therefore validated at tol_scale ≈ 0.89). Fixes:
+
+- `star_centroid.py`: percentile-stretch before the edge scan (exposure-invariant;
+  idempotent on the FITS path). Reference frames: x0.1–x2.0 brightness spread
+  went from 120–177 px to 15–42 px; linear frames with a 1–40 ADU sky median now
+  read within ±4% of native instead of 1004 px–fallback. `measure_sky_circle()`
+  returns None on failure; `estimate_sky_circle()` logs a WARNING and returns
+  `fallback_sky_circle()` — an assumption, never silently a "measurement".
+- `calibration_validate.validate_a1_scale`: the sky-circle-implied a1 is a lower
+  bound (the lit edge is always above the horizon on real rigs), so the band is
+  now one-sided in spirit: hard floor 0.7, hard ceiling 1.8 (lit edge at 40°
+  altitude), warning zone 1.5–1.8. The #10 rig's true ratio is ~1.35 (aperture
+  ends near 23°); the reference rig is 1.23. Messages report the implied edge
+  altitude.
+- `calibrate()` / `CalibrationService._detect_frame` use `measure_sky_circle`;
+  an unmeasured circle skips the a1 gate and runs tolerances at native scale
+  (Calibrate Now) or skips the frame (service). Gates are never judged against
+  the fallback radius.
+
+Still open: P7 proper (model-derived references once a model is trusted). The
+`detect_stars` PIL path is also unstretched — a linear median-2 frame found 67
+stars vs 200 stretched on the moonlit `lum_20260107` frame; not changed here.
