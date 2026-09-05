@@ -234,6 +234,7 @@ class AllSkySettingsPanel(QScrollArea):
         self._build_header()
         self._build_calibration_card()
         self._build_master_toggle()
+        self._build_burn_in_card()
         self._build_constellations_card()
         self._build_bright_stars_card()
         self._build_messier_card()
@@ -297,6 +298,22 @@ class AllSkySettingsPanel(QScrollArea):
         self._master_toggle.toggled.connect(self._on_setting_changed)
         vl.addWidget(self._master_toggle)
         self._top_n = self._spin_row(vl, "Max objects visible", 5, 50, 15, 5)
+        self._layout.addWidget(card)
+
+    def _build_burn_in_card(self):
+        card, vl = _section_card("Burn overlay into output")
+        desc = CaptionLabel(
+            "Off by default: the overlay only shows in this app's live preview. "
+            "Turn one on to bake it into that destination's actual pixels."
+        )
+        desc.setWordWrap(True)
+        vl.addWidget(desc)
+        self._burn_saved_file = LayerToggleRow("Saved image (also Discord)", default=False)
+        self._burn_web = LayerToggleRow("Web server (also Image Library)", default=False)
+        self._burn_timelapse = LayerToggleRow("Timelapse video", default=False)
+        for row in (self._burn_saved_file, self._burn_web, self._burn_timelapse):
+            row.toggled.connect(self._on_setting_changed)
+            vl.addWidget(row)
         self._layout.addWidget(card)
 
     def _build_constellations_card(self):
@@ -401,6 +418,11 @@ class AllSkySettingsPanel(QScrollArea):
         self._master_toggle.set_checked(c.get('enabled', False))
         self._top_n.setValue(int(c.get('top_n', 15)))
 
+        burn = c.get('burn_into_output', {})
+        self._burn_saved_file.set_checked(burn.get('saved_file', False))
+        self._burn_web.set_checked(burn.get('web', False))
+        self._burn_timelapse.set_checked(burn.get('timelapse', False))
+
         con = c.get('constellations', {})
         self._con_enabled.set_checked(con.get('enabled', True))
         self._con_lines.set_checked(con.get('lines', True))
@@ -432,6 +454,11 @@ class AllSkySettingsPanel(QScrollArea):
             'enabled': self._master_toggle.is_checked(),
             'calibration_file': '',  # Preserved by controller from actual config
             'top_n': self._top_n.value(),
+            'burn_into_output': {
+                'saved_file': self._burn_saved_file.is_checked(),
+                'web': self._burn_web.is_checked(),
+                'timelapse': self._burn_timelapse.is_checked(),
+            },
             'grid': {
                 'enabled': False, 'horizon': False,
                 'altitude_rings': False, 'cardinal_labels': False,

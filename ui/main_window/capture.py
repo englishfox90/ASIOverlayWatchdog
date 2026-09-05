@@ -280,8 +280,12 @@ class _MainWindowCaptureMixin(_CameraDetectMixin, _CaptureWatchdogMixin):
 
         if not self.watch_controller:
             self.watch_controller = WatchControllerQt(self)
+            # Watch mode has its own pipeline (services/processor.py) that never
+            # renders the all-sky overlay into the saved file — burn_into_output
+            # only applies to the camera-mode path through image_processor.py.
+            # dispatch_image is the same clean frame until that gap is closed.
             self.watch_controller.image_processed.connect(
-                lambda preview, out, path: self._on_image_processed(preview, out, {}, path)
+                lambda preview, out, path: self._on_image_processed(preview, out, {}, path, out)
             )
 
         watch_dir = self.config.get('watch_directory', '')

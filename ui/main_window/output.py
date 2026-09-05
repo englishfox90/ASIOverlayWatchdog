@@ -213,7 +213,8 @@ class _MainWindowOutputMixin:
                 self._cached_raw_image, self._cached_raw_metadata
             )
 
-    def _on_image_processed(self, preview_image, output_image, metadata: dict, output_path: str):
+    def _on_image_processed(self, preview_image, output_image, metadata: dict, output_path: str,
+                             dispatch_image=None):
         try:
             self.last_processed_image = output_path
             self.preview_metadata = metadata
@@ -228,7 +229,13 @@ class _MainWindowOutputMixin:
                 self._cached_raw_metadata = metadata
 
             # preview_image may carry the all-sky overlay (GUI only).
-            # output_image is always clean — sent to file sinks and servers.
+            # output_image is always clean — the watch-mode cache above and any
+            # future consumer of the "clean" frame can rely on that.
+            # dispatch_image feeds the web server + Image Library; it is
+            # output_image unless allsky_overlay.burn_into_output.web opted in
+            # (falls back to output_image for callers that don't supply it).
+            if dispatch_image is None:
+                dispatch_image = output_image
             self.live_panel.update_preview(preview_image, metadata)
             self.status_strip.update_from_metadata(metadata)
             self.telemetry_bar.update_from_metadata(metadata)
@@ -244,9 +251,9 @@ class _MainWindowOutputMixin:
             # archive (a full-res PIL copy), the web push (a full-res PNG encode
             # then decode + LANCZOS downsize), and Discord all used to run here,
             # synchronously, on the GUI thread — a multi-hundred-ms freeze every
-            # frame. output_image is never mutated after the processor emits it,
+            # frame. dispatch_image is never mutated after the processor emits it,
             # so the worker can own it without a defensive copy on this thread.
-            self._dispatch_outputs(output_path, output_image, metadata, has_outputs)
+            self._dispatch_outputs(output_path, dispatch_image, metadata, has_outputs)
 
             if has_outputs:
                 self.app_bar.set_status('sending')
@@ -554,13 +561,13 @@ class _MainWindowOutputMixin:
         )
         self._output_dispatch_thread.start()
 
-    def _dispatch_outputs(self, output_path, output_image, metadata, has_outputs):
+    def _dispatch_outputs(self, output_path, dispatch_image, metadata, has_outputs):
         """Queue the library archive + server push for the background worker.
 
         Non-blocking. Drops the oldest pending job if the worker has fallen
         behind, so a slow encode never stalls the capture/GUI thread.
         """
-        self._put_dispatch_job((output_path, output_image, metadata, has_outputs))
+        self._put_dispatch_job((output_path, dispatch_image, metadata, has_outputs))
 
     def _put_dispatch_job(self, job):
         """Put a job on the dispatch queue, dropping the oldest if it is full."""
@@ -578,12 +585,12 @@ class _MainWindowOutputMixin:
             job = self._output_dispatch_queue.get()
             if job is self._OUTPUT_STOP:
                 break
-            output_path, output_image, metadata, has_outputs = job
+            output_path, dispatch_image, metadata, has_outputs = job
             try:
                 if self.image_library:
-                    self.image_library.enqueue(output_image, metadata)
+                    self.image_library.enqueue(dispatch_image, metadata)
                 if has_outputs:
-                    self._push_to_output_servers(output_path, output_image, metadata)
+                    self._push_to_output_servers(output_path, dispatch_image, metadata)
             except Exception as e:
                 app_logger.error(f"Output dispatch failed: {e}")
                 app_logger.error(traceback.format_exc())

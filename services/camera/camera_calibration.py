@@ -2,9 +2,15 @@
 Camera calibration and auto-exposure algorithms for ZWO ASI cameras
 """
 import threading
+import time
 import numpy as np
 from .camera_utils import calculate_brightness, check_clipping, call_with_timeout
 from ..logger import app_logger
+
+# Minimum time between repeated "pinned at max exposure" warnings, once the
+# state persists past the initial warning. Keeps a 24/7 rig from flooding the
+# log (the reported case hit this 157 times in one night with no throttling).
+PINNED_EXPOSURE_WARNING_INTERVAL_SEC = 900  # 15 minutes
 
 
 class CameraCalibration:
@@ -44,6 +50,12 @@ class CameraCalibration:
 
         # Abort flag: set this to interrupt a running run_calibration() loop
         self._abort = threading.Event()
+
+        # Throttle state for the "pinned at max exposure, still too dark" warning.
+        # Tracks whether we are currently in that state (so clearing it re-arms
+        # an immediate warning next time) and when we last logged it.
+        self._pinned_exposure_warned = False
+        self._pinned_exposure_last_warned_at = None
 
     def abort(self):
         """Signal any running run_calibration() to stop at the next iteration."""
@@ -264,6 +276,42 @@ class CameraCalibration:
         self.log(f"Calibration did not converge after {max_attempts} attempts. Continuing with current settings.")
         return False
 
+    def _handle_pinned_exposure_warning(self, is_pinned, brightness):
+        """
+        Warn (throttled) when auto-exposure is pinned at max exposure and the
+        image is still materially below target - a state exposure adjustment
+        alone can never fix.
+
+        Args:
+            is_pinned: True if exposure is at/above max_exposure_sec and
+                brightness is still below the acceptable lower bound
+            brightness: Current measured brightness, for the warning message
+        """
+        if not is_pinned:
+            self._pinned_exposure_warned = False
+            self._pinned_exposure_last_warned_at = None
+            return
+
+        now = time.monotonic()
+        should_warn = (
+            not self._pinned_exposure_warned
+            or self._pinned_exposure_last_warned_at is None
+            or (now - self._pinned_exposure_last_warned_at) >= PINNED_EXPOSURE_WARNING_INTERVAL_SEC
+        )
+        if not should_warn:
+            return
+
+        self._pinned_exposure_warned = True
+        self._pinned_exposure_last_warned_at = now
+        app_logger.warning(
+            "Auto-exposure pinned at max exposure "
+            f"({self.exposure_seconds*1000:.2f}ms of {self.max_exposure_sec*1000:.2f}ms max) "
+            f"but brightness={brightness:.1f} is still far below target={self.target_brightness}. "
+            "Exposure has no more headroom to close this gap. Either lower the auto-exposure "
+            f"target brightness (currently {self.target_brightness}, which may be too high for "
+            f"a dark sky) or raise camera gain (currently {self.gain})."
+        )
+
     def adjust_exposure_auto(self, img_array):
         """
         Adjust exposure based on image brightness
@@ -304,6 +352,13 @@ class CameraCalibration:
             # Calculate acceptable range (±20% of target)
             lower_bound = self.target_brightness * 0.8
             upper_bound = self.target_brightness * 1.2
+
+            # Pinned-at-max-exposure detection: once exposure is already at the
+            # ceiling, no further increase can happen, so a dark frame here will
+            # never converge on its own. Flag it (throttled) rather than let the
+            # loop silently retry every frame forever.
+            pinned_at_max_and_dark = brightness < lower_bound and self.exposure_seconds >= self.max_exposure_sec
+            self._handle_pinned_exposure_warning(pinned_at_max_and_dark, brightness)
 
             # DRASTIC CHANGE DETECTION
             # Compare against BASELINE brightness (post-calibration), not target

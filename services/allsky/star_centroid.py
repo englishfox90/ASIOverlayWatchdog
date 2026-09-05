@@ -421,7 +421,7 @@ def _numpy_to_gray(arr: np.ndarray) -> Optional[np.ndarray]:
     return None
 
 
-def _percentile_stretch(arr: np.ndarray) -> np.ndarray:
+def percentile_stretch(arr: np.ndarray) -> np.ndarray:
     """
     Stretch array to uint8 using 1st–99th percentile clipping.
 
@@ -436,6 +436,28 @@ def _percentile_stretch(arr: np.ndarray) -> np.ndarray:
         return np.zeros(arr.shape, dtype=np.uint8)
     scaled = (arr.astype(np.float32) - lo) / (hi - lo) * 255.0
     return scaled.clip(0, 255).astype(np.uint8)
+
+
+_percentile_stretch = percentile_stretch  # re-exported for existing callers
+
+
+def stretch_for_display(image):
+    """Return a PIL RGB copy of a linear frame, stretched for human viewing.
+
+    The guided-calibration dialog shows the raw pre-stretch frame so clicks
+    land in the same pixel space the solver fits in. On a correctly exposed
+    all-sky rig that frame has a median around 2/255 and renders as solid
+    black (issue #10), so the user cannot see the stars they are asked to
+    identify. Applying the *same* percentile stretch the detector uses means
+    what the user sees is what the centroider sees.
+
+    Display only — never feed the result back into detection or fitting.
+    """
+    if not _PIL_AVAILABLE:
+        raise RuntimeError("Pillow is required for stretch_for_display")
+
+    arr = np.asarray(image.convert('RGB') if hasattr(image, 'convert') else image)
+    return Image.fromarray(percentile_stretch(arr))
 
 
 def _estimate_background(gray: np.ndarray) -> Tuple[float, float]:

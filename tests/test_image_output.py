@@ -305,6 +305,119 @@ class TestAllSkyOutputCleanliness:
             "all-sky overlay leaked into the output render — it must be "
             "preview-only (Phase 1 requirement)")
 
+    # -- Opt-in per-destination burn-in (GitHub issue #10) -------------------
+    #
+    # These exercise the routing worker (ImageProcessorWorker._process_task)
+    # rather than add_overlays() directly, since burn-in is chosen at the
+    # pipeline level, reusing the preview render — it never touches add_overlays.
+
+    def _run_worker(self, tmp_path, burn_into_output: dict):
+        """Run one frame through ImageProcessorWorker._process_task with a
+        live calibration + the given burn_into_output flags.
+
+        Returns (preview_img, output_img, output_path, dispatch_img).
+        weather is left unconfigured so the observing-window gate falls
+        through to True deterministically (no real-time sun check) — see
+        services/observing_window.py `_evaluate`.
+        """
+        pytest.importorskip("PySide6.QtWidgets")
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+        from ui.controllers.image_processor import ImageProcessorWorker, ImageProcessingTask
+
+        cal_path = self._valid_calibration(tmp_path)
+        allsky_cfg = self._allsky_config(cal_path)
+        allsky_cfg['burn_into_output'] = burn_into_output
+
+        config = {
+            'output_dir': str(tmp_path),
+            'output_format': 'PNG',
+            'resize_percent': 100,
+            'auto_stretch': {'enabled': False},
+            'overlays': [],
+            'dev_mode': {'enabled': False},
+            'ml_contribution': {'enabled': False},
+            'ml_models': {'enabled': False},
+            'meteor': {},
+            'sharpening': {},
+            'allsky_overlay': allsky_cfg,
+            'weather': {},
+        }
+        img = Image.new('RGB', (1920, 1080), (10, 10, 30))
+        metadata = {'FILENAME': 'burn_in_test.png'}
+
+        worker = ImageProcessorWorker()
+        worker._main_window = None
+        results = []
+        worker.processing_complete.connect(
+            lambda preview, out, meta, path, dispatch: results.append((preview, out, path, dispatch))
+        )
+        worker._process_task(ImageProcessingTask(img, metadata, config))
+
+        assert results, "processing_complete did not fire"
+        preview_img, output_img, output_path, dispatch_img = results[0]
+        return preview_img, output_img, output_path, dispatch_img
+
+    @staticmethod
+    def _diff_sum(a: Image.Image, b: Image.Image) -> int:
+        import numpy as np
+        return int(np.abs(np.array(a.convert('RGB')).astype(int)
+                          - np.array(b.convert('RGB')).astype(int)).sum())
+
+    def test_burn_into_output_default_off_stays_clean_everywhere(self, tmp_path):
+        """burn_into_output defaulting to all-False must leave the saved file
+        and the web/library dispatch image clean, matching today's behaviour."""
+        preview_img, output_img, output_path, dispatch_img = self._run_worker(
+            tmp_path, burn_into_output={})
+
+        saved = Image.open(output_path)
+        assert self._diff_sum(saved, output_img) == 0, (
+            "saved file changed even though burn_into_output is off by default")
+        assert self._diff_sum(dispatch_img, output_img) == 0, (
+            "web/Library dispatch image changed even though burn_into_output.web is off")
+        # GUI preview is unaffected by burn_into_output — it always shows the overlay.
+        assert self._diff_sum(preview_img, output_img) > 0, (
+            "fixture regression — GUI preview should still show the live overlay")
+
+    def test_burn_into_output_saved_file_enabled_bakes_overlay_in(self, tmp_path):
+        """saved_file=True must bake the overlay into the file on disk while
+        output_img (the signal's clean slot, cached by watch mode for
+        'Calibrate Now') stays clean."""
+        _, output_img, output_path, dispatch_img = self._run_worker(
+            tmp_path, burn_into_output={'saved_file': True, 'web': False, 'timelapse': False})
+
+        saved = Image.open(output_path)
+        assert self._diff_sum(saved, output_img) > 0, (
+            "saved_file=True but the on-disk file matches the clean render")
+        # web wasn't opted in — dispatch must stay clean despite saved_file being on.
+        assert self._diff_sum(dispatch_img, output_img) == 0, (
+            "burn_into_output.web is off but the dispatch image carries the overlay")
+
+    def test_burn_into_output_web_enabled_only_affects_dispatch(self, tmp_path):
+        """web=True must burn the overlay into the web/Library dispatch image
+        without touching the saved file."""
+        _, output_img, output_path, dispatch_img = self._run_worker(
+            tmp_path, burn_into_output={'saved_file': False, 'web': True, 'timelapse': False})
+
+        saved = Image.open(output_path)
+        assert self._diff_sum(saved, output_img) == 0, (
+            "burn_into_output.saved_file is off but the saved file carries the overlay")
+        assert self._diff_sum(dispatch_img, output_img) > 0, (
+            "web=True but the dispatch image matches the clean render")
+
+    def test_burn_into_output_all_enabled_output_img_still_clean(self, tmp_path):
+        """Even with every destination opted in, output_img itself — the
+        object ui/main_window/output.py caches verbatim as the clean
+        watch-mode 'Calibrate Now' frame — must never carry the overlay."""
+        preview_img, output_img, output_path, dispatch_img = self._run_worker(
+            tmp_path, burn_into_output={'saved_file': True, 'web': True, 'timelapse': True})
+
+        assert self._diff_sum(output_img, preview_img) > 0, (
+            "output_img matches the overlaid preview — it must stay the clean frame")
+        saved = Image.open(output_path)
+        assert self._diff_sum(saved, output_img) > 0
+        assert self._diff_sum(dispatch_img, output_img) > 0
+
 
 class TestAutoStretch:
     """Test auto-stretch (MTF) functionality"""

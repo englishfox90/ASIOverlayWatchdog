@@ -168,7 +168,10 @@ class GuidedCalibrationDialog(QDialog):
         # (px, py, ra_deg, dec_deg, name) per identified star.
         self.anchors: List[Tuple[float, float, float, float, str]] = []
 
-        self._build_ui(prep['image'])
+        # Display uses the pre-stretched copy (a raw all-sky frame is near-
+        # black, see issue #10) — detections/anchors still key off prep['image']
+        # coordinates, which stretch_for_display preserves pixel-for-pixel.
+        self._build_ui(prep.get('display_image', prep['image']))
         self._refresh()
 
     # ------------------------------------------------------------------

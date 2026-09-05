@@ -165,7 +165,7 @@ def test_frame_factory_runs_on_worker_and_result_is_processed(worker, tmp_path):
     task = ImageProcessingTask(None, {'FILENAME': 'stale.png'}, _base_config(tmp_path, {'enabled': False}),
                                frame_factory=factory)
     saved = []
-    worker.processing_complete.connect(lambda p, o, m, path: saved.append((m, path)))
+    worker.processing_complete.connect(lambda p, o, m, path, d: saved.append((m, path)))
 
     worker._process_task(task)
 

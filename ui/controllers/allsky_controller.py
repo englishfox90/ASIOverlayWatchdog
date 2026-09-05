@@ -243,7 +243,8 @@ class AllSkyController(QObject):
             return None
 
         dt = self._frame_capture_time()
-        from services.allsky.star_centroid import detect_stars, estimate_sky_circle
+        from services.allsky.star_centroid import (
+            detect_stars, estimate_sky_circle, stretch_for_display)
         from services.allsky.catalogs import get_bright_stars
         from services.allsky.coords import radec_to_altaz
         from services.allsky.render_stars import star_display_name
@@ -266,10 +267,21 @@ class AllSkyController(QObject):
                     'vmag': float(s.get('vmag', 0.0)),
                 })
         candidates.sort(key=lambda c: c['vmag'])
+        # A failed stretch must not cost the user the dialog itself — guided
+        # calibration is often the only path that solves on a given rig, so
+        # degrade to the (dark, but usable) linear frame rather than raising.
+        try:
+            display_image = stretch_for_display(image)
+        except Exception as e:
+            log.warning(f"Guided calibration: display stretch failed, "
+                        f"showing the linear frame instead: {e}")
+            display_image = image
+
         log.info(f"Guided calibration prep: {len(detections)} detections, "
                  f"{len(candidates)} bright stars above horizon ({source})")
         return {
-            'image': image, 'detections': detections,
+            'image': image, 'display_image': display_image,
+            'detections': detections,
             'sky_cx': sky_cx, 'sky_cy': sky_cy, 'sky_r': sky_r,
             'lat': lat, 'lon': lon, 'dt': dt, 'candidates': candidates,
             'image_width': getattr(image, 'width', 0),

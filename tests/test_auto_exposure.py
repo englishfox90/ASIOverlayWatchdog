@@ -5,12 +5,13 @@ import pytest
 import os
 import sys
 import numpy as np
+from unittest.mock import MagicMock, patch
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from services.camera import calculate_brightness, check_clipping, is_within_scheduled_window
+from services.camera import CameraCalibration, calculate_brightness, check_clipping, is_within_scheduled_window
 
 
 class TestBrightnessCalculation:
@@ -285,5 +286,89 @@ class TestAggressiveVsConservativeAdjustment:
             change = abs(history[i] - history[i-1])
             if change < 0.5:  # Less than 0.5 change = stalled
                 stall_count += 1
-        
+
         assert stall_count == 3  # All consecutive changes are small
+
+
+def _make_calibration(exposure_seconds, max_exposure_sec, target_brightness):
+    """Build a CameraCalibration with a mocked camera/SDK for warning tests"""
+    calibration = CameraCalibration(camera=MagicMock(), asi=MagicMock())
+    calibration.exposure_algorithm = 'mean'
+    calibration.exposure_seconds = exposure_seconds
+    calibration.max_exposure_sec = max_exposure_sec
+    calibration.target_brightness = target_brightness
+    calibration.baseline_brightness = target_brightness  # avoid drastic-change noise
+    return calibration
+
+
+def _dark_image(brightness_value):
+    return np.full((20, 20), brightness_value, dtype=np.uint8)
+
+
+class TestPinnedExposureWarning:
+    """Test the 'pinned at max exposure, still too dark' diagnostic warning"""
+
+    def test_warns_when_pinned_at_max_and_far_below_target(self):
+        """Exposure at ceiling and brightness far below target should warn"""
+        calibration = _make_calibration(exposure_seconds=30.0, max_exposure_sec=30.0, target_brightness=133)
+
+        with patch('services.camera.camera_calibration.app_logger') as mock_logger:
+            calibration.adjust_exposure_auto(_dark_image(3))
+
+        mock_logger.warning.assert_called_once()
+        message = mock_logger.warning.call_args[0][0]
+        assert 'pinned' in message.lower()
+        assert '30000.00ms' in message  # exposure and max, in ms per the GUI convention
+        assert 'brightness=3.0' in message
+        assert 'target=133' in message
+        assert 'gain' in message.lower()
+        assert 'target brightness' in message.lower()
+
+    def test_does_not_warn_with_exposure_headroom(self):
+        """Exposure below max should never trigger the pinned warning, even if dark"""
+        calibration = _make_calibration(exposure_seconds=1.0, max_exposure_sec=30.0, target_brightness=133)
+
+        with patch('services.camera.camera_calibration.app_logger') as mock_logger:
+            calibration.adjust_exposure_auto(_dark_image(3))
+
+        mock_logger.warning.assert_not_called()
+
+    def test_does_not_warn_within_acceptable_band(self):
+        """Brightness within the target band should never trigger the pinned warning"""
+        calibration = _make_calibration(exposure_seconds=30.0, max_exposure_sec=30.0, target_brightness=133)
+
+        with patch('services.camera.camera_calibration.app_logger') as mock_logger:
+            calibration.adjust_exposure_auto(_dark_image(133))
+
+        mock_logger.warning.assert_not_called()
+
+    def test_throttles_repeat_warnings_and_rearms_after_clearing(self):
+        """Repeated pinned frames should not re-warn until the interval elapses,
+        but the condition clearing and recurring should warn again immediately"""
+        calibration = _make_calibration(exposure_seconds=30.0, max_exposure_sec=30.0, target_brightness=133)
+
+        with patch('services.camera.camera_calibration.app_logger') as mock_logger, \
+                patch('services.camera.camera_calibration.time.monotonic') as mock_time:
+            mock_time.return_value = 1000.0
+            calibration.adjust_exposure_auto(_dark_image(3))
+            assert mock_logger.warning.call_count == 1
+
+            # Still pinned, well within the throttle interval - no repeat warning
+            mock_time.return_value = 1000.0 + 60.0
+            calibration.adjust_exposure_auto(_dark_image(3))
+            assert mock_logger.warning.call_count == 1
+
+            # Condition clears (brightness back in band) - resets the throttle
+            mock_time.return_value = 1000.0 + 61.0
+            calibration.adjust_exposure_auto(_dark_image(133))
+            assert mock_logger.warning.call_count == 1
+
+            # Recurs immediately after clearing - should warn right away, not wait
+            mock_time.return_value = 1000.0 + 62.0
+            calibration.adjust_exposure_auto(_dark_image(3))
+            assert mock_logger.warning.call_count == 2
+
+            # Still pinned but interval has now elapsed since the last warning - warns again
+            mock_time.return_value = 1000.0 + 62.0 + 900.0
+            calibration.adjust_exposure_auto(_dark_image(3))
+            assert mock_logger.warning.call_count == 3

@@ -77,6 +77,15 @@ class ImageProcessingMLSection(QWidget):
         self.ml_status_label.setStyleSheet(f"color: {Colors.text_muted}; padding: 8px;")
         ml_card.add_widget(self.ml_status_label)
 
+        self.roof_gates_sky_switch = SwitchRow(
+            "Skip Sky Features When Roof Closed",
+            "Turn off if you have no roof (e.g. an open-air all-sky camera) — "
+            "keeps star detection and the all-sky overlay/calibration running "
+            "even when the roof classifier misreads \"Closed\""
+        )
+        self.roof_gates_sky_switch.toggled.connect(self._on_roof_gates_sky_changed)
+        ml_card.add_widget(self.roof_gates_sky_switch)
+
         self.ascom_safety_switch = SwitchRow(
             "ASCOM Safety File",
             "Write roof status to file for NINA GenericFile safety monitor"
@@ -238,6 +247,21 @@ class ImageProcessingMLSection(QWidget):
             self.ml_status_label.setText(f"Status: ✗ Error: {str(e)[:50]}")
             self.ml_status_label.setStyleSheet(f"color: #f87171; padding: 8px;")
 
+    def _on_roof_gates_sky_changed(self, checked):
+        if self._loading_config:
+            return
+        if self.main_window and hasattr(self.main_window, 'config'):
+            ml_config = self.main_window.config.get('ml_models', {})
+            ml_config['roof_gates_sky_features'] = checked
+            self.main_window.config.set('ml_models', ml_config)
+            self.main_window.config.save()
+            self.settings_changed.emit()
+
+            if checked:
+                app_logger.info("Roof-closed gating of sky features enabled")
+            else:
+                app_logger.info("Roof-closed gating of sky features disabled (no-roof/all-sky rig)")
+
     def _on_ascom_safety_changed(self, checked):
         if self._loading_config:
             return
@@ -378,6 +402,7 @@ class ImageProcessingMLSection(QWidget):
         try:
             ml_config = config.get('ml_models', {})
             self.ml_enabled_switch.set_checked(ml_config.get('enabled', False))
+            self.roof_gates_sky_switch.set_checked(ml_config.get('roof_gates_sky_features', True))
 
             ascom_config = ml_config.get('ascom_safety_file', {})
             self.ascom_safety_switch.set_checked(ascom_config.get('enabled', False))

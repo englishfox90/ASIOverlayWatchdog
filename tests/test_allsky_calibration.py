@@ -596,3 +596,56 @@ class TestCalibrationError:
                     matched += 1
                     break
         assert matched >= 15, f"Only {matched}/30 detected stars match planted positions"
+
+
+class TestStretchForDisplay:
+    """
+    services.allsky.star_centroid.stretch_for_display() — guided-calibration
+    dialog fix (issue #10): the raw linear frame from a correctly-exposed
+    all-sky rig has a luminance median around 2/255 and renders as solid
+    black. This is display-only; detection/fitting keep using the untouched
+    linear frame.
+    """
+
+    def _dark_frame_with_stars(self):
+        from PIL import Image as PILImage
+
+        rng = np.random.default_rng(7)
+        arr = rng.integers(0, 3, size=(400, 600), dtype=np.uint8)  # median ~2/255
+        for _ in range(6):
+            x = int(rng.integers(20, 580))
+            y = int(rng.integers(20, 380))
+            arr[max(0, y - 2):y + 3, max(0, x - 2):x + 3] = 200
+        return PILImage.fromarray(arr, mode='L')
+
+    def test_brightens_dark_linear_frame(self):
+        from services.allsky.star_centroid import stretch_for_display
+
+        dark = self._dark_frame_with_stars()
+        stretched = stretch_for_display(dark)
+
+        dark_median = float(np.median(np.array(dark)))
+        stretched_median = float(np.median(np.array(stretched.convert('L'))))
+        assert dark_median < 5.0, "fixture should reproduce the near-black raw frame"
+        assert stretched_median > dark_median + 50, (
+            f"stretch did not materially brighten the frame "
+            f"({dark_median} -> {stretched_median})")
+
+    def test_preserves_dimensions_and_mode(self):
+        from services.allsky.star_centroid import stretch_for_display
+
+        dark = self._dark_frame_with_stars()
+        stretched = stretch_for_display(dark)
+
+        assert stretched.size == dark.size
+        assert stretched.mode == 'RGB'
+
+    def test_does_not_mutate_source_image(self):
+        from services.allsky.star_centroid import stretch_for_display
+
+        dark = self._dark_frame_with_stars()
+        before = np.array(dark).copy()
+        stretch_for_display(dark)
+        assert np.array_equal(np.array(dark), before), (
+            "stretch_for_display must not touch the linear frame the "
+            "solver fits against")

@@ -18,7 +18,10 @@ def is_observing_window(config, metadata, feature="feature"):
     Primary gate: sun must be below civil twilight (-6°). Requires
     weather.latitude and weather.longitude to be configured.
 
-    Secondary gate: if ML is enabled and roof is predicted Closed, skip.
+    Secondary gate: if ML is enabled, roof is predicted Closed, and
+    ml_models.roof_gates_sky_features is True (default), skip. Rigs with no
+    roof at all (e.g. open-air all-sky cameras) can set that flag False to
+    keep sky-condition ML while dropping the roof-based suppression.
 
     Falls through (returns True) if location is not configured or astral
     is unavailable, so features degrade gracefully.
@@ -63,7 +66,7 @@ def _evaluate(config, metadata, feature):
             app_logger.debug(f"Sun elevation check failed, allowing {feature}: {e}")
 
     ml_config = config.get('ml_models', {})
-    if ml_config.get('enabled', False):
+    if ml_config.get('enabled', False) and ml_config.get('roof_gates_sky_features', True):
         roof_status = metadata.get('ROOF_STATUS', 'N/A')
         if roof_status.startswith('Closed'):
             app_logger.debug(f"{feature} suppressed: ML roof status '{roof_status}'")

@@ -48,10 +48,10 @@ class ImageProcessorWorker(QThread):
     """Background worker for image processing"""
 
     # Signals
-    processing_complete = Signal(object, object, dict, str)  # preview PIL Image, output PIL Image, metadata, output_path
+    processing_complete = Signal(object, object, dict, str, object)  # preview PIL Image, output PIL Image (clean), metadata, output_path, dispatch PIL Image (web + Library)
     preview_ready = Signal(object, dict)  # clean pre-overlay PIL Image, histogram data
     error_occurred = Signal(str)
-    timelapse_ready = Signal(object, object)  # (clean pre-overlay PIL Image, output PIL Image)
+    timelapse_ready = Signal(object, object)  # (clean pre-overlay PIL Image, output PIL Image — may carry the all-sky burn-in)
     detection_frame_ready = Signal(object, object)  # (grayscale PIL at detection scale, full-res clean PIL)
     processing_time = Signal(float)  # elapsed seconds for last frame
 
@@ -404,16 +404,26 @@ class ImageProcessorWorker(QThread):
 
             del raw_array  # Last use above — release the 76 MB numpy array before overlay rendering
 
-            # Base render — no all-sky overlay. This image is saved to disk and
-            # pushed to all output sinks (file, web, Discord). Never contains
-            # the all-sky overlay regardless of calibration state.
+            # Base render — no all-sky overlay. This is the CLEAN image: it is
+            # what reaches processing_complete's output_img slot and what
+            # watch-mode caches for "Calibrate Now". It must stay clean
+            # regardless of the burn-in flags below.
             output_img = add_overlays(img, overlays, metadata, weather_service=self._weather_service)
 
-            # Preview render — all-sky overlay drawn on a copy, never leaves the app.
+            # Overlaid render, computed once — GUI preview always uses it, and
+            # it is reused (never re-rendered) for any destination opted into
+            # burn-in below. Guards (disabled / no calibration / outside
+            # observing window) make this return output_img itself unchanged,
+            # so every burn-in choice below correctly no-ops in that case.
             preview_img = _render_allsky_for_preview(output_img, allsky_cfg, config, metadata)
 
-            # Timelapse receives the clean output image.
-            self.timelapse_ready.emit(stretched_for_preview, output_img)
+            burn_cfg = allsky_cfg.get('burn_into_output', {})
+            save_img = preview_img if burn_cfg.get('saved_file', False) else output_img
+            timelapse_img = preview_img if burn_cfg.get('timelapse', False) else output_img
+            dispatch_img = preview_img if burn_cfg.get('web', False) else output_img
+
+            # Timelapse receives the clean image unless opted into burn-in.
+            self.timelapse_ready.emit(stretched_for_preview, timelapse_img)
             # Meteor stack receives the pre-stretch detection frame + full-res clean.
             if _det_frame is not None:
                 self.detection_frame_ready.emit(_det_frame, stretched_for_preview)
@@ -428,11 +438,11 @@ class ImageProcessorWorker(QThread):
             output_filename += '.png' if output_format.lower() == 'png' else '.jpg'
             output_path = os.path.join(output_dir, output_filename)
             
-            # Save to disk (output_img — clean, no all-sky)
+            # Save to disk — save_img is output_img unless burn_into_output.saved_file opted in.
             if output_format.lower() == 'png':
-                output_img.save(output_path, 'PNG')
+                save_img.save(output_path, 'PNG')
             else:
-                output_img.save(output_path, 'JPEG', quality=jpg_quality)
+                save_img.save(output_path, 'JPEG', quality=jpg_quality)
 
             app_logger.debug(f"Saved: {os.path.basename(output_path)}")
 
@@ -444,7 +454,7 @@ class ImageProcessorWorker(QThread):
             metadata.pop('RAW_RGB_NO_WB', None)
             
             self.preview_ready.emit(stretched_for_preview, hist_data)
-            self.processing_complete.emit(preview_img, output_img, metadata, output_path)
+            self.processing_complete.emit(preview_img, output_img, metadata, output_path, dispatch_img)
 
             # Emit processing time
             _timer.__exit__(None, None, None)
@@ -529,10 +539,10 @@ class ImageProcessor(QObject):
     """
     
     # Signals forwarded from worker
-    processing_complete = Signal(object, object, dict, str)  # preview PIL Image, output PIL Image, metadata, output_path
+    processing_complete = Signal(object, object, dict, str, object)  # preview PIL Image, output PIL Image (clean), metadata, output_path, dispatch PIL Image (web + Library)
     preview_ready = Signal(object, dict)  # clean pre-overlay PIL Image, histogram data
     error_occurred = Signal(str)
-    timelapse_ready = Signal(object, object)  # (clean pre-overlay PIL Image, output PIL Image)
+    timelapse_ready = Signal(object, object)  # (clean pre-overlay PIL Image, output PIL Image — may carry the all-sky burn-in)
     detection_frame_ready = Signal(object, object)  # (grayscale PIL at detection scale, full-res clean PIL)
     processing_time = Signal(float)  # elapsed seconds
 
@@ -654,8 +664,8 @@ class ImageProcessor(QObject):
 
         return config
     
-    def _on_processing_complete(self, preview_img, output_img, metadata, output_path):
-        self.processing_complete.emit(preview_img, output_img, metadata, output_path)
+    def _on_processing_complete(self, preview_img, output_img, metadata, output_path, dispatch_img):
+        self.processing_complete.emit(preview_img, output_img, metadata, output_path, dispatch_img)
     
     def _on_preview_ready(self, img, hist_data):
         """Forward preview ready signal"""
