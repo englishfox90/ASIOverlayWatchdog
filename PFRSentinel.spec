@@ -325,10 +325,10 @@ hiddenimports = [
     'services.allsky.calibration', 'services.allsky.star_centroid',
     'services.allsky.label_collision', 'services.allsky.overlay_renderer',
     'services.allsky.render_grid', 'services.allsky.render_constellations',
-    'services.allsky.render_objects', 'services.allsky.config_schema',
+    'services.allsky.render_objects',
 
     # --- App modules ---
-    'services', 'services.config', 'services.logger', 'services.processor',
+    'services', 'services.config', 'services.config_defaults', 'services.logger', 'services.processor',
     'services.watcher', 'services.zwo_camera', 'services.camera_connection',
     'services.camera_calibration', 'services.camera_utils', 'services.cleanup',
     'services.color_balance', 'services.web_output',

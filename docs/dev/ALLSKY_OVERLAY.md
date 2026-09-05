@@ -9,7 +9,6 @@ Astronomical annotations (constellation lines, planet labels, DSO markers, AltAz
 ```
 services/allsky/
 ├── __init__.py            Public API: render_allsky_overlay()
-├── config_schema.py       ALLSKY_OVERLAY_DEFAULTS dict
 ├── coords.py              Pure-numpy RA/Dec ↔ AltAz, GMST, Bennett refraction
 ├── planets.py             Meeus Keplerian elements — Mercury–Neptune, Moon, Sun
 ├── catalogs.py            Loads star_data/ JSON+CSV; module-level cache

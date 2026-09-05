@@ -29,7 +29,8 @@ PFRSentinel/
 │   ├── controllers/            # Business logic — capture, output, overlay, timelapse, ML prediction
 │   └── theme/                  # colors.py, styles.py
 ├── services/                   # Core processing modules
-│   ├── config.py               # JSON config in %APPDATA%\PFRSentinel\config.json
+│   ├── config.py               # Config class — load/save/merge; re-exports the defaults
+│   ├── config_defaults.py      # DEFAULT_CONFIG + DEFAULT_CAMERA_PROFILE (data only)
 │   ├── logger.py               # Thread-safe queue logger (app_logger singleton)
 │   ├── processor.py            # Image overlay engine — dual input: PIL Image OR file path
 │   ├── watcher.py              # watchdog FileSystemEventHandler

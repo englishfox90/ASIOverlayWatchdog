@@ -87,7 +87,20 @@ class TestConfigPersistence:
         # Default values should be filled in
         assert 'webserver_host' in config.data['output']
         assert 'webserver_port' in config.data['output']
-    
+
+    def test_new_nested_default_backfilled_into_existing_block(self, temp_config):
+        """A sub-key added to DEFAULT_CONFIG reaches users whose saved config
+        already has the parent block (allsky_overlay.burn_into_output)."""
+        with open(temp_config, 'w') as f:
+            json.dump({'allsky_overlay': {'enabled': True}}, f)
+
+        config = Config(temp_config)
+
+        overlay = config.data['allsky_overlay']
+        assert overlay['enabled'] is True
+        assert overlay['burn_into_output'] == {
+            'saved_file': False, 'web': False, 'timelapse': False}
+
     def test_overlay_config_preserved(self, temp_config):
         """Test that overlay configurations are preserved"""
         config = Config(temp_config)
