@@ -326,6 +326,9 @@ hiddenimports = [
     'services.allsky.label_collision', 'services.allsky.overlay_renderer',
     'services.allsky.render_grid', 'services.allsky.render_constellations',
     'services.allsky.render_objects',
+    'services.allsky.calibration_service', 'services.allsky.calibration_quality',
+    'services.allsky.pole_finder', 'services.allsky.pole_consensus',
+    'services.allsky.model_admission',
 
     # --- App modules ---
     'services', 'services.config', 'services.config_defaults', 'services.logger', 'services.processor',
