@@ -1,4 +1,3 @@
-import io
 import os
 import queue
 import random
@@ -13,6 +12,7 @@ from services import api_auth
 from services.camera import frame_builder
 from services.logger import app_logger
 from services.notifications import ERROR, LIFECYCLE, PERIODIC_IMAGE, NotificationEvent
+from services.web_image_encode import encode_for_web
 from services.web_output import WebOutputServer
 from ui.controllers.capture_command_bridge import CaptureCommandBridge
 
@@ -622,22 +622,19 @@ class _MainWindowOutputMixin:
         # post (and vice-versa) (W7).
         try:
             if web_server and web_server.running:
-                img_bytes = io.BytesIO()
-
-                output_config = self.config.get('output', {})
-                output_format = output_config.get('output_format', 'PNG').upper()
-
-                if output_format in ('JPG', 'JPEG'):
-                    quality = output_config.get('jpg_quality', 85)
-                    processed_img.save(img_bytes, format='JPEG', quality=quality, optimize=True)
-                    content_type = 'image/jpeg'
-                else:
-                    processed_img.save(img_bytes, format='PNG', optimize=True)
-                    content_type = 'image/png'
+                # output_format / jpg_quality are TOP-LEVEL config keys. Reading
+                # them from the nested 'output' section always missed, so every
+                # frame took the full-res optimized-PNG branch (~1.4 s of encode
+                # for a 15 MB blob the server then had to resize again).
+                img_bytes, content_type = encode_for_web(
+                    processed_img,
+                    output_format=self.config.get('output_format', 'jpg'),
+                    jpg_quality=self.config.get('jpg_quality', 85),
+                )
 
                 web_server.update_image(
                     image_path,
-                    img_bytes.getvalue(),
+                    img_bytes,
                     metadata=push_metadata,
                     content_type=content_type
                 )

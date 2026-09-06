@@ -16,9 +16,8 @@ from datetime import datetime
 from PIL import Image
 from .logger import app_logger
 from . import api_auth, web_control, web_library
-
-# Maximum image size served by the web endpoint (5 MB)
-WEB_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+# Re-exported for existing callers; the encoder owns the limit now.
+from .web_image_encode import WEB_IMAGE_MAX_BYTES
 
 # Matches a GENUINE absolute filesystem path anywhere in a string (W5). The
 # POSIX form is rooted at a string/whitespace boundary and needs ≥2 segments,
@@ -155,8 +154,13 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         return max(0.0, time.time() - snapshot[3])
     
     def log_message(self, format, *args):
-        """Override to use our logger instead of stderr."""
-        app_logger.info(f"HTTP {self.address_string()} - {format % args}")
+        """Override to use our logger instead of stderr.
+
+        DEBUG, not INFO: a polling agent hitting /latest and /status every few
+        seconds put ~45k access lines a day into the log file and both GUI log
+        widgets. Errors and warnings elsewhere are unaffected.
+        """
+        app_logger.debug(f"HTTP {self.address_string()} - {format % args}")
     
     def do_GET(self):
         """Handle GET requests."""
@@ -172,10 +176,8 @@ class ImageHTTPHandler(BaseHTTPRequestHandler):
         clean_path = parsed_url.path
         query_params = parse_qs(parsed_url.query)
 
-        # Debug logging to diagnose path matching issues
-        app_logger.debug(f"Request: original='{self.path}', clean='{clean_path}', config='{config_path}', status='{status_path}'")
-        if query_params:
-            app_logger.debug(f"Query params: {query_params}")
+        # No per-request debug line here: log_message() already records the full
+        # request line (with query) once per request, at DEBUG.
 
         # Library endpoints are delegated to services/web_library.py (keeps this
         # module under the size cap). The library gate reads the live config, so

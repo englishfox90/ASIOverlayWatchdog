@@ -7,7 +7,6 @@ Usage:
     python main.py --auto-start --headless --auto-stop 3600  # Run for 1 hour
 """
 import os
-import io
 import signal
 import threading
 import time
@@ -18,6 +17,7 @@ from .logger import app_logger
 from .config import Config
 from .camera import ZWOCamera
 from .camera.camera_utils import get_selected_camera_name
+from .web_image_encode import encode_for_web
 from .web_output import WebOutputServer
 from .processor import add_overlays
 from .cleanup import run_cleanup
@@ -506,15 +506,12 @@ class HeadlessRunner:
 
             # Push to web server if running
             if self.web_server and self.web_server.running:
-                img_bytes = io.BytesIO()
-                if output_format in ('jpg', 'jpeg'):
-                    img.save(img_bytes, format='JPEG', quality=self.config.get('jpg_quality', 85))
-                    content_type = 'image/jpeg'
-                else:
-                    img.save(img_bytes, format='PNG')
-                    content_type = 'image/png'
-                
-                self.web_server.update_image(output_path, img_bytes.getvalue(), content_type=content_type)
+                img_bytes, content_type = encode_for_web(
+                    img,
+                    output_format=output_format,
+                    jpg_quality=self.config.get('jpg_quality', 85),
+                )
+                self.web_server.update_image(output_path, img_bytes, content_type=content_type)
             
         except Exception as e:
             self._log(f"ERROR processing image: {e}")
