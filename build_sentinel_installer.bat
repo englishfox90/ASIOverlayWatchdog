@@ -27,7 +27,14 @@ echo.
 REM Step 1: Build executable
 echo [1/4] Building executable...
 set BUILD_FROM_INSTALLER=1
-call build_sentinel.bat
+REM Delete the previous exe first: the existence check below is the only guard
+REM that the build actually ran, and a stale exe silently satisfies it. That
+REM shipped a 3.7.3 binary inside an installer named 3.7.4.
+if exist "dist\PFRSentinel\PFRSentinel.exe" del /q "dist\PFRSentinel\PFRSentinel.exe"
+REM %~dp0 (this script's own folder), not a bare name: cmd does not search the
+REM current directory for executables when NoDefaultCurrentDirectoryInExePath
+REM is set, so `call build_sentinel.bat` fails with "not recognized" there.
+call "%~dp0build_sentinel.bat"
 if not exist "dist\PFRSentinel\PFRSentinel.exe" (
     echo ERROR: Executable build failed!
     pause
