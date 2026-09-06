@@ -2,4 +2,4 @@
 Application version
 Single source of truth for version number across all build systems
 """
-__version__ = "3.7.3"
+__version__ = "3.7.4"
