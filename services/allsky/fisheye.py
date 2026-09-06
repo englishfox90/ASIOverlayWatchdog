@@ -41,13 +41,17 @@ class FisheyeModel:
         rms_residual : Calibration RMS residual (pixels)
         n_matches    : Number of matched stars used for calibration
         calibrated_at: ISO 8601 UTC timestamp of calibration
-        provenance   : How the model's orientation BASIN was established.
+        provenance   : What vouched for the model's orientation BASIN
+                       (model_admission stamps it on admission).
                        'guided' = solved from user-identified anchor stars
-                       (guided_calibration) — and inherited by every
-                       automatic refinement admitted as the same basin
-                       (model_admission). '' = automatic fit / legacy file.
-                       A human-anchored basin outranks the measured pole in
-                       the admission gates.
+                       (guided_calibration), or admitted as the same basin
+                       as such a model; outranks the measured pole.
+                       'pole' = admitted while a trusted measured pole
+                       confirmed it, or admitted as the same basin as such
+                       a model; locks mirror/scale/basin until a fresh
+                       trusted pole says otherwise.
+                       '' = automatic fit admitted with no pole, or a
+                       legacy file: no authority over its replacement.
     """
     cx: float = 960.0
     cy: float = 540.0
@@ -65,7 +69,7 @@ class FisheyeModel:
     calibrated_at: str = ""
     image_width: int = 0   # width of image used for calibration (px); 0 = unknown
     image_height: int = 0  # height of image used for calibration (px); 0 = unknown
-    provenance: str = ""   # 'guided' = human-anchored basin (see class doc)
+    provenance: str = ""   # 'guided' | 'pole' | '' (see class doc)
 
     def is_valid(self) -> bool:
         """True if model has been successfully calibrated."""

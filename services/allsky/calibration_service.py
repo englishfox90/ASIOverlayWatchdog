@@ -35,8 +35,7 @@ from .coords import radec_to_altaz
 from .calibration import calibrate, CalibrationError
 from .calibration_quality import CalibrationQuality, model_quality  # re-exported for existing callers
 from .calibration_validate import median_frame_resolution
-from .model_admission import (
-    admit_candidate, admit_manual, east_left_hint, inherit_provenance, is_guided)
+from .model_admission import admit_candidate, admit_manual, east_left_hint, is_guided
 from .multi_calibrate import median_sky_r, refine_from_detections
 from .pole_consensus import PoleHistory
 from .pole_finder import find_pole
@@ -100,11 +99,12 @@ class _RefineWorker(QThread):
             # Model-free ground truth from the same buffer: the measured
             # celestial pole, filtered through the cross-run consensus. None
             # is normal (short span, cloudy or hidden pole, contaminated
-            # field) and simply skips the pole check.
+            # field) and simply skips the pole check. This is the ONLY place
+            # a measurement is recorded — one entry per physical run.
             sky_r = median_sky_r(self._frames)
             pole = None
             try:
-                pole = self._pole_history.resolve(
+                pole = self._pole_history.record(
                     find_pole(self._frames, self._lat), sky_r)
             except Exception as e:
                 log.debug(f"Pole estimation failed (non-fatal): {e}")
@@ -113,7 +113,7 @@ class _RefineWorker(QThread):
                 self._frames,
                 self._seed,
                 max_residual_px=MAX_RESIDUAL_PX,
-                east_left_hint=east_left_hint(self._incumbent, pole, sky_r),
+                east_left_hint=east_left_hint(self._incumbent, pole),
             )
             pole_w, pole_h = median_frame_resolution(self._frames)
             ok, msg = admit_candidate(
@@ -121,7 +121,6 @@ class _RefineWorker(QThread):
                 pole_image_width=pole_w, pole_image_height=pole_h)
             if not ok:
                 raise CalibrationError(f"admission check failed: {msg}")
-            inherit_provenance(model, self._incumbent)
             log.info(f"Refinement admitted: {msg}")
             self.finished.emit(model, self._n_images, self._span_min)
         except Exception as e:
@@ -321,15 +320,18 @@ class CalibrationService(QObject):
                 w.wait(3000)
 
     def validate_against_pole(self, model: FisheyeModel) -> tuple:
-        """Check a candidate model against the buffer-measured celestial pole.
+        """Check a candidate model against the consensus celestial pole.
 
         For manual paths (Calibrate Now, guided) whose results bypass the
         refine worker. Returns (ok, message); ok=True when no pole estimate
         is available — the pole is an optional constraint, never a gate on
         its own absence.
 
-        Cheap enough for the GUI thread: only the pole-relevant fields are
-        copied (the per-frame catalog lists are large and not needed).
+        Reads what the refine worker has recorded (PoleHistory.current) and
+        never re-measures the buffer: a fresh find_pole here would be the
+        same physical window the worker already recorded, and recording it
+        again counted one measurement as a "repeated" rotation vote. Cheap
+        enough for the GUI thread.
 
         The buffer frames are fed post-resize (image_processor feeds the
         preview-resolution frame, see ImageProcessorWorker), while manual and
@@ -341,15 +343,12 @@ class CalibrationService(QObject):
         re-introduces the cross-resolution comparison bug.
         """
         with self._lock:
-            frames = [{'dt': f['dt'], 'detected': list(f['detected']),
-                       'sky_cx': f.get('sky_cx'), 'sky_cy': f.get('sky_cy'),
-                       'sky_r': f.get('sky_r')} for f in self._frames]
+            sky_r = median_sky_r(self._frames)
             pole_w, pole_h = median_frame_resolution(self._frames)
-        sky_r = median_sky_r(frames)
         try:
-            pole = self._pole_history.resolve(find_pole(frames, self._lat), sky_r)
+            pole = self._pole_history.current(sky_r)
         except Exception as e:
-            log.debug(f"Pole estimation failed (non-fatal): {e}")
+            log.debug(f"Pole consensus failed (non-fatal): {e}")
             return True, "pole estimation unavailable"
         return admit_manual(model, self._lat, pole, sky_r,
                             pole_image_width=pole_w, pole_image_height=pole_h)

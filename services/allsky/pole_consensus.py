@@ -15,16 +15,37 @@ admits it. The discriminating signal is the opposite one — several distinct
 clusters from a camera that cannot have moved means the field is
 contaminated and *no* estimate should gate anything. So:
 
-  - multi-modal history → the pole is UNKNOWN (resolve() returns None, and
-    calibration_validate.validate_pole skips on None);
+  - a history with no dominant mode → the pole is UNKNOWN (None, and
+    calibration_validate.validate_pole skips on None). A dominant mode is
+    one cluster holding at least DOMINANT_MODE_FRACTION of the found runs:
+    strict unimodality let a single aircraft, satellite trail or cloud-edge
+    outlier disable the gate for a full history length, which was exactly
+    the window in which an uncorroborated model could get in
+    (model_admission). The #10 log never puts more than a third of any
+    window into one cluster, so it is still rejected outright;
+  - an estimate that is itself outside the dominant mode is the outlier
+    and is not trusted, even though the history is;
   - a pole found in fewer than half of the recent runs is flickering — a
     genuine Polaris was found in 26/26 windows on the reference frames,
     while a near-pole contaminant on a hidden pole cleared the rotation
     floor in 2–8 of 26 — so it is treated as unknown too;
   - the mirror (east_left) is only asserted when a decisive rotation vote
-    REPEATS: two or more estimates agree and none disagree. In the #10 log
-    the one decisive vote in the window came from a contaminant and was
-    wrong.
+    REPEATS: two or more RECORDED runs agree and none disagree. In the #10
+    log the one decisive vote in the window came from a contaminant and
+    was wrong.
+
+Recording and reading are separate operations. The refine worker records
+one entry per run (record); every other reader — the manual Calibrate Now /
+guided paths, which ask what the field has established — uses current(),
+which never writes. The first cut had a single resolve() that appended on
+every call, so two reads of the same buffer manufactured a "repeated" vote
+from one physical measurement (Calibrate Now clicked twice inside the
+cooldown was enough).
+
+Known limit: consecutive refine runs a few minutes apart share most of a
+60-frame rolling buffer, so two recorded votes are correlated, not
+independent. The repeat requirement defeats a single contaminated window;
+it is not a statistical guarantee.
 
 The link tolerance for "same cluster" is half the pole gate's own tolerance
 (POLE_TOL_REF_PX / 2 = 70 px at reference scale, resolution-scaled). A
@@ -32,10 +53,11 @@ genuine Polaris estimate is the mean of its 0.65° orbit over the window, so
 two windows hours apart differ by at most ~2 × 12 px ≈ 24 px at reference
 scale: three times inside the link. Contaminant clusters in the #10 log were
 35–1200 px apart; the sub-100 px ones merge, which changes nothing — the
-history is still multi-modal.
+history still has no dominant mode.
 
-Thread-safe: resolve() is called from the refine worker thread and from the
-GUI thread (manual calibration paths).
+Thread-safe: record() runs on the refine worker thread, current() on the
+GUI thread (manual calibration paths). Both snapshot the deque under the
+lock and evaluate the copy.
 """
 import threading
 from collections import deque
@@ -58,6 +80,10 @@ MODE_LINK_REF_PX = 0.5 * POLE_TOL_REF_PX
 
 # A pole must have been found in at least this fraction of retained runs.
 MIN_FOUND_FRACTION = 0.5
+
+# The largest cluster must hold at least this fraction of the found runs to
+# be trusted. 3-of-4 survives one outlier; the #10 log peaks at ~1/3.
+DOMINANT_MODE_FRACTION = 0.75
 
 # Decisive sign votes needed (all agreeing) before east_left is asserted.
 MIN_REPEATED_SIGN_VOTES = 2
@@ -87,6 +113,53 @@ def consensus_east_left(estimates: Sequence[PoleEstimate]) -> Optional[bool]:
     return votes[0]
 
 
+def consensus(runs: Sequence[Optional[PoleEstimate]],
+              sky_r: Optional[float] = None) -> Optional[PoleEstimate]:
+    """The estimate the gate may use given `runs` (misses as None), or None.
+
+    The estimate under judgement is the most recent found run. Returns a
+    copy of it whose east_left is the repeated-vote consensus (None until
+    it repeats).
+    """
+    found = [e for e in runs if e is not None]
+    if not found:
+        return None
+    if len(found) / len(runs) < MIN_FOUND_FRACTION:
+        log.info(
+            f"Pole gate skipped: pole found in only {len(found)}/{len(runs)} "
+            "recent runs — intermittent estimate, not trusted"
+        )
+        return None
+    link = MODE_LINK_REF_PX * tol_scale(sky_r)
+    modes = sorted(cluster_positions([(e.x, e.y) for e in found], link),
+                   key=len, reverse=True)
+    if len(modes) > 1:
+        dominant = modes[0]
+        summary = "; ".join(
+            f"({np.mean([found[i].x for i in c]):.0f}, "
+            f"{np.mean([found[i].y for i in c]):.0f})x{len(c)}" for c in modes)
+        if len(dominant) < DOMINANT_MODE_FRACTION * len(found):
+            log.warning(
+                f"Pole gate skipped: the last {len(found)} pole estimates form "
+                f"{len(modes)} distinct clusters ({summary}; link {link:.0f}px) on "
+                "a fixed camera — the field is contaminated (lights on piers or "
+                "tracking mounts), no estimate is trusted"
+            )
+            return None
+        if len(found) - 1 not in dominant:
+            log.warning(
+                f"Pole gate skipped: the latest estimate ({found[-1].x:.0f}, "
+                f"{found[-1].y:.0f}) is outside the dominant cluster ({summary}) "
+                "— treated as a one-off outlier"
+            )
+            return None
+        log.info(
+            f"Pole history has {len(modes)} clusters ({summary}) but the "
+            f"dominant one holds {len(dominant)}/{len(found)} — trusting it")
+        found = [found[i] for i in dominant]
+    return replace(found[-1], east_left=consensus_east_left(found))
+
+
 class PoleHistory:
     """Rolling record of find_pole results with a trust decision per run."""
 
@@ -95,42 +168,34 @@ class PoleHistory:
         # None entries record runs where no pole was found (misses).
         self._runs: Deque[Optional[PoleEstimate]] = deque(maxlen=maxlen)
 
-    def resolve(self, estimate: Optional[PoleEstimate],
-                sky_r: Optional[float] = None) -> Optional[PoleEstimate]:
+    def record(self, estimate: Optional[PoleEstimate],
+               sky_r: Optional[float] = None) -> Optional[PoleEstimate]:
         """Record this run's estimate and return the one the gate may use.
 
+        One call per physical measurement (the refine worker, once per run).
         Returns None when there is nothing to trust: no estimate this run,
-        a multi-modal history, or a pole found in fewer than half the
-        recent runs. Otherwise a copy of `estimate` whose east_left is the
-        repeated-vote consensus (None until it repeats).
+        no dominant mode, this estimate outside it, or a pole found in
+        fewer than half the recent runs.
         """
         with self._lock:
             self._runs.append(estimate)
             runs = list(self._runs)
         if estimate is None:
             return None
-        found = [e for e in runs if e is not None]
-        if len(found) / len(runs) < MIN_FOUND_FRACTION:
-            log.info(
-                f"Pole gate skipped: pole found in only {len(found)}/{len(runs)} "
-                "recent runs — intermittent estimate, not trusted"
-            )
-            return None
-        link = MODE_LINK_REF_PX * tol_scale(sky_r)
-        modes = cluster_positions([(e.x, e.y) for e in found], link)
-        if len(modes) > 1:
-            summary = "; ".join(
-                f"({np.mean([found[i].x for i in c]):.0f}, "
-                f"{np.mean([found[i].y for i in c]):.0f})x{len(c)}"
-                for c in sorted(modes, key=len, reverse=True))
-            log.warning(
-                f"Pole gate skipped: the last {len(found)} pole estimates form "
-                f"{len(modes)} distinct clusters ({summary}; link {link:.0f}px) on "
-                "a fixed camera — the field is contaminated (lights on piers or "
-                "tracking mounts), no estimate is trusted"
-            )
-            return None
-        return replace(estimate, east_left=consensus_east_left(found))
+        return consensus(runs, sky_r)
+
+    def current(self, sky_r: Optional[float] = None) -> Optional[PoleEstimate]:
+        """What the recorded history establishes, without recording anything.
+
+        For readers that have no measurement of their own. The position is
+        the most recent found run's (any member of the dominant mode is
+        within the link tolerance of the others); the same trust rules as
+        record() apply. None when nothing has been recorded or nothing is
+        trusted.
+        """
+        with self._lock:
+            runs = list(self._runs)
+        return consensus(runs, sky_r) if runs else None
 
     def clear(self) -> None:
         with self._lock:

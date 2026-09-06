@@ -298,18 +298,30 @@ original analysis missed), but not the wrong winner. Changes:
 - `pole_finder`: rank in-band candidates by rotation support, brightest among
   near-ties; withhold the estimate below `POLE_MIN_ROTATION_RATIO = 2.5`.
 - `pole_consensus.PoleHistory` (new, owned by `CalibrationService`): the
-  measured pole is UNKNOWN when recent estimates form >1 cluster (link = half
-  the gate tolerance, 70 px ref), when found in <½ of recent runs, and
-  `east_left` is asserted only when a decisive vote repeats. NOT a stability
-  test — the dominant #10 contaminant was stable to ±1 px.
-- `model_admission` (new): `FisheyeModel.provenance = 'guided'` (set by
-  guided calibration, inherited by admitted same-basin refinements) outranks
-  the measured pole; a guided incumbent locks mirror, plate scale (±10 %) and
-  pole position (140 px scaled) for any automatic replacement. Any incumbent
-  passing the lens-polynomial and a1 gates locks mirror and plate scale —
-  this is what keeps the 0.79–0.81× escape candidates out once the pole gate
-  no longer fires. `east_left_hint` for the cold-start search comes from a
-  credible incumbent or the repeated consensus vote, never a single run.
+  measured pole is UNKNOWN when no cluster holds ≥75 % of recent estimates
+  (link = half the gate tolerance, 70 px ref; the #10 log peaks at ~⅓, one
+  aircraft/satellite outlier in four does not disable the gate), when the
+  latest estimate is outside that dominant cluster, when found in <½ of
+  recent runs, and `east_left` is asserted only when a decisive vote repeats
+  across RECORDED runs. NOT a stability test — the dominant #10 contaminant
+  was stable to ±1 px. `record()` (refine worker, once per run) and
+  `current()` (manual paths, never writes) are separate: a single resolve()
+  that appended on every read let one physical measurement count as a
+  repeated vote.
+- `model_admission` (new): authority follows evidence, recorded in
+  `FisheyeModel.provenance`. `'guided'` (guided calibration, inherited by
+  admitted same-basin refinements) outranks the measured pole and locks
+  mirror, plate scale (±10 %) and pole position (140 px scaled). `'pole'`
+  (admitted while a trusted pole confirmed it, or same-basin to such a
+  model) locks the same three, but a fresh trusted pole outranks it so a
+  contaminant-corroborated model can still be displaced. `''`
+  (admitted with no pole, or a legacy file) locks NOTHING: the per-model
+  gates do not separate the wrong-scale basin, and letting any gate-passing
+  incumbent lock scale turned a wrong-scale cold-start fit into a permanent
+  lockout (review of the #10 fix). `east_left_hint` for the cold-start
+  search comes from a guided incumbent, the repeated consensus vote, or a
+  pole-corroborated incumbent — never a single run or an uncorroborated
+  model.
 - `CalibrationService._on_refine_done`: a guided incumbent's anchor RMS is
   not compared against a multi-image joint RMS (V5-vs-multi-3h finding); a
   same-basin multi-image candidate replaces it on rank alone.

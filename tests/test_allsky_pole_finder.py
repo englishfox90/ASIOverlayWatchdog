@@ -210,6 +210,36 @@ class TestTrackingMountContaminant:
         assert np.hypot(est.x - POLE[0], est.y - POLE[1]) < 20.0
 
 
+class TestTieBreakAfterFloor:
+    def test_brighter_near_tie_below_floor_cannot_withhold_polaris(self, monkeypatch):
+        """Review finding: the brightness tie-break used to run before the
+        rotation-support floor, so a brighter mount light at 2.35x inside
+        the 0.9 tie band of a genuine Polaris at 2.60x was picked, failed
+        the 2.5x floor, and the pole was withheld. Rotation votes are
+        stubbed to those exact ratios; everything else is the real path."""
+        from services.allsky import pole_finder as pf
+        light = tracking_light(flux=12000.0)
+        frames = make_frames(contaminants=[light])
+
+        def votes(sample, dets, x, y, sky_r):
+            if np.hypot(x - POLE[0], y - POLE[1]) < 30.0:
+                return (10, 26)      # 2.60x, margin 16: clears the floor
+            return (20, 47)          # 2.35x, margin 27: does not
+
+        monkeypatch.setattr(pf, "_rotation_votes", votes)
+        assert pf.POLE_MIN_ROTATION_RATIO == 2.5
+        est = pf.find_pole(frames, lat_deg=39.0)
+        assert est is not None
+        assert np.hypot(est.x - POLE[0], est.y - POLE[1]) < 20.0
+        assert est.sign_votes == (10, 26)
+
+    def test_no_candidate_clears_floor_withholds(self, monkeypatch):
+        from services.allsky import pole_finder as pf
+        frames = make_frames(contaminants=[tracking_light()])
+        monkeypatch.setattr(pf, "_rotation_votes", lambda *a: (20, 47))
+        assert pf.find_pole(frames, lat_deg=39.0) is None
+
+
 class TestPredictedArc:
     def test_reference_rig_value(self):
         # Measured on sample_images: Polaris drifted 3.3px over a 61-min

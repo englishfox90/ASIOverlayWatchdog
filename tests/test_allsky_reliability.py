@@ -194,7 +194,7 @@ class TestBasinEscape:
         contaminant = PoleEstimate(x=1822.0, y=2765.0, east_left=False, sign=1,
                                    n_frames=12, span_minutes=60.0, drift_px=3.0,
                                    flux=9000.0, sign_votes=(500, 300))
-        svc._pole_history.resolve(contaminant, 1563.0)
+        svc._pole_history.record(contaminant, 1563.0)
         guided = _model(rms=2.4, n_matches=7, n_images=1, span_minutes=0.0)
         guided.provenance = 'guided'
         ok, msg = svc.validate_against_pole(guided)

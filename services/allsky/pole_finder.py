@@ -116,9 +116,10 @@ SIGN_MIN_MARGIN = 8
 # the weakest genuine ratio. Erring high is the safe side: a withheld pole
 # skips an optional gate, a wrong pole vetoes good models.
 POLE_MIN_ROTATION_RATIO = 2.5
-# Candidates whose ratio is within this fraction of the best are considered
-# tied and the brightest wins (a faint star within ~1° of the pole scores the
-# same as Polaris; Polaris is the better position anchor).
+# Among candidates that clear the floor, those whose ratio is within this
+# fraction of the best are considered tied and the brightest wins (a faint
+# star within ~1° of the pole scores the same as Polaris; Polaris is the
+# better position anchor).
 _ROTATION_TIE_FRACTION = 0.9
 
 # Frames sampled from large buffers (clustering and voting are O(frames²)ish).
@@ -193,25 +194,29 @@ def find_pole(
     if not candidates:
         return None
 
-    # Rank by rotation support, brightest among near-ties (see module doc).
+    # Rank by rotation support; the floor is applied to every candidate
+    # BEFORE the brightness tie-break, so a brighter light just inside the
+    # tie band cannot drag a genuine rotation centre below the floor and
+    # withhold the pole (the tie-break only ever chooses among survivors).
     scored = []
     for cand in candidates:
         votes = _rotation_votes(sample, dets, cand[0], cand[1], sky_r)
-        scored.append((_vote_ratio(votes), cand[3], cand, votes))
-    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
-    best_ratio = scored[0][0]
-    tied = [t for t in scored if t[0] >= _ROTATION_TIE_FRACTION * best_ratio]
-    _ratio, _flux, (pole_x, pole_y, drift, flux, n_hits), votes = max(
-        tied, key=lambda t: t[1])
-    if not _decisive(votes, POLE_MIN_ROTATION_RATIO):
+        scored.append((_vote_ratio(votes), cand, votes))
+    scored.sort(key=lambda t: (t[0], t[1][3]), reverse=True)
+    supported = [t for t in scored if _decisive(t[2], POLE_MIN_ROTATION_RATIO)]
+    if not supported:
+        best_ratio, (bx, by, *_), best_votes = scored[0]
         log.info(
             f"Pole estimate withheld: no stationary candidate is a rotation "
-            f"centre (best support {best_ratio:.2f}x at "
-            f"({pole_x:.0f}, {pole_y:.0f}), votes {votes}, "
-            f"{len(candidates)} in-band candidate(s), need "
+            f"centre (best support {best_ratio:.2f}x at ({bx:.0f}, {by:.0f}), "
+            f"votes {best_votes}, {len(candidates)} in-band candidate(s), need "
             f"{POLE_MIN_ROTATION_RATIO}x) — field contaminated or Polaris hidden"
         )
         return None
+    best_ratio = supported[0][0]
+    tied = [t for t in supported if t[0] >= _ROTATION_TIE_FRACTION * best_ratio]
+    _ratio, (pole_x, pole_y, drift, flux, n_hits), votes = max(
+        tied, key=lambda t: t[1][3])
 
     sign = _sign_from_votes(votes)
     east_left = None

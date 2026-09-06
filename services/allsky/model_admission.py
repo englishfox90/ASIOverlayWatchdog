@@ -10,24 +10,41 @@ escape" that the vetoes triggered produced wrong-scale candidates
 (a1 ≈ 1008–1044 against a true ~1283) that passed every per-model gate and
 were only kept out by that same untrustworthy pole check.
 
-Trust ladder, highest first:
+Authority follows evidence. An incumbent may constrain its replacement only
+to the extent something other than its own fit vouched for it — the
+per-model gates demonstrably do not separate the wrong-scale basin (the #10
+escape candidates passed all of them), so an incumbent that was admitted on
+"no pole estimate — check skipped" has no standing to lock anything. The
+first cut of this module let any gate-passing incumbent lock mirror and
+scale, which turned a wrong-scale cold-start fit into a permanent lockout:
+the correct model was rejected as "1.25x the incumbent's plate scale" on
+every later run, no matter how much evidence arrived with it.
 
-1. A GUIDED incumbent (solved from user-identified anchors) defines the
-   basin. A replacement must keep its mirror, its plate scale and project
-   the celestial pole where the incumbent does; the measured pole becomes
-   advisory (logged, never a veto). The user's clicks outrank a pole
-   measured from a field of tracking-mount lights — on the #10 rig the
-   guided solve (RMS 2.4 px, a1 = 1269) and the vetoed refinements
-   (a1 = 1283) agreed to 1.1 %.
-2. Any CREDIBLE incumbent — valid, and passing the lens-polynomial and
-   a1-vs-sky-circle gates — vouches for the two rig invariants that never
-   change on an installation: the mirror convention and the plate scale.
-   Its orientation basin is not locked (that is what basin escape is for),
-   so the measured pole still gates the candidate when one is trusted.
-3. No incumbent, or an incumbent that fails its own physical gates (the
-   2026-06-23 incident model: a3 pinned at the bound, a1 at 0.57× the sky
-   circle) — nothing is inherited; only the measured pole applies, and
-   only when pole_consensus trusts it.
+Trust ladder, highest first. `FisheyeModel.provenance` records the rung:
+
+1. GUIDED ('guided') — solved from user-identified anchors, or admitted as
+   the same basin as such a model. Defines the basin: a replacement must
+   keep its mirror, its plate scale and project the celestial pole where
+   the incumbent does; the measured pole is advisory (logged, never a
+   veto). The user's clicks outrank a pole measured from a field of
+   tracking-mount lights — on the #10 rig the guided solve (RMS 2.4 px,
+   a1 = 1269) and the vetoed refinements (a1 = 1283) agreed to 1.1 %.
+2. POLE-CORROBORATED ('pole') — admitted while a trusted measured pole
+   (pole_consensus) confirmed where it projects the pole, or admitted as
+   the same basin as such a model. Locks mirror, scale and basin exactly
+   as a guided model does, for as long as nothing better is known. When a
+   trusted pole is available on a later run, that fresh measurement
+   outranks the incumbent's older one: a candidate that passes the pole
+   gate is admitted and any continuity conflict is logged, so a model
+   corroborated by a stable contaminant can still be displaced once the
+   genuine pole is measured. The one exception is the mirror when the
+   current pole has no repeated rotation vote — then the incumbent's
+   verified mirror is the only mirror evidence and still binds.
+3. UNCORROBORATED ('' — automatic fit admitted without a trusted pole,
+   Calibrate Now without one, or a legacy file) — inherits nothing. The
+   candidate is gated by the measured pole alone, and only when
+   pole_consensus trusts one. Two uncorroborated fits at different scales
+   are symmetric ignorance; neither may veto the other.
 
 Plate-scale continuity: SCALE_CONTINUITY_MAX_DEV = 10 %. Same-rig fits agree
 far closer than that — guided vs refined on the #10 rig 1.011, bootstrap vs
@@ -40,8 +57,12 @@ Pole continuity between two models reuses POLE_TOL_REF_PX (140 px scaled):
 the same generous "regional model error at the pole" tolerance the measured
 pole gate uses — two good fits of one rig differ by 15–90 px there (P5
 validation), wrong basins by 400–1400 px.
+
+The admit_* functions stamp `candidate.provenance` on admission, because
+admission is where the evidence is weighed: that stamp is what gives the
+model its authority as the next incumbent.
 """
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -50,12 +71,12 @@ from services.logger import app_logger as log
 from .calibration_validate import (
     POLE_TOL_REF_PX,
     tol_scale,
-    validate_a1_scale,
     validate_lens_polynomial,
     validate_pole,
 )
 
 PROVENANCE_GUIDED = 'guided'
+PROVENANCE_POLE = 'pole'
 SCALE_CONTINUITY_MAX_DEV = 0.10
 
 # Frames whose aspect ratios differ by more than this are a crop, not a
@@ -68,13 +89,35 @@ def is_guided(model) -> bool:
                 and getattr(model, 'provenance', '') == PROVENANCE_GUIDED)
 
 
-def is_credible_incumbent(model, sky_r: Optional[float]) -> bool:
-    """Can this incumbent vouch for the rig's mirror and plate scale?"""
+def is_pole_corroborated(model) -> bool:
+    return bool(model is not None
+                and getattr(model, 'provenance', '') == PROVENANCE_POLE)
+
+
+def incumbent_authority(model) -> Optional[str]:
+    """The provenance rung on which `model` may constrain its replacement.
+
+    PROVENANCE_GUIDED, PROVENANCE_POLE, or None when the incumbent has no
+    standing (missing, invalid, uncorroborated, or — for a corroborated
+    model — an implausible lens polynomial, which a stamped file should
+    never carry but a hand-edited one might). The a1-vs-sky-circle gate is
+    deliberately NOT re-run here: it was applied in the incumbent's own
+    frame when it was admitted, and the buffer's sky radius is in the
+    candidate's frame, which differs whenever the incumbent came from a
+    manual or guided fit against the pre-resize raw frame.
+    """
     if model is None or not model.is_valid():
-        return False
+        return None
     if is_guided(model):
-        return True
-    return validate_lens_polynomial(model)[0] and validate_a1_scale(model, sky_r)[0]
+        return PROVENANCE_GUIDED
+    if is_pole_corroborated(model) and validate_lens_polynomial(model)[0]:
+        return PROVENANCE_POLE
+    return None
+
+
+def is_credible_incumbent(model) -> bool:
+    """Can this incumbent vouch for the rig's mirror and plate scale?"""
+    return incumbent_authority(model) is not None
 
 
 def frame_scale(candidate, incumbent) -> Optional[float]:
@@ -128,27 +171,81 @@ def pole_offset_px(candidate, incumbent, lat_deg: float) -> Optional[float]:
     return float(np.hypot(pc[0] - pi[0] * s, pc[1] - pi[1] * s))
 
 
-def east_left_hint(incumbent, pole, sky_r: Optional[float]) -> Optional[bool]:
+def east_left_hint(incumbent, pole) -> Optional[bool]:
     """Mirror convention to restrict a cold-start/escape orientation search.
 
-    A credible incumbent knows the rig's mirror outright; otherwise the
-    consensus pole's repeated vote; otherwise nothing (search both halves).
+    A guided incumbent knows the rig's mirror outright; otherwise the
+    consensus pole's repeated vote (fresh evidence); otherwise a
+    pole-corroborated incumbent's; otherwise nothing (search both halves).
     A wrong hint is worse than none — it guarantees a wrong-basin result —
-    which is why the raw single-run vote is never used here.
+    which is why neither the raw single-run vote nor an uncorroborated
+    incumbent is used here: the latter is how a wrong-mirror cold-start fit
+    used to steer every later search into its own half.
     """
-    if is_credible_incumbent(incumbent, sky_r):
+    authority = incumbent_authority(incumbent)
+    if authority == PROVENANCE_GUIDED:
         return bool(incumbent.east_left)
     if pole is not None and pole.east_left is not None:
         return bool(pole.east_left)
+    if authority == PROVENANCE_POLE:
+        return bool(incumbent.east_left)
     return None
 
 
-def inherit_provenance(candidate, incumbent) -> None:
-    """A candidate admitted as the same basin as a guided incumbent is
-    human-anchored too — the lock must survive the replacement."""
-    if is_guided(incumbent):
-        candidate.provenance = PROVENANCE_GUIDED
+# ---------------------------------------------------------------------------
+# Continuity checks against an incumbent with authority
+# ---------------------------------------------------------------------------
 
+_WHO = {PROVENANCE_GUIDED: "the guided (user-anchored) model",
+        PROVENANCE_POLE: "the pole-corroborated incumbent"}
+
+
+def _mirror_veto(candidate, incumbent, who: str) -> Optional[str]:
+    if bool(candidate.east_left) == bool(incumbent.east_left):
+        return None
+    return (f"candidate east_left={candidate.east_left} contradicts "
+            f"{who}'s {incumbent.east_left} — the mirror convention "
+            "never changes on a rig; mirrored fit")
+
+
+def _scale_veto(candidate, incumbent, who: str, notes: List[str]) -> Optional[str]:
+    ratio = scale_ratio(candidate, incumbent)
+    if ratio is None:
+        notes.append("scale continuity skipped (resolutions not comparable)")
+        return None
+    if abs(ratio - 1.0) > SCALE_CONTINUITY_MAX_DEV:
+        return (f"candidate a1={candidate.a1:.0f} is {ratio:.2f}x {who}'s "
+                f"plate scale — the lens scale never changes on a rig (limit "
+                f"±{SCALE_CONTINUITY_MAX_DEV:.0%}); wrong-scale fit")
+    notes.append(f"plate scale {ratio:.3f}x incumbent")
+    return None
+
+
+def _basin_veto(candidate, incumbent, lat_deg: float, sky_r: Optional[float],
+                who: str, notes: List[str]) -> Optional[str]:
+    d = pole_offset_px(candidate, incumbent, lat_deg)
+    tol = POLE_TOL_REF_PX * tol_scale(sky_r)
+    if d is None:
+        notes.append("pole continuity skipped (projection unavailable)")
+        return None
+    if d > tol:
+        return (f"candidate places the celestial pole {d:.0f}px from where "
+                f"{who} puts it — limit {tol:.0f}px; different basin")
+    notes.append(f"pole {d:.0f}px from the incumbent's (tol {tol:.0f}px)")
+    return None
+
+
+def _continuity(candidate, incumbent, lat_deg: float, sky_r: Optional[float],
+                who: str, notes: List[str]) -> Optional[str]:
+    """First continuity failure against an authoritative incumbent, or None."""
+    return (_mirror_veto(candidate, incumbent, who)
+            or _scale_veto(candidate, incumbent, who, notes)
+            or _basin_veto(candidate, incumbent, lat_deg, sky_r, who, notes))
+
+
+# ---------------------------------------------------------------------------
+# Admission
+# ---------------------------------------------------------------------------
 
 def admit_candidate(
     candidate,
@@ -163,58 +260,61 @@ def admit_candidate(
 
     `pole` is the consensus-resolved estimate (pole_consensus.PoleHistory) or
     None when nothing is trusted; `sky_r` is the buffer's median sky radius,
-    i.e. measured in the candidate's frame.
+    i.e. measured in the candidate's frame. On admission the candidate's
+    provenance is stamped with the evidence it was admitted on (module doc).
     """
-    notes = []
-    if is_credible_incumbent(incumbent, sky_r):
-        if bool(candidate.east_left) != bool(incumbent.east_left):
-            return False, (
-                f"candidate east_left={candidate.east_left} contradicts the "
-                f"incumbent's {incumbent.east_left} — the mirror convention "
-                "never changes on a rig; mirrored fit"
-            )
-        ratio = scale_ratio(candidate, incumbent)
-        if ratio is None:
-            notes.append("scale continuity skipped (resolutions not comparable)")
-        elif abs(ratio - 1.0) > SCALE_CONTINUITY_MAX_DEV:
-            return False, (
-                f"candidate a1={candidate.a1:.0f} is {ratio:.2f}x the incumbent's "
-                f"plate scale — the lens scale never changes on a rig (limit "
-                f"±{SCALE_CONTINUITY_MAX_DEV:.0%}); wrong-scale fit"
-            )
-        else:
-            notes.append(f"plate scale {ratio:.3f}x incumbent")
+    pole_kw = dict(sky_r=sky_r, pole_image_width=pole_image_width,
+                   pole_image_height=pole_image_height)
+    authority = incumbent_authority(incumbent)
 
-        if is_guided(incumbent):
-            d = pole_offset_px(candidate, incumbent, lat_deg)
-            tol = POLE_TOL_REF_PX * tol_scale(sky_r)
-            if d is None:
-                notes.append("pole continuity skipped (projection unavailable)")
-            elif d > tol:
-                return False, (
-                    f"candidate places the celestial pole {d:.0f}px from where "
-                    f"the guided (user-anchored) model puts it — limit "
-                    f"{tol:.0f}px; different basin"
-                )
-            else:
-                notes.append(f"pole {d:.0f}px from the guided model's (tol {tol:.0f}px)")
-            if pole is not None:
-                ok, msg = validate_pole(candidate, lat_deg, pole, sky_r=sky_r,
-                                        pole_image_width=pole_image_width,
-                                        pole_image_height=pole_image_height)
-                if not ok:
-                    log.warning(
-                        f"Measured pole disagrees with a candidate admitted on "
-                        f"the guided model's authority ({msg}) — the measured "
-                        "pole is advisory when user anchors exist")
-            return True, "admitted against the guided incumbent: " + "; ".join(notes)
+    if authority is None:
+        ok, msg = validate_pole(candidate, lat_deg, pole, **pole_kw)
+        if not ok:
+            return False, msg
+        if pole is not None:
+            candidate.provenance = PROVENANCE_POLE
+        elif incumbent is not None:
+            msg += ("; incumbent is uncorroborated — no mirror/scale "
+                    "continuity inherited")
+        return True, msg
 
-    ok, msg = validate_pole(candidate, lat_deg, pole, sky_r=sky_r,
-                            pole_image_width=pole_image_width,
-                            pole_image_height=pole_image_height)
+    notes: List[str] = []
+    veto = _continuity(candidate, incumbent, lat_deg, sky_r, _WHO[authority], notes)
+
+    if authority == PROVENANCE_GUIDED:
+        if veto:
+            return False, veto
+        if pole is not None:
+            ok, msg = validate_pole(candidate, lat_deg, pole, **pole_kw)
+            if not ok:
+                log.warning(
+                    f"Measured pole disagrees with a candidate admitted on "
+                    f"the guided model's authority ({msg}) — the measured "
+                    "pole is advisory when user anchors exist")
+        candidate.provenance = PROVENANCE_GUIDED
+        return True, "admitted against the guided incumbent: " + "; ".join(notes)
+
+    # Pole-corroborated incumbent.
+    if pole is None:
+        if veto:
+            return False, veto
+        candidate.provenance = PROVENANCE_POLE
+        return True, ("admitted against the pole-corroborated incumbent "
+                      "(no pole this run): " + "; ".join(notes))
+
+    ok, msg = validate_pole(candidate, lat_deg, pole, **pole_kw)
     if not ok:
         return False, msg
-    return True, "; ".join(notes + [msg])
+    mirror = _mirror_veto(candidate, incumbent, _WHO[authority])
+    if mirror and pole.east_left is None:
+        return False, mirror + " (measured pole has no repeated rotation vote)"
+    if veto:
+        log.warning(
+            f"Candidate passes the measured pole but not continuity with the "
+            f"pole-corroborated incumbent ({veto}) — the fresh pole measurement "
+            "outranks the incumbent's older corroboration; admitting")
+    candidate.provenance = PROVENANCE_POLE
+    return True, "; ".join([msg] + notes)
 
 
 def admit_manual(
@@ -229,19 +329,22 @@ def admit_manual(
 
     User intent wins over the incumbent — no continuity checks. A guided
     model is not vetoed by the measured pole at all: its basin is
-    human-verified, the pole is measured from an uncontrolled field.
+    human-verified, the pole is measured from an uncontrolled field. A
+    Calibrate Now result confirmed by a trusted pole is stamped
+    pole-corroborated so it carries that authority as the incumbent.
     """
+    pole_kw = dict(sky_r=sky_r, pole_image_width=pole_image_width,
+                   pole_image_height=pole_image_height)
     if is_guided(candidate):
         if pole is not None:
-            ok, msg = validate_pole(candidate, lat_deg, pole, sky_r=sky_r,
-                                    pole_image_width=pole_image_width,
-                                    pole_image_height=pole_image_height)
+            ok, msg = validate_pole(candidate, lat_deg, pole, **pole_kw)
             if not ok:
                 log.warning(
                     f"Measured pole disagrees with the guided calibration ({msg}) "
                     "— trusting the user's anchors; if the overlay is wrong, "
                     "re-check the identified stars")
         return True, "guided calibration — user anchors outrank the measured pole"
-    return validate_pole(candidate, lat_deg, pole, sky_r=sky_r,
-                         pole_image_width=pole_image_width,
-                         pole_image_height=pole_image_height)
+    ok, msg = validate_pole(candidate, lat_deg, pole, **pole_kw)
+    if ok and pole is not None:
+        candidate.provenance = PROVENANCE_POLE
+    return ok, msg
