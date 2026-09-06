@@ -24,9 +24,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services.allsky.calibration_validate import POLE_TOL_REF_PX, tol_scale
 from services.allsky.fisheye import FisheyeModel
 from services.allsky.model_admission import (
+    POLE_AUTHORITY_MAX_UNTRUSTED_RUNS,
     PROVENANCE_GUIDED,
     PROVENANCE_POLE,
     SCALE_CONTINUITY_MAX_DEV,
+    admission_evidence,
     admit_candidate,
     admit_manual,
     east_left_hint,
@@ -497,3 +499,76 @@ class TestIssue10EndToEnd:
         assert pole is None
         assert admit_candidate(_good(a1=1030.0), _good(a1=1283.0), LAT, pole, SKY_R, W, H)[0]
         assert admit_candidate(_good(a1=1283.0), _good(a1=1030.0), LAT, pole, SKY_R, W, H)[0]
+        # ...but neither admission carries evidence, so calibration_service
+        # holds an escape to the normal RMS/match comparison instead of
+        # installing it outright (model_replacement).
+        assert not admission_evidence(_good(a1=1283.0), pole)
+
+
+class TestAdmissionEvidence:
+    """What calibration_service needs to know before it lets an escape
+    result bypass the RMS guard."""
+
+    def test_uncorroborated_incumbent_and_no_pole_is_none(self):
+        assert not admission_evidence(_good(), None)
+        assert not admission_evidence(None, None)
+        assert not admission_evidence(_incident(), None)
+
+    def test_trusted_pole_is_evidence(self):
+        assert admission_evidence(_good(), _pole())
+        assert admission_evidence(None, _pole())
+
+    def test_authoritative_incumbent_is_evidence(self):
+        assert admission_evidence(_guided(), None)
+        assert admission_evidence(_corroborated(), None)
+
+    def test_expired_pole_rung_is_not_evidence(self):
+        assert not admission_evidence(_corroborated(), None,
+                                      runs_without_pole=POLE_AUTHORITY_MAX_UNTRUSTED_RUNS)
+
+
+class TestPoleRungExpiry:
+    """Review warning 3: with authority == 'pole' and no pole this run the
+    continuity vetoes bound absolutely, and the candidate inherited the
+    stamp without re-earning it — persisted across restarts. A camera
+    repositioned into an orientation where Polaris is hidden had the
+    correct new-geometry bootstrap rejected as 'different basin' forever."""
+
+    N = POLE_AUTHORITY_MAX_UNTRUSTED_RUNS
+
+    def test_horizon_is_the_history_length(self):
+        from services.allsky.pole_consensus import POLE_HISTORY_LEN
+        assert self.N == POLE_HISTORY_LEN
+
+    def test_honoured_until_the_horizon(self):
+        inc = _corroborated()
+        for runs in (0, 1, self.N - 1):
+            assert incumbent_authority(inc, runs) == PROVENANCE_POLE
+            assert is_credible_incumbent(inc, runs)
+        assert incumbent_authority(inc, self.N) is None
+        assert incumbent_authority(inc, self.N + 5) is None
+
+    def test_guided_never_expires(self):
+        assert incumbent_authority(_guided(), 10 * self.N) == PROVENANCE_GUIDED
+
+    def test_moved_camera_bootstrap_admitted_after_expiry(self):
+        """The new geometry: different basin (roll + pi) and mirror-consistent.
+        Rejected while the rung is honoured, admitted once it has aged."""
+        inc = _corroborated()
+        moved = _good(roll=_good().roll + np.pi)
+        ok, msg = admit_candidate(moved, inc, LAT, None, SKY_R, W, H,
+                                  runs_without_pole=self.N - 1)
+        assert not ok and 'different basin' in msg
+        ok, msg = admit_candidate(moved, inc, LAT, None, SKY_R, W, H,
+                                  runs_without_pole=self.N)
+        assert ok, msg
+        assert 'uncorroborated' in msg
+        assert moved.provenance == ''             # not inherited from a lapsed rung
+
+    def test_expired_rung_gives_no_search_hint(self):
+        assert east_left_hint(_corroborated(), None, self.N - 1) is True
+        assert east_left_hint(_corroborated(), None, self.N) is None
+
+    def test_default_is_no_drought(self):
+        """Callers without a history (tests, tools) see the stamp honoured."""
+        assert incumbent_authority(_corroborated()) == PROVENANCE_POLE

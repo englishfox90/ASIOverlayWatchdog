@@ -326,6 +326,46 @@ original analysis missed), but not the wrong winner. Changes:
   not compared against a multi-image joint RMS (V5-vs-multi-3h finding); a
   same-basin multi-image candidate replaces it on rank alone.
 
+#### Update 2026-09-05 (issue #10, part 3) — second review of the provenance model
+
+- **Basin escape installs only on evidence** (`model_replacement.py`, new;
+  the replace-or-keep decision moved out of `_on_refine_done`). Every
+  pre-provenance installation loads its calibration as `''`
+  (uncorroborated), and with no trusted pole `admit_candidate` checks
+  nothing — so the escape's "already passed every gate" bypass of the RMS
+  guard was installing and saving a seedless bootstrap over a hazy buffer
+  unconditionally. `_RefineWorker` now emits
+  `model_admission.admission_evidence` (authoritative incumbent, or a
+  trusted pole gated the candidate) with the result; without it an escape
+  is held to the normal RMS / match comparison — it can still win when it
+  is genuinely better, so a wrong cold-start model is not a lock either.
+- **Manual paths measure the pole** (`PoleHistory.evaluate`, read-only):
+  the history is fed only by refine runs (35-min, 15-frame span), so the
+  first Calibrate Now / guided solve ran ungated. `validate_against_pole`
+  now runs `find_pole` on the buffer (≈35 ms, GUI thread) and judges the
+  fresh estimate alongside the history without recording it.
+- **Repeated rotation votes must be independent**: `PoleEstimate` carries
+  its buffer window (`window_start/end`) and only votes from
+  non-overlapping windows repeat. Consecutive runs share most of one
+  rolling buffer, and on a fast rig the 12-run history is shorter than a
+  buffer span, so found estimates are kept in a longer vote ledger
+  (`VOTE_LEDGER_LEN = 64`); only votes within the link tolerance of the
+  current position count.
+- **The `'pole'` rung ages**: honoured only while a pole has been trusted
+  within the last `POLE_AUTHORITY_MAX_UNTRUSTED_RUNS = POLE_HISTORY_LEN`
+  recorded runs (`PoleHistory.runs_since_trusted`), so a camera moved into
+  an orientation with Polaris hidden is not vetoed as "different basin"
+  forever. Reversible: the next trusted pole resets the count.
+- **Positions are compared in one frame**: `PoleEstimate` carries its
+  frame resolution; history entries are rescaled across a resize and
+  dropped across a crop, so a mid-session `resize_percent` change neither
+  splits the clusters nor needs the history cleared.
+- `DOMINANT_MODE_FRACTION = 0.75` kept (see `pole_consensus` module doc):
+  a withheld pole is no longer free — it is also the evidence an escape
+  needs — and the regime where 0.75 errs unsafe (Polaris visible but
+  losing ≥75 % of runs to a light) is one the rotation-support ranking
+  measured as not occurring; the #10 six-cluster log is still rejected.
+
 Residual risk (documented, not fixed): a bright in-band light within ~200 px
 of a *hidden* pole can still clear the floor; a stable single contaminant is
 unimodal by definition. Both are covered for a user who has run guided

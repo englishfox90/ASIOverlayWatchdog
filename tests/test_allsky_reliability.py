@@ -33,16 +33,10 @@ def _model(rms: float, n_matches: int, n_images: int = 5,
 
 def _would_improve(current: FisheyeModel, new: FisheyeModel,
                    current_quality: str) -> bool:
-    """Replicate the _on_refine_done accept/reject logic as a pure function."""
+    """The _on_refine_done accept/reject decision (model_replacement)."""
+    from services.allsky.model_replacement import should_replace
     new_q = model_quality(new, new.n_images, new.span_minutes)
-    rms_ok = new.rms_residual <= current.rms_residual * 1.15
-    return rms_ok and (
-        CalibrationQuality.rank(new_q) > CalibrationQuality.rank(current_quality)
-        or (
-            new.rms_residual < current.rms_residual
-            and new.n_matches >= current.n_matches
-        )
-    )
+    return should_replace(current, current_quality, new, new_q)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -146,10 +140,12 @@ class TestBasinEscape:
         svc._on_refine_failed("Cold-start bootstrap failed: …")
         assert svc._consecutive_refine_failures == 0
 
-    def test_escape_result_bypasses_rms_guard(self):
+    def test_escape_result_on_evidence_bypasses_rms_guard(self):
         """The wrong-basin incident model carried a flattering RMS (4.2px,
-        11 matches). An honest escape result (9px, 200 matches) must replace
-        it even though the normal guard would reject the RMS regression."""
+        11 matches). An honest escape result (9px, 200 matches) admitted on
+        evidence (a trusted pole, or continuity with an authoritative
+        incumbent) must replace it even though the normal guard would
+        reject the RMS regression."""
         svc = self._service()
         bad = _model(rms=4.0, n_matches=11, n_images=1, span_minutes=0.0)
         svc._model = bad
@@ -157,10 +153,66 @@ class TestBasinEscape:
         svc._escape_attempt = True
         svc._refine_gen = svc._model_generation
         honest = _model(rms=9.0, n_matches=200, n_images=20, span_minutes=60.0)
-        svc._on_refine_done(honest, 20, 60.0)
+        svc._on_refine_done(honest, 20, 60.0, evidence=True)
         assert svc._model is honest
         assert svc._consecutive_refine_failures == 0
         assert svc._escape_attempt is False
+
+    def test_escape_without_evidence_cannot_overwrite_legacy_model(self, tmp_path):
+        """Review blocker: every pre-provenance installation loads its
+        calibration uncorroborated, and with no trusted pole admit_candidate
+        checks nothing — so an escape result used to be installed and saved
+        unconditionally. A wrong-scale bootstrap over a hazy buffer (the #10
+        a1≈1030 family: fewer matches, plausible RMS) must be held to the
+        normal comparison and lose."""
+        import json
+        from services.allsky.model_admission import incumbent_authority
+        good = _model(rms=7.7, n_matches=4561, n_images=40, span_minutes=80.0)
+        good.provenance = 'pole'                 # stamped by a newer build...
+        p = tmp_path / "allsky_calibration.json"
+        good.save(str(p))
+        legacy = json.loads(p.read_text())
+        del legacy['provenance']                 # ...but this file predates it
+        p.write_text(json.dumps(legacy))
+
+        svc = self._service()
+        saved = []
+        svc._save_model = lambda m: saved.append(m)
+        svc.load_model(str(p))
+        assert svc.current_model.provenance == ''
+        assert incumbent_authority(svc.current_model) is None
+        svc._escape_attempt = True
+        svc._refine_gen = svc._model_generation
+        wrong = _model(rms=6.0, n_matches=900, n_images=20, span_minutes=60.0)
+        wrong.a1 = 600.0 * 0.8
+        svc._on_refine_done(wrong, 20, 60.0, evidence=False)
+        assert svc.current_model is not wrong
+        assert svc.current_model.n_matches == 4561
+        assert saved == []
+        assert svc._escape_attempt is False
+
+    def test_escape_without_evidence_still_wins_when_genuinely_better(self):
+        """The previous blocker's fix must survive: a wrong cold-start model
+        (uncorroborated, no pole) is not a permanent lock — a candidate that
+        beats it on the numbers replaces it."""
+        svc = self._service()
+        svc._model = _model(rms=9.0, n_matches=300, n_images=20, span_minutes=60.0)
+        svc._quality = model_quality(svc._model, 20, 60.0)
+        svc._escape_attempt = True
+        svc._refine_gen = svc._model_generation
+        better = _model(rms=7.0, n_matches=1200, n_images=25, span_minutes=70.0)
+        svc._on_refine_done(better, 25, 70.0, evidence=False)
+        assert svc._model is better
+
+    def test_worker_signal_carries_evidence(self):
+        from services.allsky.calibration_service import _RefineWorker
+        w = _RefineWorker([], None, 5, 30.0)
+        # (model, n_images, span_min, evidence)
+        received = []
+        w.finished.connect(lambda *a: received.append(a))
+        m = _model(rms=5.0, n_matches=50)
+        w.finished.emit(m, 5, 30.0, True)
+        assert received == [(m, 5, 30.0, True)]
 
     def test_non_escape_regression_still_rejected(self):
         """Without the escape flag, the 15% RMS guard still protects."""
@@ -199,6 +251,88 @@ class TestBasinEscape:
         guided.provenance = 'guided'
         ok, msg = svc.validate_against_pole(guided)
         assert ok and 'guided' in msg
+
+
+class TestManualPathMeasuresThePole:
+    """Review warning 1: the history is populated only by refine runs (35-min,
+    15-frame span), so on a fresh install the first Calibrate Now / guided
+    solve — saved to disk, seed of every later refinement — ran against an
+    empty history and was admitted ungated while a measurement sat in the
+    same buffer. validate_against_pole now measures the buffer and judges
+    the fresh estimate alongside the history without recording it."""
+
+    LAT = 38.9717
+
+    def _service(self, monkeypatch, fresh):
+        from datetime import datetime, timezone
+        from services.allsky import calibration_service as cs
+        svc = cs.CalibrationService()
+        svc._save_model = lambda m: None
+        svc._lat = self.LAT
+        svc._frames.append({
+            'dt': datetime(2026, 1, 16, 8, 0, tzinfo=timezone.utc),
+            'detected': [(1.0, 1.0, 100.0)], 'sky_cx': 960.0, 'sky_cy': 540.0,
+            'sky_r': 500.0, 'image_width': 1920, 'image_height': 1080,
+        })
+        calls = []
+
+        def fake_find_pole(frames, lat, *a, **k):
+            calls.append(len(frames))
+            return fresh
+        monkeypatch.setattr(cs, 'find_pole', fake_find_pole)
+        return svc, calls
+
+    @staticmethod
+    def _estimate(x, y, east_left):
+        from services.allsky.pole_finder import PoleEstimate
+        return PoleEstimate(x=x, y=y, east_left=east_left, sign=-1, n_frames=12,
+                            span_minutes=60.0, drift_px=1.0, flux=3000.0,
+                            sign_votes=(30, 300), image_width=1920,
+                            image_height=1080)
+
+    def test_first_manual_result_is_gated_by_the_fresh_measurement(self, monkeypatch):
+        from services.allsky.model_admission import projected_pole
+        model = _model(rms=5.0, n_matches=50)
+        model.image_width, model.image_height = 1920, 1080
+        px, py = projected_pole(model, self.LAT)
+        svc, calls = self._service(monkeypatch, self._estimate(px + 900.0, py, True))
+        assert len(svc._pole_history) == 0
+        ok, msg = svc.validate_against_pole(model)
+        assert not ok and 'measured position' in msg
+        assert calls == [1]
+        assert len(svc._pole_history) == 0        # measured, never recorded
+
+    def test_matching_manual_result_passes_and_is_corroborated(self, monkeypatch):
+        from services.allsky.model_admission import projected_pole
+        model = _model(rms=5.0, n_matches=50)
+        model.image_width, model.image_height = 1920, 1080
+        px, py = projected_pole(model, self.LAT)
+        svc, _ = self._service(monkeypatch, self._estimate(px, py, True))
+        ok, msg = svc.validate_against_pole(model)
+        assert ok, msg
+        assert model.provenance == 'pole'
+
+    def test_one_physical_reading_never_asserts_the_mirror(self, monkeypatch):
+        """Review blocker 3 (kept): however many times the same buffer is
+        judged, a single reading's decisive vote must not become the
+        'repeated' vote that asserts east_left — here the reading votes
+        the OPPOSITE mirror to the model, so any assertion would veto."""
+        from services.allsky.model_admission import projected_pole
+        model = _model(rms=5.0, n_matches=50)
+        model.image_width, model.image_height = 1920, 1080
+        model.east_left = True
+        px, py = projected_pole(model, self.LAT)
+        svc, calls = self._service(monkeypatch, self._estimate(px, py, False))
+        for _ in range(3):
+            ok, msg = svc.validate_against_pole(model)
+            assert ok, msg
+        assert calls == [1, 1, 1]
+        assert len(svc._pole_history) == 0
+
+    def test_no_measurement_and_empty_history_is_ungated(self, monkeypatch):
+        svc, _ = self._service(monkeypatch, None)
+        ok, msg = svc.validate_against_pole(_model(rms=5.0, n_matches=50))
+        assert ok and 'skipped' in msg
 
 
 class TestGuidedIncumbentRefinement:

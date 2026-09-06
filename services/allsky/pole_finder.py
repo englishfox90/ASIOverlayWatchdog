@@ -48,13 +48,14 @@ module returns None below the equator rather than guess. The sign→east_left
 mapping is still written hemisphere-aware for when a southern path exists.
 """
 from dataclasses import dataclass
+from datetime import datetime
 from typing import List, Optional, Tuple
 
 import numpy as np
 
 from services.logger import app_logger as log
 
-from .calibration_validate import SKY_TRIM_FRACTION, tol_scale
+from .calibration_validate import SKY_TRIM_FRACTION, median_frame_resolution, tol_scale
 
 # Sidereal rotation rate.
 SIDEREAL_DEG_PER_MIN = 360.0 / (23.9345 * 60.0)
@@ -138,6 +139,16 @@ class PoleEstimate:
     drift_px: float             # measured drift of the pole-star track
     flux: float                 # median flux of the pole-star track
     sign_votes: Tuple[int, int]  # (matches for +1, matches for -1)
+    # The buffer window the estimate was measured over. Two estimates are
+    # independent evidence only when their windows do not overlap
+    # (pole_consensus); consecutive refine runs share most of one rolling
+    # buffer. None = unknown (an estimate not produced by find_pole).
+    window_start: Optional[datetime] = None
+    window_end: Optional[datetime] = None
+    # Resolution of the frames x/y were measured on; 0 = unknown. The
+    # history compares and rescales positions across resize changes.
+    image_width: int = 0
+    image_height: int = 0
 
 
 def predicted_polaris_arc_px(sky_r: float, span_minutes: float) -> float:
@@ -226,10 +237,13 @@ def find_pole(
         # Southern hemisphere rotates the other way around the SCP.
         east_left = (sign < 0) if lat_deg >= 0 else (sign > 0)
 
+    img_w, img_h = median_frame_resolution(usable)
     est = PoleEstimate(
         x=float(pole_x), y=float(pole_y), east_left=east_left, sign=sign,
         n_frames=len(sample), span_minutes=float(span_min),
         drift_px=float(drift), flux=float(flux), sign_votes=votes,
+        window_start=usable[0]['dt'], window_end=usable[-1]['dt'],
+        image_width=img_w, image_height=img_h,
     )
     log.info(
         f"Pole estimate: ({est.x:.1f}, {est.y:.1f}) from {n_hits}/{len(sample)} "

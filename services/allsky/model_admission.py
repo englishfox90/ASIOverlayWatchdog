@@ -40,6 +40,17 @@ Trust ladder, highest first. `FisheyeModel.provenance` records the rung:
    genuine pole is measured. The one exception is the mirror when the
    current pole has no repeated rotation vote — then the incumbent's
    verified mirror is the only mirror evidence and still binds.
+   The rung AGES: it is honoured only while the pole has been trusted
+   within the last POLE_AUTHORITY_MAX_UNTRUSTED_RUNS recorded runs. The
+   stamp is persisted, but the evidence behind it is a measurement of the
+   field, and a camera repositioned during maintenance (a documented event
+   on this project's own rig) into an orientation where Polaris is hidden
+   would otherwise reject the correct new-geometry bootstrap as "different
+   basin" against an incumbent nothing has vouched for since the move —
+   every escape, forever. The horizon is the pole history length: once
+   nothing in the history corroborates the field any more, the incumbent's
+   corroboration is off the record too. It is reversible — the next
+   trusted pole resets the count and the stamp binds again.
 3. UNCORROBORATED ('' — automatic fit admitted without a trusted pole,
    Calibrate Now without one, or a legacy file) — inherits nothing. The
    candidate is gated by the measured pole alone, and only when
@@ -74,10 +85,15 @@ from .calibration_validate import (
     validate_lens_polynomial,
     validate_pole,
 )
+from .pole_consensus import POLE_HISTORY_LEN
 
 PROVENANCE_GUIDED = 'guided'
 PROVENANCE_POLE = 'pole'
 SCALE_CONTINUITY_MAX_DEV = 0.10
+
+# Consecutive recorded runs with no trusted pole after which a 'pole'
+# incumbent stops constraining its replacement (module doc, rung 2).
+POLE_AUTHORITY_MAX_UNTRUSTED_RUNS = POLE_HISTORY_LEN
 
 # Frames whose aspect ratios differ by more than this are a crop, not a
 # resize — no single scale factor relates their pixels (as validate_pole).
@@ -94,13 +110,15 @@ def is_pole_corroborated(model) -> bool:
                 and getattr(model, 'provenance', '') == PROVENANCE_POLE)
 
 
-def incumbent_authority(model) -> Optional[str]:
+def incumbent_authority(model, runs_without_pole: int = 0) -> Optional[str]:
     """The provenance rung on which `model` may constrain its replacement.
 
     PROVENANCE_GUIDED, PROVENANCE_POLE, or None when the incumbent has no
-    standing (missing, invalid, uncorroborated, or — for a corroborated
-    model — an implausible lens polynomial, which a stamped file should
-    never carry but a hand-edited one might). The a1-vs-sky-circle gate is
+    standing (missing, invalid, uncorroborated, a pole-corroborated model
+    whose corroboration has aged out — `runs_without_pole` is
+    PoleHistory.runs_since_trusted — or, for a corroborated model, an
+    implausible lens polynomial, which a stamped file should never carry
+    but a hand-edited one might). The a1-vs-sky-circle gate is
     deliberately NOT re-run here: it was applied in the incumbent's own
     frame when it was admitted, and the buffer's sky radius is in the
     candidate's frame, which differs whenever the incumbent came from a
@@ -110,14 +128,33 @@ def incumbent_authority(model) -> Optional[str]:
         return None
     if is_guided(model):
         return PROVENANCE_GUIDED
-    if is_pole_corroborated(model) and validate_lens_polynomial(model)[0]:
+    if (is_pole_corroborated(model)
+            and runs_without_pole < POLE_AUTHORITY_MAX_UNTRUSTED_RUNS
+            and validate_lens_polynomial(model)[0]):
         return PROVENANCE_POLE
     return None
 
 
-def is_credible_incumbent(model) -> bool:
+def is_credible_incumbent(model, runs_without_pole: int = 0) -> bool:
     """Can this incumbent vouch for the rig's mirror and plate scale?"""
-    return incumbent_authority(model) is not None
+    return incumbent_authority(model, runs_without_pole) is not None
+
+
+def admission_evidence(incumbent, pole, runs_without_pole: int = 0) -> bool:
+    """Did admit_candidate weigh anything beyond the candidate's own fit?
+
+    True when the incumbent had authority (the candidate passed continuity
+    with it, or a trusted pole outranked it) or a trusted pole gated the
+    candidate. False is the "no pole estimate — check skipped; incumbent is
+    uncorroborated" admission: the candidate proved nothing except that it
+    passed the per-model gates, which the #10 wrong-scale escapes also did.
+    calibration_service lets a basin-escape result bypass the RMS guard
+    only on evidence — on every pre-provenance installation the on-disk
+    model loads uncorroborated, and a seedless bootstrap over a hazy
+    buffer must not overwrite it unconditionally.
+    """
+    return (incumbent_authority(incumbent, runs_without_pole) is not None
+            or pole is not None)
 
 
 def frame_scale(candidate, incumbent) -> Optional[float]:
@@ -171,7 +208,7 @@ def pole_offset_px(candidate, incumbent, lat_deg: float) -> Optional[float]:
     return float(np.hypot(pc[0] - pi[0] * s, pc[1] - pi[1] * s))
 
 
-def east_left_hint(incumbent, pole) -> Optional[bool]:
+def east_left_hint(incumbent, pole, runs_without_pole: int = 0) -> Optional[bool]:
     """Mirror convention to restrict a cold-start/escape orientation search.
 
     A guided incumbent knows the rig's mirror outright; otherwise the
@@ -182,7 +219,7 @@ def east_left_hint(incumbent, pole) -> Optional[bool]:
     incumbent is used here: the latter is how a wrong-mirror cold-start fit
     used to steer every later search into its own half.
     """
-    authority = incumbent_authority(incumbent)
+    authority = incumbent_authority(incumbent, runs_without_pole)
     if authority == PROVENANCE_GUIDED:
         return bool(incumbent.east_left)
     if pole is not None and pole.east_left is not None:
@@ -255,17 +292,21 @@ def admit_candidate(
     sky_r: Optional[float],
     pole_image_width: Optional[int] = None,
     pole_image_height: Optional[int] = None,
+    runs_without_pole: int = 0,
 ) -> Tuple[bool, str]:
     """Gate an automatic candidate (refinement / bootstrap / basin escape).
 
     `pole` is the consensus-resolved estimate (pole_consensus.PoleHistory) or
     None when nothing is trusted; `sky_r` is the buffer's median sky radius,
-    i.e. measured in the candidate's frame. On admission the candidate's
-    provenance is stamped with the evidence it was admitted on (module doc).
+    i.e. measured in the candidate's frame; `runs_without_pole` ages the
+    incumbent's pole corroboration (incumbent_authority). On admission the
+    candidate's provenance is stamped with the evidence it was admitted on
+    (module doc). Whether that evidence existed at all is a separate
+    question the caller asks admission_evidence() with the same inputs.
     """
     pole_kw = dict(sky_r=sky_r, pole_image_width=pole_image_width,
                    pole_image_height=pole_image_height)
-    authority = incumbent_authority(incumbent)
+    authority = incumbent_authority(incumbent, runs_without_pole)
 
     if authority is None:
         ok, msg = validate_pole(candidate, lat_deg, pole, **pole_kw)

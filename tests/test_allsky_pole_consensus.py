@@ -7,6 +7,8 @@ stability test would admit it. Multi-modality is the signal.
 """
 import os
 import sys
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -24,6 +26,8 @@ from services.allsky.pole_consensus import (
     PoleHistory,
     cluster_positions,
     consensus_east_left,
+    independent_windows,
+    to_frame,
 )
 from services.allsky.pole_finder import PoleEstimate
 
@@ -294,3 +298,221 @@ class TestContaminatedField:
     def test_none_passes_through(self):
         h = PoleHistory()
         assert h.record(None, 1563.0) is None
+
+
+# ---------------------------------------------------------------------------
+# Review warning 1: a reader with its own measurement
+# ---------------------------------------------------------------------------
+
+class TestEvaluate:
+    def test_fresh_measurement_gates_on_an_empty_history(self):
+        """The first Calibrate Now on a fresh install: nothing recorded yet,
+        but the buffer yields a pole — it must be used."""
+        h = PoleHistory()
+        r = h.evaluate(est(1718, 646), 1563.0)
+        assert r is not None and (r.x, r.y) == (1718.0, 646.0)
+        assert r.east_left is None
+        assert len(h) == 0
+
+    def test_evaluate_never_records(self):
+        h = PoleHistory()
+        h.record(est(1718, 646), 1563.0)
+        for _ in range(3):
+            assert h.evaluate(est(1719, 647), 1563.0) is not None
+        assert len(h) == 1
+        assert h.runs_since_trusted == 0
+
+    def test_one_reading_evaluated_repeatedly_never_asserts_mirror(self):
+        h = PoleHistory()
+        reading = est(1718, 646, east_left=True)
+        for _ in range(4):
+            assert h.evaluate(reading, 1563.0).east_left is None
+
+    def test_fresh_outlier_is_not_trusted(self):
+        h = PoleHistory()
+        for _ in range(4):
+            h.record(est(1718, 646), 1563.0)
+        assert h.evaluate(est(2400, 1900), 1563.0) is None
+
+    def test_fresh_miss_keeps_an_established_consensus(self):
+        """A miss lowers the found fraction but does not erase what the
+        field has shown: the manual result is still held to it."""
+        h = PoleHistory()
+        for _ in range(4):
+            h.record(est(1718, 646), 1563.0)
+        r = h.evaluate(None, 1563.0)
+        assert r is not None and (r.x, r.y) == (1718.0, 646.0)
+        assert PoleHistory().evaluate(None, 1563.0) is None
+
+    def test_fresh_second_cluster_withdraws_trust(self):
+        h = PoleHistory()
+        h.record(est(1822, 2765), 1563.0)
+        assert h.evaluate(est(988, 1792), 1563.0) is None
+
+
+# ---------------------------------------------------------------------------
+# Review warning 2: "repeated" votes must be independent
+# ---------------------------------------------------------------------------
+
+T0 = datetime(2026, 1, 16, 8, 0, tzinfo=timezone.utc)
+
+
+def windowed(x, y, start_min, end_min, east_left=True):
+    return replace(est(x, y, east_left=east_left),
+                   window_start=T0 + timedelta(minutes=start_min),
+                   window_end=T0 + timedelta(minutes=end_min))
+
+
+class TestIndependentWindows:
+    def test_overlapping_windows_do_not_repeat(self):
+        """Consecutive runs 2 min apart over a 30-min buffer: the same
+        measurement twice, not a repeated vote."""
+        h = PoleHistory()
+        h.record(windowed(1718, 646, 0, 30), 1563.0)
+        r = h.record(windowed(1719, 647, 2, 32), 1563.0)
+        assert r is not None and r.east_left is None
+        r = h.record(windowed(1719, 647, 4, 34), 1563.0)
+        assert r.east_left is None
+
+    def test_disjoint_windows_repeat(self):
+        h = PoleHistory()
+        h.record(windowed(1718, 646, 0, 30), 1563.0)
+        assert h.record(windowed(1719, 647, 30, 60), 1563.0).east_left is True
+
+    def test_counts_mutually_disjoint_sets(self):
+        assert independent_windows([windowed(0, 0, 0, 30), windowed(0, 0, 10, 40),
+                                    windowed(0, 0, 35, 60)]) == 2
+        assert independent_windows([windowed(0, 0, 0, 30), windowed(0, 0, 10, 40),
+                                    windowed(0, 0, 20, 50)]) == 1
+
+    def test_unstamped_estimates_count_as_independent(self):
+        """Documented: only find_pole makes estimates in production and it
+        always stamps them; an unstamped one cannot be shown to overlap."""
+        assert independent_windows([est(0, 0), est(0, 0)]) == 2
+        assert independent_windows([est(0, 0), windowed(0, 0, 0, 30)]) == 2
+
+    def test_ledger_outlives_the_position_history(self):
+        """On a fast rig the 12-run history is shorter than one buffer span,
+        so no two windows inside it are ever disjoint: the vote must draw
+        on runs that have already rolled out of the position history."""
+        h = PoleHistory(maxlen=4)
+        for k in range(8):                       # 2-min cadence, 30-min buffer
+            r = h.record(windowed(1718, 646, 2 * k, 2 * k + 30), 1563.0)
+        assert r.east_left is None               # 14 min apart at most
+        for k in range(8, 20):
+            r = h.record(windowed(1718, 646, 2 * k, 2 * k + 30), 1563.0)
+        assert len(h) == 4
+        assert r.east_left is True               # run 0 and run 15+ are disjoint
+
+    def test_votes_at_another_position_do_not_count(self):
+        """A contaminant's (or pre-move) vote elsewhere in the frame never
+        speaks for the current pole position."""
+        h = PoleHistory(maxlen=4)
+        h.record(windowed(1822, 2765, 0, 30, east_left=False), 1563.0)
+        for _ in range(4):
+            h.record(None, 1563.0)               # roll the contaminant out
+        h.record(windowed(1718, 646, 60, 90, east_left=True), 1563.0)
+        r = h.record(windowed(1719, 647, 62, 92, east_left=True), 1563.0)
+        assert r is not None
+        assert r.east_left is None               # the far dissent is ignored...
+        r = h.record(windowed(1719, 647, 100, 130, east_left=True), 1563.0)
+        assert r.east_left is True               # ...and so is its window
+
+    def test_dissent_in_the_ledger_withdraws_mirror(self):
+        h = PoleHistory()
+        h.record(windowed(1718, 646, 0, 30, east_left=True), 1563.0)
+        h.record(windowed(1719, 647, 40, 70, east_left=False), 1563.0)
+        assert h.record(windowed(1718, 646, 80, 110, east_left=True), 1563.0).east_left is None
+
+    def test_find_pole_stamps_window_and_resolution(self):
+        from services.allsky.pole_finder import find_pole
+        from tests.test_allsky_pole_finder import make_frames
+        frames = make_frames(n_frames=12, span_min=66.0)
+        for f in frames:
+            f['image_width'], f['image_height'] = 3552, 3552
+        e = find_pole(frames, lat_deg=39.0)
+        assert e is not None
+        assert e.window_start == frames[0]['dt'] and e.window_end == frames[-1]['dt']
+        assert (e.image_width, e.image_height) == (3552, 3552)
+
+    def test_clear_empties_the_ledger(self):
+        h = PoleHistory()
+        h.record(windowed(1718, 646, 0, 30), 1563.0)
+        h.clear()
+        h.record(windowed(1718, 646, 60, 90), 1563.0)
+        assert h.current(1563.0).east_left is None
+
+
+# ---------------------------------------------------------------------------
+# Review warning 3: runs without a trusted pole
+# ---------------------------------------------------------------------------
+
+class TestRunsSinceTrusted:
+    def test_counts_and_resets(self):
+        h = PoleHistory()
+        assert h.runs_since_trusted == 0
+        h.record(None, 1563.0)
+        h.record(None, 1563.0)
+        assert h.runs_since_trusted == 2
+        h.record(est(1718, 646), 1563.0)         # found in 1/3 — not trusted
+        assert h.runs_since_trusted == 3
+        h.record(est(1718, 646), 1563.0)         # 2/4 — trusted
+        assert h.runs_since_trusted == 0
+        h.record(est(2400, 1900), 1563.0)        # outlier run
+        assert h.runs_since_trusted == 1
+
+    def test_clear_resets(self):
+        h = PoleHistory()
+        h.record(None, 1563.0)
+        h.clear()
+        assert h.runs_since_trusted == 0
+
+
+# ---------------------------------------------------------------------------
+# Review warning 4: positions are compared in one frame
+# ---------------------------------------------------------------------------
+
+def at_res(x, y, w, h, east_left=True):
+    return replace(est(x, y, east_left=east_left), image_width=w, image_height=h)
+
+
+class TestResolution:
+    def test_resize_mid_session_is_rescaled_not_split(self):
+        """Full-res runs then resize_percent=50: the half-res estimate is
+        the same pole and must join the same mode, in the new frame."""
+        h = PoleHistory()
+        for _ in range(3):
+            h.record(at_res(1718, 646, 3552, 3552), 1563.0)
+        r = h.record(at_res(859, 323, 1776, 1776), 781.5)
+        assert r is not None
+        assert (r.x, r.y) == (859.0, 323.0)
+        assert (r.image_width, r.image_height) == (1776, 1776)
+        assert r.east_left is True
+
+    def test_current_rescales_into_the_requested_frame(self):
+        h = PoleHistory()
+        h.record(at_res(1718, 646, 3552, 3552), 1563.0)
+        h.record(at_res(1720, 648, 3552, 3552), 1563.0)
+        r = h.current(781.5, image_width=1776, image_height=1776)
+        assert r.x == pytest.approx(860.0) and r.y == pytest.approx(324.0)
+
+    def test_crop_is_dropped_not_compared(self):
+        h = PoleHistory()
+        h.record(at_res(1718, 646, 3552, 3552), 1563.0)
+        h.record(at_res(1718, 646, 3552, 3552), 1563.0)
+        r = h.record(at_res(500, 400, 1200, 3552), 1563.0)
+        assert r is not None and (r.x, r.y) == (500.0, 400.0)
+        assert r.east_left is None                # nothing comparable to vote
+
+    def test_unknown_resolution_compares_as_is(self):
+        h = PoleHistory()
+        h.record(est(1718, 646), 1563.0)
+        assert h.record(at_res(1719, 647, 3552, 3552), 1563.0) is not None
+
+    def test_to_frame(self):
+        e = at_res(1000, 500, 2000, 1000)
+        f = to_frame(e, 1000, 500)
+        assert (f.x, f.y, f.image_width, f.image_height) == (500.0, 250.0, 1000, 500)
+        assert to_frame(e, 1000, 800) is None
+        assert to_frame(e, 0, 0) is e
+        assert to_frame(est(1, 1), 1000, 500) is not None

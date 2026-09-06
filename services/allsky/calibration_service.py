@@ -35,7 +35,9 @@ from .coords import radec_to_altaz
 from .calibration import calibrate, CalibrationError
 from .calibration_quality import CalibrationQuality, model_quality  # re-exported for existing callers
 from .calibration_validate import median_frame_resolution
-from .model_admission import admit_candidate, admit_manual, east_left_hint, is_guided
+from .model_admission import (
+    admission_evidence, admit_candidate, admit_manual, east_left_hint)
+from .model_replacement import should_replace
 from .multi_calibrate import median_sky_r, refine_from_detections
 from .pole_consensus import PoleHistory
 from .pole_finder import find_pole
@@ -79,7 +81,10 @@ ESCAPE_COOLDOWN_S = 600     # bootstrap fits are expensive; don't spam them
 class _RefineWorker(QThread):
     """Run multi-image joint calibration in a background thread."""
 
-    finished = Signal(object, int, float)  # (FisheyeModel, n_images, span_min)
+    # (FisheyeModel, n_images, span_min, admitted on evidence?) — the last
+    # is model_admission.admission_evidence, which _on_refine_done needs to
+    # decide whether a basin-escape result may bypass the RMS guard.
+    finished = Signal(object, int, float, bool)
     failed = Signal(str)                   # error message
 
     def __init__(self, frames, seed_model, n_images: int, span_min: float,
@@ -108,21 +113,26 @@ class _RefineWorker(QThread):
                     find_pole(self._frames, self._lat), sky_r)
             except Exception as e:
                 log.debug(f"Pole estimation failed (non-fatal): {e}")
+            # Runs without a trusted pole age the incumbent's 'pole' rung
+            # (model_admission); read after record() so this run counts.
+            drought = self._pole_history.runs_since_trusted
 
             model = refine_from_detections(
                 self._frames,
                 self._seed,
                 max_residual_px=MAX_RESIDUAL_PX,
-                east_left_hint=east_left_hint(self._incumbent, pole),
+                east_left_hint=east_left_hint(self._incumbent, pole, drought),
             )
             pole_w, pole_h = median_frame_resolution(self._frames)
             ok, msg = admit_candidate(
                 model, self._incumbent, self._lat, pole, sky_r,
-                pole_image_width=pole_w, pole_image_height=pole_h)
+                pole_image_width=pole_w, pole_image_height=pole_h,
+                runs_without_pole=drought)
             if not ok:
                 raise CalibrationError(f"admission check failed: {msg}")
             log.info(f"Refinement admitted: {msg}")
-            self.finished.emit(model, self._n_images, self._span_min)
+            evidence = admission_evidence(self._incumbent, pole, drought)
+            self.finished.emit(model, self._n_images, self._span_min, evidence)
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -192,8 +202,8 @@ class CalibrationService(QObject):
         self._last_skip_summary_t = 0.0
         # Basin escape (see BASIN_ESCAPE_FAILURES). _escape_attempt marks the
         # in-flight refinement as a seedless bootstrap whose result may
-        # replace the current model without the RMS-regression guard — the
-        # current model's own (possibly flattering) RMS is what's in doubt.
+        # replace the current model without the RMS-regression guard — but
+        # only when it was admitted on evidence (model_replacement).
         self._consecutive_refine_failures = 0
         self._last_escape_time = 0.0
         self._escape_attempt = False
@@ -327,11 +337,17 @@ class CalibrationService(QObject):
         is available — the pole is an optional constraint, never a gate on
         its own absence.
 
-        Reads what the refine worker has recorded (PoleHistory.current) and
-        never re-measures the buffer: a fresh find_pole here would be the
-        same physical window the worker already recorded, and recording it
-        again counted one measurement as a "repeated" rotation vote. Cheap
-        enough for the GUI thread.
+        Measures the pole from the buffer NOW and judges it alongside what
+        the refine worker has recorded (PoleHistory.evaluate) without
+        recording it. The history alone is empty on a fresh install — it is
+        populated only by refine runs, which need a 35-min, 15-frame span —
+        so the first Calibrate Now / guided solve, whose result is saved to
+        disk and seeds every later refinement, would otherwise run ungated
+        while a measurement was sitting in the same buffer. Not recording
+        it is what keeps one physical window from counting as a "repeated"
+        rotation vote (the mirror also needs non-overlapping windows now).
+        find_pole is ~35 ms on a full 60-frame buffer of 200 detections:
+        fine on the GUI thread for a user-initiated action.
 
         The buffer frames are fed post-resize (image_processor feeds the
         preview-resolution frame, see ImageProcessorWorker), while manual and
@@ -343,10 +359,14 @@ class CalibrationService(QObject):
         re-introduces the cross-resolution comparison bug.
         """
         with self._lock:
-            sky_r = median_sky_r(self._frames)
-            pole_w, pole_h = median_frame_resolution(self._frames)
+            # Frame dicts are never mutated after append; a shallow copy
+            # is enough for find_pole to read them off the lock.
+            frames = list(self._frames)
+            sky_r = median_sky_r(frames)
+            pole_w, pole_h = median_frame_resolution(frames)
         try:
-            pole = self._pole_history.current(sky_r)
+            fresh = find_pole(frames, self._lat) if frames else None
+            pole = self._pole_history.evaluate(fresh, sky_r, pole_w, pole_h)
         except Exception as e:
             log.debug(f"Pole consensus failed (non-fatal): {e}")
             return True, "pole estimation unavailable"
@@ -557,7 +577,8 @@ class CalibrationService(QObject):
     # Multi-image refinement results
     # ------------------------------------------------------------------
 
-    def _on_refine_done(self, model: FisheyeModel, n_images: int, span_min: float) -> None:
+    def _on_refine_done(self, model: FisheyeModel, n_images: int, span_min: float,
+                        evidence: bool = False) -> None:
         # Discard if Calibrate Now replaced the model while the worker was running.
         if self._refine_gen != self._model_generation:
             log.info("Discarding stale refinement — model was replaced during calibration")
@@ -567,42 +588,11 @@ class CalibrationService(QObject):
         model.span_minutes = round(span_min, 1)
 
         new_q = model_quality(model, n_images, span_min)
-        # Cold-start bootstrap: any valid model is an upgrade from "no model".
-        # Basin escape: the result already passed every admission gate while
-        # the current model keeps failing them — its (possibly flattering) RMS
-        # must not veto the replacement.
-        if self._model is None:
-            improved = True
-        elif self._escape_attempt:
-            improved = True
-            log.warning(
-                "Basin escape succeeded — replacing the repeatedly-rejected "
-                f"model (RMS {self._model.rms_residual:.1f}px) with the "
-                f"re-calibrated one (RMS {model.rms_residual:.1f}px)."
-            )
-        elif is_guided(self._model) and self._model.n_images <= 1 and n_images >= 3:
-            # The original guided solve's RMS is over a handful of clicked
-            # anchors; a multi-image fit's is over thousands of matches across
-            # the sky. They are not comparable, and the multi-image fit is the
-            # better whole-sky model (ALLSKY_CALIBRATION_PLAN: multi-3h beat
-            # the 9-anchor V5 fit despite the higher reported RMS). The
-            # candidate was admitted as the same basin, so a rank upgrade is
-            # enough. Once replaced, both sides carry joint RMS and the normal
-            # guard applies again.
-            improved = (CalibrationQuality.rank(new_q)
-                        > CalibrationQuality.rank(self._quality))
-        else:
-            # Reject if the new model is more than 15% worse by RMS — a
-            # quality-rank upgrade is not sufficient justification for
-            # overwriting a precise model.
-            rms_ok = model.rms_residual <= self._model.rms_residual * 1.15
-            improved = rms_ok and (
-                CalibrationQuality.rank(new_q) > CalibrationQuality.rank(self._quality)
-                or (
-                    model.rms_residual < self._model.rms_residual
-                    and model.n_matches >= self._model.n_matches
-                )
-            )
+        improved, why = should_replace(
+            self._model, self._quality, model, new_q,
+            escape=self._escape_attempt, evidence=evidence)
+        if self._escape_attempt:
+            (log.warning if improved else log.info)(f"Basin escape result: {why}")
 
         self._escape_attempt = False
         if improved:
