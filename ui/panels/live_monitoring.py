@@ -39,25 +39,6 @@ class HistogramWidget(QFrame):
             }}
         """)
     
-    def update_histogram(self, pil_image: Image.Image):
-        """Calculate and store histogram data from image"""
-        try:
-            if pil_image.mode != 'RGB':
-                pil_image = pil_image.convert('RGB')
-            
-            # Calculate histograms
-            np_img = np.array(pil_image)
-            self._hist_data = {
-                'r': np.histogram(np_img[:,:,0], bins=256, range=(0,256))[0],
-                'g': np.histogram(np_img[:,:,1], bins=256, range=(0,256))[0],
-                'b': np.histogram(np_img[:,:,2], bins=256, range=(0,256))[0],
-            }
-            
-            self.update()  # Trigger repaint
-            
-        except Exception as e:
-            pass  # Histogram rendering is non-critical
-    
     def update_from_data(self, hist_data: dict):
         """Update histogram from pre-calculated data
         
@@ -222,6 +203,12 @@ class ActivityLog(QFrame):
         
         self.text_area = QTextEdit()
         self.text_area.setReadOnly(True)
+        # A manual cursor trim frees nothing while undo is on: QTextDocument
+        # keeps every insert *and* every removal on the undo stack, so an
+        # all-night run grows without bound. maximumBlockCount discards the
+        # oldest block in-place instead.
+        self.text_area.setUndoRedoEnabled(False)
+        self.text_area.document().setMaximumBlockCount(self._max_lines)
         self.text_area.setStyleSheet(f"""
             QTextEdit {{
                 background-color: transparent;
@@ -233,28 +220,38 @@ class ActivityLog(QFrame):
         """)
         layout.addWidget(self.text_area)
     
+    @staticmethod
+    def _level_of(message: str) -> str:
+        """Level token from app_logger's '[HH:MM:SS] LEVEL: text' format."""
+        # The timestamp holds colons, so split on the ']' that closes it first.
+        _, bracket, rest = message.partition(']')
+        if not bracket:
+            rest = message
+        level, sep, _ = rest.partition(':')
+        return level.strip() if sep else ''
+
     def append_log(self, message: str):
         """Append a log message"""
-        self.text_area.append(message)
-        
-        # Trim if too many lines
-        doc = self.text_area.document()
-        if doc.blockCount() > self._max_lines:
-            from PySide6.QtGui import QTextCursor
-            cursor = self.text_area.textCursor()
-            cursor.movePosition(QTextCursor.Start)
-            cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, 
-                              doc.blockCount() - self._max_lines)
-            cursor.removeSelectedText()
-        
-        # Auto-scroll to bottom
+        self.append_logs([message])
+
+    def append_logs(self, messages: list):
+        """Append a batch of messages with one repaint and one scroll.
+
+        This is the at-a-glance activity strip, not the log viewer: DEBUG is
+        dropped here so a frame's 15-30 debug lines can't push the interesting
+        events off the visible tail. The Logs page keeps its own level filter.
+        """
+        wanted = [m for m in messages if self._level_of(m) != 'DEBUG']
+        if not wanted:
+            return
+        self.text_area.setUpdatesEnabled(False)
+        try:
+            for msg in wanted:
+                self.text_area.append(msg)
+        finally:
+            self.text_area.setUpdatesEnabled(True)
         scrollbar = self.text_area.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
-    
-    def append_logs(self, messages: list):
-        """Append multiple log messages"""
-        for msg in messages:
-            self.append_log(msg)
 
 
 class LiveMonitoringPanel(QScrollArea):
@@ -471,9 +468,14 @@ class LiveMonitoringPanel(QScrollArea):
         self.progress_bar.hide()
     
     def update_preview(self, pil_image: Image.Image, metadata: dict = None):
-        """Update preview image and related displays"""
+        """Update preview image and related displays.
+
+        The histogram is NOT refreshed here: the worker already computed it
+        from the linear pre-stretch frame and delivered it via preview_ready,
+        which fires first. Recomputing from this (post-stretch, 8-bit) image
+        overwrote that with worse data and cost 200-400 ms on the GUI thread.
+        """
         self.preview.update_image(pil_image, metadata)
-        self.histogram.update_histogram(pil_image)
 
         if metadata:
             dt = metadata.get('timestamp') or metadata.get('DATETIME') or ''

@@ -111,6 +111,12 @@ class LogsPanel(QScrollArea):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setLineWrapMode(QTextEdit.NoWrap)  # Allow horizontal scroll
+        # A manual cursor trim frees nothing while undo is on: QTextDocument
+        # keeps every insert *and* every removal on the undo stack, so an
+        # all-night run grows without bound. maximumBlockCount discards the
+        # oldest block in-place instead.
+        self.log_text.setUndoRedoEnabled(False)
+        self.log_text.document().setMaximumBlockCount(self._max_lines)
         self.log_text.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {Colors.bg_input};
@@ -155,6 +161,8 @@ class LogsPanel(QScrollArea):
     def _on_auto_scroll_changed(self, checked):
         """Handle auto-scroll toggle"""
         self._auto_scroll = checked
+        if checked:
+            self._scroll_to_bottom()
     
     def _clear_logs(self):
         """Clear log display"""
@@ -175,8 +183,12 @@ class LogsPanel(QScrollArea):
         else:
             subprocess.run(['xdg-open', log_dir])
     
-    def append_log(self, message: str):
-        """Append a single log message"""
+    def _scroll_to_bottom(self):
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _append_one(self, message: str):
+        """Render one message into the document. No scrolling — see append_logs."""
         # Color coding based on level
         if "ERROR" in message:
             color = Colors.error_text
@@ -203,23 +215,24 @@ class LogsPanel(QScrollArea):
         
         # Append with color
         self.log_text.append(f'<span style="color: {color};">{message}</span>')
-        
-        # Trim if too many lines
-        doc = self.log_text.document()
-        if doc.blockCount() > self._max_lines:
-            from PySide6.QtGui import QTextCursor
-            cursor = self.log_text.textCursor()
-            cursor.movePosition(QTextCursor.Start)
-            cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor,
-                              doc.blockCount() - self._max_lines)
-            cursor.removeSelectedText()
-        
-        # Auto-scroll
-        if self._auto_scroll:
-            scrollbar = self.log_text.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
-    
+
+    def append_log(self, message: str):
+        """Append a single log message"""
+        self.append_logs([message])
+
     def append_logs(self, messages: list):
-        """Append multiple log messages"""
-        for msg in messages:
-            self.append_log(msg)
+        """Append a batch of log messages with one repaint and one scroll."""
+        if not messages:
+            return
+        # The switch is the only gate: a resize leaves the scrollbar short of
+        # its new maximum, so an "already at bottom" check would silently stop
+        # following after any window/splitter change.
+        follow = self._auto_scroll
+        self.log_text.setUpdatesEnabled(False)
+        try:
+            for msg in messages:
+                self._append_one(msg)
+        finally:
+            self.log_text.setUpdatesEnabled(True)
+        if follow:
+            self._scroll_to_bottom()

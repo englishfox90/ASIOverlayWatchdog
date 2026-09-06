@@ -11,6 +11,8 @@ from PySide6.QtGui import QPixmap, QImage
 
 from PIL import Image
 
+from services.preview_scaling import downscale_for_preview
+
 from ..theme.tokens import Colors, Typography, Spacing, Layout
 from ..theme.icons import qicon
 
@@ -124,11 +126,11 @@ class PreviewWidget(QFrame):
         try:
             if pil_image.mode != 'RGB':
                 pil_image = pil_image.convert('RGB')
-            # Cap at 1920px — no need to keep a full 3552×3552 pixmap for a preview widget
-            w, h = pil_image.size
-            if max(w, h) > 1920:
-                scale = 1920 / max(w, h)
-                pil_image = pil_image.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+            # Guard only. The live path already arrives capped from the
+            # processing worker, so this is a no-op there; it still protects
+            # callers that hand over a full-res frame (overlay preview, tests)
+            # from a multi-hundred-ms LANCZOS resize on the GUI thread.
+            pil_image = downscale_for_preview(pil_image)
             data = pil_image.tobytes('raw', 'RGB')
             qimg = QImage(data, pil_image.width, pil_image.height,
                          pil_image.width * 3, QImage.Format_RGB888)

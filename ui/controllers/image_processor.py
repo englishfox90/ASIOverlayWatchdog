@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from services.logger import app_logger
 from services.notifications import ERROR, ROOF_CHANGED, NotificationEvent
+from services.preview_scaling import downscale_for_preview
 from services.processor import add_overlays, auto_stretch_image
 from services.sharpening import apply_unsharp_mask
 from services.ml_service import get_ml_service, analyze_image_for_tokens
@@ -48,7 +49,7 @@ class ImageProcessorWorker(QThread):
     """Background worker for image processing"""
 
     # Signals
-    processing_complete = Signal(object, object, dict, str, object)  # preview PIL Image, output PIL Image (clean), metadata, output_path, dispatch PIL Image (web + Library)
+    processing_complete = Signal(object, object, dict, str, object)  # GUI preview PIL Image (downscaled to PREVIEW_MAX_PX), output PIL Image (clean, full-res), metadata, output_path, dispatch PIL Image (web + Library, full-res)
     preview_ready = Signal(object, dict)  # clean pre-overlay PIL Image, histogram data
     error_occurred = Signal(str)
     timelapse_ready = Signal(object, object)  # (clean pre-overlay PIL Image, output PIL Image — may carry the all-sky burn-in)
@@ -63,6 +64,10 @@ class ImageProcessorWorker(QThread):
         self._main_window = None  # Reference to main window for camera access
         self._calibration_service = None  # Background calibration accumulation
         self._frame_count = 0
+        # Persistent across frames: without it every capture re-decoded the
+        # user's logo PNG (3051x3079 RGBA on the reference rig — ~150 ms and
+        # ~37 MB of churn per frame). Owned here, mutated only on this thread.
+        self._overlay_image_cache = {}
         # Roof status change tracking for Discord notifications
         self._confirmed_roof_open = None  # None until first ML result
         self._pending_roof_open = None
@@ -408,7 +413,9 @@ class ImageProcessorWorker(QThread):
             # what reaches processing_complete's output_img slot and what
             # watch-mode caches for "Calibrate Now". It must stay clean
             # regardless of the burn-in flags below.
-            output_img = add_overlays(img, overlays, metadata, weather_service=self._weather_service)
+            output_img = add_overlays(img, overlays, metadata,
+                                      image_cache=self._overlay_image_cache,
+                                      weather_service=self._weather_service)
 
             # Overlaid render, computed once — GUI preview always uses it, and
             # it is reused (never re-rendered) for any destination opted into
@@ -421,6 +428,12 @@ class ImageProcessorWorker(QThread):
             save_img = preview_img if burn_cfg.get('saved_file', False) else output_img
             timelapse_img = preview_img if burn_cfg.get('timelapse', False) else output_img
             dispatch_img = preview_img if burn_cfg.get('web', False) else output_img
+
+            # GUI preview only — capped HERE so the LANCZOS downscale runs on
+            # this thread instead of stalling the GUI for ~0.3 s per frame.
+            # preview_img itself stays full-res: with the all-sky overlay off it
+            # IS output_img, and the burn-in destinations above alias it.
+            gui_preview_img = downscale_for_preview(preview_img)
 
             # Timelapse receives the clean image unless opted into burn-in.
             self.timelapse_ready.emit(stretched_for_preview, timelapse_img)
@@ -454,7 +467,7 @@ class ImageProcessorWorker(QThread):
             metadata.pop('RAW_RGB_NO_WB', None)
             
             self.preview_ready.emit(stretched_for_preview, hist_data)
-            self.processing_complete.emit(preview_img, output_img, metadata, output_path, dispatch_img)
+            self.processing_complete.emit(gui_preview_img, output_img, metadata, output_path, dispatch_img)
 
             # Emit processing time
             _timer.__exit__(None, None, None)
@@ -539,7 +552,7 @@ class ImageProcessor(QObject):
     """
     
     # Signals forwarded from worker
-    processing_complete = Signal(object, object, dict, str, object)  # preview PIL Image, output PIL Image (clean), metadata, output_path, dispatch PIL Image (web + Library)
+    processing_complete = Signal(object, object, dict, str, object)  # GUI preview PIL Image (downscaled to PREVIEW_MAX_PX), output PIL Image (clean, full-res), metadata, output_path, dispatch PIL Image (web + Library, full-res)
     preview_ready = Signal(object, dict)  # clean pre-overlay PIL Image, histogram data
     error_occurred = Signal(str)
     timelapse_ready = Signal(object, object)  # (clean pre-overlay PIL Image, output PIL Image — may carry the all-sky burn-in)

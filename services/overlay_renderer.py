@@ -191,6 +191,83 @@ def _add_compass_overlay(img, overlay):
     return img
 
 
+_OVERLAY_CACHE_MAX_PATHS = 6
+_OVERLAY_CACHE_MAX_SIZES = 3
+
+
+def _file_stamp(path):
+    """(mtime_ns, size) used to notice the user replacing an overlay file."""
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _fit_size(src_size, width, height, maintain_aspect):
+    """Resolve the requested overlay size against the source dimensions."""
+    src_w, src_h = src_size
+    target_w = int(width) if width else src_w
+    target_h = int(height) if height else src_h
+
+    if maintain_aspect and (target_w != src_w or target_h != src_h):
+        aspect = src_w / src_h
+        if target_w / target_h > aspect:
+            target_w = int(target_h * aspect)
+        else:
+            target_h = int(target_w / aspect)
+
+    return max(1, target_w), max(1, target_h)
+
+
+def _cached_overlay_image(image_path, overlay, image_cache):
+    """Return the overlay image at its rendered size, reusing image_cache.
+
+    Decoding is the expensive part — a 3000 px RGBA logo costs ~150 ms and
+    ~37 MB per frame — and the LANCZOS resize down to overlay size repeats
+    identically on every frame, so the RESIZED result is what we keep; the
+    full-res source is never held, only its dimensions. An entry is dropped
+    when the file's mtime/size changes (the overlay settings panel lets the
+    user replace a file in place) and both the path count and the per-path
+    size variants are capped, so cycling through files can't grow the dict.
+
+    The returned image may be the cached object — callers must not mutate it.
+    """
+    stamp = _file_stamp(image_path)
+    entry = image_cache.get(image_path) if image_cache is not None else None
+    if entry is not None and entry['stamp'] != stamp:
+        entry = None
+        image_cache.pop(image_path, None)
+
+    if entry is not None:
+        size = _fit_size(entry['src_size'], overlay.get('width'),
+                         overlay.get('height'), overlay.get('maintain_aspect', True))
+        cached = entry['resized'].get(size)
+        if cached is not None:
+            return cached
+
+    app_logger.debug(f"Loading image overlay from: {image_path}")
+    with Image.open(image_path) as src:
+        src.load()
+        src_size = src.size
+        size = _fit_size(src_size, overlay.get('width'), overlay.get('height'),
+                         overlay.get('maintain_aspect', True))
+        img = src.copy() if size == src_size else src.resize(size, Image.Resampling.LANCZOS)
+    app_logger.debug(f"Loaded image: {src_size}, mode: {img.mode}")
+
+    if image_cache is not None:
+        if entry is None:
+            if len(image_cache) >= _OVERLAY_CACHE_MAX_PATHS:
+                image_cache.pop(next(iter(image_cache)), None)
+            entry = {'stamp': stamp, 'src_size': src_size, 'resized': {}}
+            image_cache[image_path] = entry
+        if len(entry['resized']) >= _OVERLAY_CACHE_MAX_SIZES:
+            entry['resized'].pop(next(iter(entry['resized'])))
+        entry['resized'][size] = img
+
+    return img
+
+
 def add_image_overlay(base_img, overlay, image_cache=None, weather_service=None):
     """
     Add an image overlay to the base image.
@@ -232,42 +309,18 @@ def add_image_overlay(base_img, overlay, image_cache=None, weather_service=None)
             app_logger.warning(f"Image overlay path does not exist: {image_path}")
             return base_img
 
-        if image_cache is not None and image_path in image_cache:
-            overlay_img = image_cache[image_path].copy()
-        else:
-            app_logger.debug(f"Loading image overlay from: {image_path}")
-            overlay_img = Image.open(image_path)
-            app_logger.debug(f"Loaded image: {overlay_img.size}, mode: {overlay_img.mode}")
-
-            if image_cache is not None:
-                image_cache[image_path] = overlay_img.copy()
-
-        target_width = overlay.get('width', overlay_img.width)
-        target_height = overlay.get('height', overlay_img.height)
-        maintain_aspect = overlay.get('maintain_aspect', True)
-
-        if maintain_aspect and (target_width != overlay_img.width or target_height != overlay_img.height):
-            aspect_ratio = overlay_img.width / overlay_img.height
-            if target_width / target_height > aspect_ratio:
-                target_width = int(target_height * aspect_ratio)
-            else:
-                target_height = int(target_width / aspect_ratio)
-
-        if target_width != overlay_img.width or target_height != overlay_img.height:
-            overlay_img = overlay_img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+        overlay_img = _cached_overlay_image(image_path, overlay, image_cache)
+        target_width, target_height = overlay_img.size
 
         opacity = overlay.get('opacity', 100)
-        if opacity < 100 and overlay_img.mode in ('RGBA', 'LA'):
-            alpha = overlay_img.split()[3 if overlay_img.mode == 'RGBA' else 1]
-            alpha = alpha.point(lambda p: int(p * opacity / 100))
-            overlay_img.putalpha(alpha)
-        elif opacity < 100:
-            overlay_img = overlay_img.convert('RGBA')
-            alpha = Image.new('L', overlay_img.size, int(255 * opacity / 100))
-            overlay_img.putalpha(alpha)
-
         if overlay_img.mode != 'RGBA':
-            overlay_img = overlay_img.convert('RGBA')
+            overlay_img = overlay_img.convert('RGBA')  # convert() already returns a new image
+        elif opacity < 100:
+            overlay_img = overlay_img.copy()  # putalpha below must not touch the cached object
+
+        if opacity < 100:
+            alpha = overlay_img.split()[3].point(lambda p: int(p * opacity / 100))
+            overlay_img.putalpha(alpha)
 
         anchor = overlay.get('anchor', 'Bottom-Right')
         x_offset = overlay.get('offset_x', 10)

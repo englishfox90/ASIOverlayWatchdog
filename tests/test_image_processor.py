@@ -191,3 +191,99 @@ def test_frame_factory_returning_nothing_skips_the_frame(worker, tmp_path):
 def test_task_takes_ownership_of_the_image_without_copying():
     img = Image.new('RGB', (4, 4))
     assert ImageProcessingTask(img, {}, {}).img is img
+
+
+# ---------------------------------------------------------------------------
+# Preview downscale — the LANCZOS resize belongs on the worker, not the GUI
+# thread. Only the GUI preview slot shrinks; every full-res consumer keeps its
+# pixels.
+# ---------------------------------------------------------------------------
+
+def test_gui_preview_is_capped_while_output_and_dispatch_stay_full_res(worker, tmp_path):
+    from services.preview_scaling import PREVIEW_MAX_PX
+
+    worker._main_window = None
+    big = Image.new('RGB', (2628, 2628), (30, 40, 50))
+    results = []
+    worker.processing_complete.connect(
+        lambda preview, out, meta, path, dispatch: results.append((preview, out, dispatch)))
+
+    worker._process_task(ImageProcessingTask(
+        big, {'FILENAME': 'big.png'}, _base_config(tmp_path, {'enabled': False})))
+
+    assert results, "processing_complete did not fire"
+    preview, output, dispatch = results[0]
+    assert max(preview.size) == PREVIEW_MAX_PX
+    assert output.size == (2628, 2628), "output image must keep full resolution"
+    assert dispatch.size == (2628, 2628), "web/Library dispatch must keep full resolution"
+
+
+def test_timelapse_and_detection_frames_are_not_downscaled_by_the_preview_cap(worker, tmp_path):
+    worker._main_window = None
+    big = Image.new('RGB', (2628, 2628), (30, 40, 50))
+    cfg = _base_config(tmp_path, {'enabled': False})
+    cfg['meteor'] = {'enabled': True, 'detection_long_side': 1280}
+
+    timelapse, detection = [], []
+    worker.timelapse_ready.connect(lambda clean, overlaid: timelapse.append((clean, overlaid)))
+    worker.detection_frame_ready.connect(lambda det, full: detection.append((det, full)))
+
+    worker._process_task(ImageProcessingTask(big, {'FILENAME': 'big.png'}, cfg))
+
+    assert timelapse and detection
+    clean, overlaid = timelapse[0]
+    assert clean.size == (2628, 2628) and overlaid.size == (2628, 2628)
+    det_frame, full_clean = detection[0]
+    assert max(det_frame.size) == 1280  # its own detection scale, untouched
+    assert full_clean.size == (2628, 2628)
+
+
+def test_saved_file_keeps_full_resolution(worker, tmp_path):
+    worker._main_window = None
+    big = Image.new('RGB', (2628, 2628), (30, 40, 50))
+    paths = []
+    worker.processing_complete.connect(lambda p, o, m, path, d: paths.append(path))
+
+    worker._process_task(ImageProcessingTask(
+        big, {'FILENAME': 'big.png'}, _base_config(tmp_path, {'enabled': False})))
+
+    assert Image.open(paths[0]).size == (2628, 2628)
+
+
+def test_small_frame_reaches_the_preview_untouched(worker, tmp_path):
+    worker._main_window = None
+    small = Image.new('RGB', (640, 480), (30, 40, 50))
+    results = []
+    worker.processing_complete.connect(lambda p, o, m, path, d: results.append((p, o)))
+
+    worker._process_task(ImageProcessingTask(
+        small, {'FILENAME': 'small.png'}, _base_config(tmp_path, {'enabled': False})))
+
+    preview, output = results[0]
+    assert preview.size == (640, 480) and output.size == (640, 480)
+
+
+def test_worker_reuses_one_overlay_image_cache_across_frames(worker, tmp_path):
+    """The worker must hand the SAME cache dict to add_overlays every frame —
+    a per-frame dict would re-decode the user's logo on every capture."""
+    seen = []
+    import ui.controllers.image_processor as ip
+
+    def _spy(img, overlays, metadata, image_cache=None, weather_service=None):
+        seen.append(image_cache)
+        return img
+
+    original = ip.add_overlays
+    ip.add_overlays = _spy
+    try:
+        worker._main_window = None
+        cfg = _base_config(tmp_path, {'enabled': False})
+        for _ in range(2):
+            worker._process_task(ImageProcessingTask(
+                Image.new('RGB', (32, 32)), {'FILENAME': 'x.png'}, cfg))
+    finally:
+        ip.add_overlays = original
+
+    assert len(seen) == 2
+    assert seen[0] is not None and seen[0] is seen[1]
+    assert seen[0] is worker._overlay_image_cache
