@@ -295,6 +295,17 @@ def detect_stars(
     if gray is None:
         return []
 
+    # Deliberately NOT percentile-stretched, unlike _scan_sky_circle. A linear
+    # frame with a ~2 ADU sky median (issue #10) yields far fewer detections
+    # than the stretched FITS path (63 vs 200+ on the reference frame), but
+    # the stretch's p99 clip turns every bright star into a flat 255 plateau:
+    # measured on real data it shifts the hand-confirmed anchors by 1-3 px
+    # (vs 0.1 px linear), drops some once the amplified halo exceeds max_area,
+    # and fails the known-good model at the bright-anchor gate at two of five
+    # exposure levels, while the extra faint detections add no catalog
+    # precision to the top-200. Fewer, accurately centred detections are the
+    # right trade for calibration. See tests/test_allsky_star_centroid.py.
+
     h, w = gray.shape
 
     # --- Auto-detect sky circle if not supplied ---
