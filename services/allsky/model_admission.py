@@ -55,7 +55,11 @@ Trust ladder, highest first. `FisheyeModel.provenance` records the rung:
    Calibrate Now without one, or a legacy file) — inherits nothing. The
    candidate is gated by the measured pole alone, and only when
    pole_consensus trusts one. Two uncorroborated fits at different scales
-   are symmetric ignorance; neither may veto the other.
+   are symmetric ignorance; neither may veto the other. An uncorroborated
+   incumbent climbs to rung 2 in place the first time a trusted pole
+   confirms where it projects the pole (incumbent_evidence
+   .corroborate_incumbent, run by the refine worker before admission) —
+   it does not have to wait for a candidate to be admitted on its behalf.
 
 Plate-scale continuity: SCALE_CONTINUITY_MAX_DEV = 10 %. Same-rig fits agree
 far closer than that — guided vs refined on the #10 rig 1.011, bootstrap vs

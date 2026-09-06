@@ -209,9 +209,9 @@ class TestBasinEscape:
         w = _RefineWorker([], None, 5, 30.0)
         # (model, n_images, span_min, evidence)
         received = []
-        w.finished.connect(lambda *a: received.append(a))
+        w.result_ready.connect(lambda *a: received.append(a))
         m = _model(rms=5.0, n_matches=50)
-        w.finished.emit(m, 5, 30.0, True)
+        w.result_ready.emit(m, 5, 30.0, True)
         assert received == [(m, 5, 30.0, True)]
 
     def test_non_escape_regression_still_rejected(self):

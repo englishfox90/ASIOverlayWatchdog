@@ -19,11 +19,15 @@ contaminated and *no* estimate should gate anything. So:
     calibration_validate.validate_pole skips on None). A dominant mode is
     one cluster holding at least DOMINANT_MODE_FRACTION of the found runs:
     strict unimodality let a single outlier run disable the gate for a
-    full history length, and a withheld pole is no longer free — it is
-    also the evidence that lets a basin escape displace an uncorroborated
-    model (model_admission, calibration_service). The #10 log never puts
-    more than a third of any window into one cluster, so it is still
-    rejected outright;
+    full history length. The #10 log never puts more than a third of any
+    window into one cluster, so it is still rejected outright;
+  - a run in which no pole was found (a withheld window) is judged against
+    the history like any other: an established consensus is still returned
+    for it. A withheld run is not free — with the gate off, an escape is
+    admitted "no pole estimate — check skipped" and, against an
+    uncorroborated incumbent, wins on fit numbers alone; that is how a
+    wrong-basin model was installed on 2026-09-05 between two trusted
+    readings of the same pole;
   - an estimate that is itself outside the dominant mode is the outlier
     and is not trusted, even though the history is;
   - a pole found in fewer than half of the recent runs is flickering — a
@@ -301,16 +305,24 @@ class PoleHistory:
         """Record this run's estimate and return the one the gate may use.
 
         One call per physical measurement (the refine worker, once per run).
-        Returns None when there is nothing to trust: no estimate this run,
-        no dominant mode, this estimate outside it, or a pole found in
-        fewer than half the recent runs.
+        Returns None when there is nothing to trust: no dominant mode, this
+        estimate outside it, or a pole found in fewer than half the recent
+        runs. A miss this run does NOT by itself return None — an
+        established consensus survives one withheld window (module doc).
         """
         with self._lock:
             self._runs.append(estimate)
             if estimate is not None:
                 self._found.append(estimate)
             runs, votes = list(self._runs), list(self._found)
-        result = consensus(runs, sky_r, votes) if estimate is not None else None
+        # A miss is judged against the history like any other run rather
+        # than returning None outright. On 2026-09-05 the pole had been found
+        # at the same spot in 11 consecutive runs when one window was
+        # withheld; that single None switched the gate off for exactly the
+        # run in which a basin escape installed a wrong-basin model, and the
+        # next run (pole back) rejected its refinement at 311 px. The found
+        # fraction still retires a consensus once misses dominate.
+        result = consensus(runs, sky_r, votes)
         with self._lock:
             self._runs_since_trusted = (
                 0 if result is not None else self._runs_since_trusted + 1)

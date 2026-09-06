@@ -17,14 +17,22 @@ Thread safety:
   - feed_frame() is called from the image-processor worker thread.
   - _maybe_refine() runs on the main thread (via queued signal).
   - _RefineWorker runs in its own QThread.
+
+Worker ownership:
+  Workers are created UNPARENTED and retired via QThread.finished (see
+  _retire_worker). Parenting them to this long-lived service made Shiboken
+  keep every past QThread alive, each pinning its payload — measured at
+  477 MB after ten refinements, ~2.2 GB over a night on the reference rig.
 """
-import copy
+import functools
+import os
+import shutil
 import threading
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from PySide6.QtCore import QObject, Signal, QThread
+from PySide6.QtCore import QObject, Signal
 
 from services.logger import app_logger as log
 
@@ -32,13 +40,14 @@ from .star_centroid import detect_stars, measure_sky_circle
 from .fisheye import FisheyeModel
 from .catalogs import get_bright_stars
 from .coords import radec_to_altaz
-from .calibration import calibrate, CalibrationError
 from .calibration_quality import CalibrationQuality, model_quality  # re-exported for existing callers
 from .calibration_validate import median_frame_resolution
-from .model_admission import (
-    admission_evidence, admit_candidate, admit_manual, east_left_hint)
+from .calibration_workers import (  # re-exported for existing callers
+    MAX_RESIDUAL_PX, _InitialCalWorker, _RefineWorker)
+from .incumbent_evidence import incumbent_anchor_health
+from .model_admission import admit_manual
 from .model_replacement import should_replace
-from .multi_calibrate import median_sky_r, refine_from_detections
+from .multi_calibrate import median_sky_r
 from .pole_consensus import PoleHistory
 from .pole_finder import find_pole
 
@@ -63,7 +72,16 @@ MIN_FRAMES_BOOTSTRAP = 15
 
 REFINE_COOLDOWN_S = 120     # seconds between refinement attempts
 INITIAL_COOLDOWN_S = 180    # seconds between initial single-image cal attempts
-MAX_RESIDUAL_PX = 20.0      # max accepted median residual (pixels)
+
+# Failure back-off. The cooldown is measured from when a run *completes*, not
+# when it is triggered: a run takes 40 s to several minutes, so the flat
+# trigger-relative 120 s left refinement occupying roughly half of every night.
+# On top of that, a seed that cannot be refined fails identically every time
+# (33 consecutive rejections in one production log), so each consecutive
+# failure doubles the wait up to a half-hour ceiling. Reset by any run that
+# completes, and by a user reset.
+REFINE_BACKOFF_MAX_DOUBLINGS = 4
+REFINE_COOLDOWN_MAX_S = 1800
 
 # Basin escape: a wrong-basin model on disk seeds every refinement into its
 # own basin, whose polished result the sanity gates then reject — a permanent
@@ -72,93 +90,6 @@ MAX_RESIDUAL_PX = 20.0      # max accepted median residual (pixels)
 # and let a gate-passing result replace the model outright.
 BASIN_ESCAPE_FAILURES = 3
 ESCAPE_COOLDOWN_S = 600     # bootstrap fits are expensive; don't spam them
-
-
-# ---------------------------------------------------------------------------
-# Background workers
-# ---------------------------------------------------------------------------
-
-class _RefineWorker(QThread):
-    """Run multi-image joint calibration in a background thread."""
-
-    # (FisheyeModel, n_images, span_min, admitted on evidence?) — the last
-    # is model_admission.admission_evidence, which _on_refine_done needs to
-    # decide whether a basin-escape result may bypass the RMS guard.
-    finished = Signal(object, int, float, bool)
-    failed = Signal(str)                   # error message
-
-    def __init__(self, frames, seed_model, n_images: int, span_min: float,
-                 lat: float = 0.0, incumbent=None, pole_history=None,
-                 parent=None):
-        super().__init__(parent)
-        self._frames = frames
-        self._seed = seed_model            # None = seedless (cold start / escape)
-        self._incumbent = incumbent        # model the result would replace
-        self._pole_history = pole_history or PoleHistory()
-        self._n_images = n_images
-        self._span_min = span_min
-        self._lat = lat
-
-    def run(self):
-        try:
-            # Model-free ground truth from the same buffer: the measured
-            # celestial pole, filtered through the cross-run consensus. None
-            # is normal (short span, cloudy or hidden pole, contaminated
-            # field) and simply skips the pole check. This is the ONLY place
-            # a measurement is recorded — one entry per physical run.
-            sky_r = median_sky_r(self._frames)
-            pole = None
-            try:
-                pole = self._pole_history.record(
-                    find_pole(self._frames, self._lat), sky_r)
-            except Exception as e:
-                log.debug(f"Pole estimation failed (non-fatal): {e}")
-            # Runs without a trusted pole age the incumbent's 'pole' rung
-            # (model_admission); read after record() so this run counts.
-            drought = self._pole_history.runs_since_trusted
-
-            model = refine_from_detections(
-                self._frames,
-                self._seed,
-                max_residual_px=MAX_RESIDUAL_PX,
-                east_left_hint=east_left_hint(self._incumbent, pole, drought),
-            )
-            pole_w, pole_h = median_frame_resolution(self._frames)
-            ok, msg = admit_candidate(
-                model, self._incumbent, self._lat, pole, sky_r,
-                pole_image_width=pole_w, pole_image_height=pole_h,
-                runs_without_pole=drought)
-            if not ok:
-                raise CalibrationError(f"admission check failed: {msg}")
-            log.info(f"Refinement admitted: {msg}")
-            evidence = admission_evidence(self._incumbent, pole, drought)
-            self.finished.emit(model, self._n_images, self._span_min, evidence)
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
-class _InitialCalWorker(QThread):
-    """Run single-image calibration when no model exists yet."""
-
-    finished = Signal(object)   # FisheyeModel
-    failed = Signal(str)
-
-    def __init__(self, image, lat, lon, dt, parent=None):
-        super().__init__(parent)
-        self._image = image
-        self._lat = lat
-        self._lon = lon
-        self._dt = dt
-
-    def run(self):
-        try:
-            model = calibrate(
-                self._image, self._lat, self._lon, dt=self._dt,
-                min_matches=6,
-            )
-            self.finished.emit(model)
-        except Exception as e:
-            self.failed.emit(str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +138,10 @@ class CalibrationService(QObject):
         self._consecutive_refine_failures = 0
         self._last_escape_time = 0.0
         self._escape_attempt = False
+        # Back-off counter, separate from _consecutive_refine_failures: that
+        # one drives basin escape and deliberately ignores cold-start and
+        # stale-seed failures. Back-off must count every fruitless run.
+        self._refine_backoff_failures = 0
         # Cross-run pole consensus (pole_consensus.py). Survives set_model /
         # clear_model: it describes the field, not the model.
         self._pole_history = PoleHistory()
@@ -240,6 +175,7 @@ class CalibrationService(QObject):
         self._model = None
         self._model_generation += 1
         self._consecutive_refine_failures = 0
+        self._refine_backoff_failures = 0
         self._escape_attempt = False
         if self._quality != CalibrationQuality.NONE:
             self._quality = CalibrationQuality.NONE
@@ -254,6 +190,7 @@ class CalibrationService(QObject):
         self._model = model
         self._model_generation += 1
         self._consecutive_refine_failures = 0
+        self._refine_backoff_failures = 0
         self._escape_attempt = False
         new_q = model_quality(model, model.n_images, model.span_minutes)
         with self._lock:
@@ -316,8 +253,7 @@ class CalibrationService(QObject):
             now = time.monotonic()
             if (now - self._last_initial_attempt_time >= INITIAL_COOLDOWN_S
                     and self._pending_initial is None
-                    and (self._initial_worker is None
-                         or not self._initial_worker.isRunning())):
+                    and self._initial_worker is None):
                 self._pending_initial = (image.copy(), dt, lat, lon)
 
         self._check_refine.emit()
@@ -441,10 +377,13 @@ class CalibrationService(QObject):
 
     def _maybe_refine(self) -> None:
         """Check thresholds and start the appropriate worker."""
-        # --- Guard: worker already running ---
-        if self._refine_worker and self._refine_worker.isRunning():
+        # --- Guard: a worker is still live ---
+        # `is not None` rather than isRunning(): the slot is None only once
+        # _retire_worker has run, so a worker is never dropped (and possibly
+        # garbage-collected) between finishing and being retired.
+        if self._refine_worker is not None:
             return
-        if self._initial_worker and self._initial_worker.isRunning():
+        if self._initial_worker is not None:
             return
 
         # --- Fast path: single-image initial cal when queued ---
@@ -454,7 +393,7 @@ class CalibrationService(QObject):
 
         # --- Cooldown (shared by refinement and cold-start bootstrap) ---
         now = time.monotonic()
-        if now - self._last_refine_time < REFINE_COOLDOWN_S:
+        if now - self._last_refine_time < self._refine_cooldown():
             return
 
         # --- Threshold checks ---
@@ -479,19 +418,43 @@ class CalibrationService(QObject):
             if span_min < min_span:
                 return
 
-            frames_copy = copy.deepcopy(self._frames)
+            # Shallow: frame dicts and their 'detected'/'above_horizon' lists
+            # are never mutated after append, and every consumer
+            # (refine_from_detections, find_pole, model_admission) reads them
+            # only. Deep-copying cost ~43 MB per refinement (measured, 60
+            # frames x 8.4k catalogue entries) because it duplicated the shared
+            # catalogue star dicts once per frame; a snapshot list costs ~0.
+            frames_copy = list(self._frames)
+
+        # An escape presumes the seed is the problem. Hold the incumbent to
+        # the same bright-anchor test its refinements keep failing: if it
+        # passes on the recent frames, the refinements are what is broken
+        # (2026-09-05: 26 rejections while the incumbent drew a correct
+        # overlay; the escape installed a wrong-basin model). Refine as
+        # usual instead and re-ask after the escape cooldown.
+        if escape:
+            self._last_escape_time = now
+            health = incumbent_anchor_health(self._model, frames_copy)
+            if health is True:
+                log.warning(
+                    f"CalibrationService: {self._consecutive_refine_failures} "
+                    "consecutive refinement rejections, but the current model "
+                    "passes the bright-anchor check on the recent frames — the "
+                    "seed is healthy and the refinements are what is failing. "
+                    "Not escaping; keeping the current model.")
+                escape = False
+                cold_start = False
+        self._escape_attempt = escape
 
         # seed=None -> _RefineWorker bootstraps a coarse orientation seed
         # (cold start / basin escape). Otherwise it refines the existing model.
         if escape:
-            self._last_escape_time = now
             log.warning(
                 f"CalibrationService: {self._consecutive_refine_failures} "
                 "consecutive refinement rejections \u2014 the current model may be "
                 "a wrong-basin fit poisoning the seed. Attempting a seedless "
                 "re-calibration (basin escape)."
             )
-        self._escape_attempt = escape
         mode = ("basin escape" if escape
                 else "cold-start bootstrap" if cold_start else "refinement")
         log.info(f"CalibrationService: triggering {mode} "
@@ -504,18 +467,57 @@ class CalibrationService(QObject):
         self._refine_worker = _RefineWorker(
             frames_copy, None if cold_start else self._model, n, span_min,
             lat=self._lat, incumbent=self._model,
-            pole_history=self._pole_history, parent=self,
+            pole_history=self._pole_history,
         )
-        self._refine_worker.finished.connect(self._on_refine_done)
+        self._refine_worker.result_ready.connect(self._on_refine_done)
         self._refine_worker.failed.connect(self._on_refine_failed)
+        self._refine_worker.incumbent_corroborated.connect(
+            self._on_incumbent_corroborated)
+        self._refine_worker.finished.connect(
+            functools.partial(self._retire_worker, self._refine_worker))
         self._refine_worker.start()
+
+    def _on_incumbent_corroborated(self, why: str) -> None:
+        """Persist the 'pole' stamp incumbent_evidence put on the current
+        model (the worker mutates the shared instance; only this thread
+        writes the file). A model swapped in meanwhile carries its own
+        provenance and is left alone."""
+        if self._refine_gen != self._model_generation or self._model is None:
+            return
+        log.info(f"CalibrationService: {why} — model now locks mirror/scale/"
+                 "basin against automatic replacements")
+        self._save_model(self._model, stamp_time=False)
+
+    def _refine_cooldown(self) -> float:
+        """Seconds to wait after the last refinement before trying again."""
+        n = min(self._refine_backoff_failures, REFINE_BACKOFF_MAX_DOUBLINGS)
+        return min(float(REFINE_COOLDOWN_S * (2 ** n)),
+                   float(REFINE_COOLDOWN_MAX_S))
+
+    def _retire_worker(self, worker) -> None:
+        """Free a finished worker and everything it pinned.
+
+        Connected to QThread.finished, so it runs on this object's thread
+        after run() has returned - safe to delete the QThread. The worker is
+        bound at connect time rather than read from sender(): a None sender
+        would leave the slot occupied forever and silently stop all further
+        refinement on a 24/7 process.
+        """
+        release = getattr(worker, 'release', None)
+        if release is not None:
+            release()
+        if self._refine_worker is worker:
+            self._refine_worker = None
+        if self._initial_worker is worker:
+            self._initial_worker = None
+        worker.deleteLater()
 
     # ------------------------------------------------------------------
     # Initial single-image calibration
     # ------------------------------------------------------------------
 
     def _start_initial_cal(self) -> None:
-        if self._initial_worker and self._initial_worker.isRunning():
+        if self._initial_worker is not None:
             return
 
         image, dt, lat, lon = self._pending_initial
@@ -524,11 +526,11 @@ class CalibrationService(QObject):
         log.info("CalibrationService: starting initial single-image calibration")
         self.status_changed.emit("Auto-calibrating\u2026")
 
-        self._initial_worker = _InitialCalWorker(
-            image, lat, lon, dt, parent=self,
-        )
-        self._initial_worker.finished.connect(self._on_initial_done)
+        self._initial_worker = _InitialCalWorker(image, lat, lon, dt)
+        self._initial_worker.result_ready.connect(self._on_initial_done)
         self._initial_worker.failed.connect(self._on_initial_failed)
+        self._initial_worker.finished.connect(
+            functools.partial(self._retire_worker, self._initial_worker))
         self._initial_worker.start()
 
     def _on_initial_done(self, model: FisheyeModel) -> None:
@@ -579,6 +581,10 @@ class CalibrationService(QObject):
 
     def _on_refine_done(self, model: FisheyeModel, n_images: int, span_min: float,
                         evidence: bool = False) -> None:
+        # Restart the cooldown from completion, not from the trigger: a run
+        # lasts 40 s to several minutes (see REFINE_BACKOFF_MAX_DOUBLINGS).
+        self._last_refine_time = time.monotonic()
+        self._refine_backoff_failures = 0
         # Discard if Calibrate Now replaced the model while the worker was running.
         if self._refine_gen != self._model_generation:
             log.info("Discarding stale refinement — model was replaced during calibration")
@@ -623,6 +629,8 @@ class CalibrationService(QObject):
 
     def _on_refine_failed(self, error: str) -> None:
         self._escape_attempt = False
+        self._last_refine_time = time.monotonic()
+        self._refine_backoff_failures += 1
         if self._model:
             # Only count failures of refinements seeded by the CURRENT model —
             # a late failure from a superseded seed says nothing about it.
@@ -630,7 +638,8 @@ class CalibrationService(QObject):
                 self._consecutive_refine_failures += 1
             log.warning(
                 f"Calibration refinement failed "
-                f"({self._consecutive_refine_failures} consecutive): {error}")
+                f"({self._consecutive_refine_failures} consecutive): {error}. "
+                f"Next attempt in {self._refine_cooldown() / 60.0:.0f} min.")
             # Restore previous status text
             self.status_changed.emit(
                 f"Calibrated: {self._model.n_matches} stars, "
@@ -645,12 +654,26 @@ class CalibrationService(QObject):
     # Persistence
     # ------------------------------------------------------------------
 
-    def _save_model(self, model: FisheyeModel) -> None:
-        """Save model to the production calibration file."""
+    def _save_model(self, model: FisheyeModel, stamp_time: bool = True) -> None:
+        """Save model to the production calibration file.
+
+        The file being overwritten is copied to the backup path first: an
+        automatic replacement is the one write the user did not ask for, and
+        on 2026-09-05 it destroyed the only copy of a correct model.
+        `stamp_time=False` re-saves the same model (a provenance stamp)
+        without moving its calibration timestamp.
+        """
         try:
-            from services.app_config import get_calibration_path
+            from services.app_config import (
+                get_calibration_backup_path, get_calibration_path)
             cal_path = get_calibration_path()
-            model.calibrated_at = datetime.now(timezone.utc).isoformat()
+            if stamp_time and os.path.isfile(cal_path):
+                try:
+                    shutil.copyfile(cal_path, get_calibration_backup_path())
+                except OSError as e:
+                    log.warning(f"Could not back up the previous calibration: {e}")
+            if stamp_time:
+                model.calibrated_at = datetime.now(timezone.utc).isoformat()
             model.save(cal_path)
             log.info(f"Calibration saved to {cal_path}")
         except Exception as e:

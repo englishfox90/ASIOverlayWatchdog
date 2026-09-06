@@ -58,3 +58,9 @@ def get_calibration_path() -> str:
     controller, and dev tools never diverge.
     """
     return os.path.join(get_app_data_dir(), 'allsky_calibration.json')
+
+
+def get_calibration_backup_path() -> str:
+    """Where the previous calibration goes before an automatic save
+    overwrites it — the one-step undo for a bad model replacement."""
+    return os.path.join(get_app_data_dir(), 'allsky_calibration.previous.json')

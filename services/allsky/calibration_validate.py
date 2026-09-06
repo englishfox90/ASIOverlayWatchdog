@@ -187,22 +187,59 @@ def validate_bright_anchors(
     if sky_r is not None:
         max_miss_px = max_miss_px * tol_scale(sky_r)
 
-    bright = [
-        (s, alt, az) for s, alt, az in above_horizon
-        if alt >= min_alt_deg
-    ][:top_n]
-
-    if len(bright) < min_hits:
-        return True, (f"only {len(bright)} bright anchors above "
+    n_bright = len(select_bright_anchors(above_horizon, top_n, min_alt_deg))
+    if n_bright < min_hits:
+        return True, (f"only {n_bright} bright anchors above "
                       f"{min_alt_deg:.0f}° — skipping validation")
 
     if not detected:
         return False, "no detected stars to validate against"
 
-    det_xy = np.array([(dx, dy) for dx, dy, *_ in detected], dtype=float)
+    hits, n_bright, misses = count_anchor_hits(
+        model, above_horizon, detected, top_n=top_n,
+        min_alt_deg=min_alt_deg, max_miss_px=max_miss_px)
 
-    hits = 0
+    if hits >= min_hits:
+        return True, f"{hits}/{n_bright} bright anchors matched"
+
+    miss_str = ", ".join(
+        f"{name}({d:.0f}px)" if np.isfinite(d) else f"{name}(off-image)"
+        for name, d in misses[:5]
+    )
+    return False, (f"only {hits}/{n_bright} bright anchors within "
+                   f"{max_miss_px:.0f}px (missed: {miss_str})")
+
+
+def select_bright_anchors(above_horizon: List[Tuple], top_n: int = 12,
+                          min_alt_deg: float = 40.0) -> List[Tuple]:
+    """The anchor pool validate_bright_anchors tests: brightest `top_n`
+    catalog stars above `min_alt_deg` (input is sorted brightest-first)."""
+    return [(s, alt, az) for s, alt, az in above_horizon
+            if alt >= min_alt_deg][:top_n]
+
+
+def count_anchor_hits(
+    model,
+    above_horizon: List[Tuple],
+    detected: List[Tuple],
+    top_n: int = 12,
+    min_alt_deg: float = 40.0,
+    max_miss_px: float = 40.0,
+) -> Tuple[int, int, List[Tuple[str, float]]]:
+    """(hits, n_bright, misses) for the bright-anchor pool against `detected`.
+
+    `max_miss_px` is taken as already scaled to the frame. `misses` lists
+    (name, distance) with inf for anchors the model projects off-image.
+    Shared by validate_bright_anchors (candidate gate) and
+    incumbent_evidence (is the model on disk still hitting its anchors?).
+    """
+    bright = select_bright_anchors(above_horizon, top_n, min_alt_deg)
     misses: List[Tuple[str, float]] = []
+    if not detected:
+        return 0, len(bright), [(s.get('name', '?'), float('inf'))
+                                for s, _alt, _az in bright]
+    det_xy = np.array([(dx, dy) for dx, dy, *_ in detected], dtype=float)
+    hits = 0
     for star, alt, az in bright:
         xy = model.altaz_to_pixel(float(alt), float(az))
         if xy is None:
@@ -215,16 +252,37 @@ def validate_bright_anchors(
             hits += 1
         else:
             misses.append((star.get('name', '?'), d_min))
+    return hits, len(bright), misses
 
-    if hits >= min_hits:
-        return True, f"{hits}/{len(bright)} bright anchors matched"
 
-    miss_str = ", ".join(
-        f"{name}({d:.0f}px)" if np.isfinite(d) else f"{name}(off-image)"
-        for name, d in misses[:5]
+def model_in_frame(model, frame_width: Optional[int], frame_height: Optional[int]):
+    """`model` expressed in a (frame_width x frame_height) frame.
+
+    Same cx/cy/a1/a3/a5 scaling overlay_renderer applies at render time.
+    Returned unchanged when either resolution is unknown, when they already
+    match, or when the aspect ratios differ (a crop, not a resize — no
+    single factor relates the pixels, so the caller compares unscaled).
+    """
+    m_w = int(getattr(model, 'image_width', 0) or 0)
+    m_h = int(getattr(model, 'image_height', 0) or 0)
+    if not (frame_width and frame_height and m_w > 0 and m_h > 0):
+        return model
+    if int(frame_width) == m_w and int(frame_height) == m_h:
+        return model
+    ar_model = m_w / m_h
+    ar_frame = frame_width / frame_height
+    if abs(ar_model - ar_frame) / max(ar_model, ar_frame) > 0.02:
+        log.debug(
+            f"model_in_frame: model resolution {m_w}x{m_h} vs frame "
+            f"{frame_width}x{frame_height} — aspect mismatch, comparing unscaled")
+        return model
+    s = float(frame_width) / m_w
+    return replace(
+        model,
+        cx=model.cx * s, cy=model.cy * s,
+        a1=model.a1 * s, a3=model.a3 * s, a5=model.a5 * s,
+        image_width=int(frame_width), image_height=int(frame_height),
     )
-    return False, (f"only {hits}/{len(bright)} bright anchors within "
-                   f"{max_miss_px:.0f}px (missed: {miss_str})")
 
 
 # ---------------------------------------------------------------------------
@@ -431,27 +489,7 @@ def validate_pole(
             "mirrored fit"
         )
 
-    proj_model = model
-    m_w = int(getattr(model, 'image_width', 0) or 0)
-    m_h = int(getattr(model, 'image_height', 0) or 0)
-    if (pole_image_width and pole_image_height and m_w > 0 and m_h > 0
-            and (int(pole_image_width) != m_w or int(pole_image_height) != m_h)):
-        ar_model = m_w / m_h
-        ar_pole = pole_image_width / pole_image_height
-        if abs(ar_model - ar_pole) / max(ar_model, ar_pole) <= 0.02:
-            s = float(pole_image_width) / m_w
-            proj_model = replace(
-                model,
-                cx=model.cx * s, cy=model.cy * s,
-                a1=model.a1 * s, a3=model.a3 * s, a5=model.a5 * s,
-                image_width=int(pole_image_width), image_height=int(pole_image_height),
-            )
-        else:
-            log.debug(
-                f"validate_pole: model resolution {m_w}x{m_h} vs pole frame "
-                f"{pole_image_width}x{pole_image_height} — aspect mismatch, "
-                "skipping rescale (comparing unscaled)"
-            )
+    proj_model = model_in_frame(model, pole_image_width, pole_image_height)
 
     alt = abs(float(lat_deg))
     az = 0.0 if lat_deg >= 0 else 180.0

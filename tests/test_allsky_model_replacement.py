@@ -17,7 +17,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from services.allsky.calibration_quality import model_quality
 from services.allsky.fisheye import FisheyeModel
-from services.allsky.model_replacement import RMS_REGRESSION_TOLERANCE, should_replace
+from services.allsky.model_replacement import (
+    ESCAPE_MIN_RMS_GAIN, RMS_REGRESSION_TOLERANCE, should_replace)
 
 
 def _m(rms, n_matches, n_images=20, span=60.0, **over):
@@ -124,3 +125,49 @@ class TestRmsGuard:
     def test_fewer_matches_is_not_an_improvement(self):
         ok, why = _decide(_m(8.0, 80), _m(6.0, 60))
         assert not ok and 'not better' in why
+
+
+class TestEscapeMaterialGain:
+    """2026-09-05: an evidence-free escape (axis_alt 84° → 67°, centre moved
+    ~98 px) was installed over a correct model on RMS 8.03 vs 8.04 px with
+    828 vs 767 matches. Noise between two fits of one lens must not pick a
+    basin."""
+    INCUMBENT = dict(rms=8.04, n_matches=767, n_images=40, span=80.0)
+    ESCAPE = dict(rms=8.03, n_matches=828, n_images=60, span=47.0)
+
+    def test_the_incident_swap_is_refused(self):
+        ok, why = _decide(_m(**self.INCUMBENT), _m(**self.ESCAPE),
+                          escape=True, evidence=False)
+        assert not ok
+        assert 'not a material improvement' in why
+
+    def test_same_numbers_as_a_seeded_refinement_still_win(self):
+        """The floor is for escapes only: a seeded refinement of the same
+        basin may improve by a hair."""
+        ok, _ = _decide(_m(**self.INCUMBENT), _m(**self.ESCAPE),
+                        escape=False, evidence=False)
+        assert ok
+
+    def test_same_numbers_on_evidence_still_win(self):
+        ok, _ = _decide(_m(**self.INCUMBENT), _m(**self.ESCAPE),
+                        escape=True, evidence=True)
+        assert ok
+
+    def test_floor_boundary(self):
+        inc = _m(10.0, 500)
+        ok, _ = _decide(inc, _m(10.0 * ESCAPE_MIN_RMS_GAIN, 500),
+                        escape=True, evidence=False)
+        assert ok
+        ok, _ = _decide(inc, _m(10.0 * ESCAPE_MIN_RMS_GAIN + 0.01, 500),
+                        escape=True, evidence=False)
+        assert not ok
+
+    def test_rank_upgrade_alone_does_not_carry_an_escape(self):
+        weak = _m(8.0, 300, n_images=3, span=6.0)        # low rank
+        strong_rank = _m(7.9, 900, n_images=60, span=90.0)  # high rank, tiny gain
+        assert _decide(weak, strong_rank, escape=False)[0]
+        assert not _decide(weak, strong_rank, escape=True, evidence=False)[0]
+
+    def test_fewer_matches_never_win_an_escape(self):
+        ok, _ = _decide(_m(10.0, 1000), _m(5.0, 400), escape=True, evidence=False)
+        assert not ok

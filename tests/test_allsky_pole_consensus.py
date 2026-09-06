@@ -516,3 +516,48 @@ class TestResolution:
         assert to_frame(e, 1000, 800) is None
         assert to_frame(e, 0, 0) is e
         assert to_frame(est(1, 1), 1000, 500) is not None
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-05: one withheld window must not switch the gate off
+# ---------------------------------------------------------------------------
+
+class TestWithheldRunKeepsConsensus:
+    """The rig log: the pole was found at (1350, 447) in 11 consecutive runs,
+    the 12th window was withheld, and in that one run a basin escape was
+    admitted "no pole estimate — check skipped" and installed a wrong-basin
+    model. The next run had the pole back and rejected it at 311 px."""
+
+    def _eleven_then_a_miss(self):
+        h = PoleHistory()
+        for i in range(11):
+            h.record(est(1350 + 0.1 * i, 447), 1563.0)
+        return h, h.record(None, 1563.0)
+
+    def test_miss_after_established_consensus_is_still_trusted(self):
+        h, r = self._eleven_then_a_miss()
+        assert r is not None
+        assert abs(r.x - 1351) < 2 and abs(r.y - 447) < 1
+        assert h.runs_since_trusted == 0
+
+    def test_the_escape_candidate_is_vetoed_in_the_withheld_run(self):
+        _h, r = self._eleven_then_a_miss()
+        wrong = replace(_reference_model(), axis_alt=67.6, cx=1172.1, cy=1376.5)
+        ok, msg = validate_pole(wrong, LAT, r, sky_r=1563.0)
+        assert not ok and 'wrong-basin' in msg
+
+    def test_misses_still_retire_a_consensus_once_they_dominate(self):
+        """A camera repositioned so Polaris is hidden must age out."""
+        h = PoleHistory()
+        for _ in range(4):
+            h.record(est(1350, 447), 1563.0)
+        for _ in range(4):
+            assert h.record(None, 1563.0) is not None    # 4/8 .. found ≥ half
+        assert h.record(None, 1563.0) is None            # 4/9 < MIN_FOUND_FRACTION
+        assert h.runs_since_trusted == 1
+
+    def test_a_miss_on_a_contaminated_history_is_still_nothing(self):
+        h = PoleHistory()
+        for x, y in ISSUE_10_RUNS[:6]:
+            h.record(est(x, y), 1563.0)
+        assert h.record(None, 1563.0) is None
