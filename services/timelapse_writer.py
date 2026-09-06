@@ -18,18 +18,10 @@ from .logger import app_logger
 from .ffmpeg_utils import is_ffmpeg_available, get_ffmpeg_path
 from .timelapse_finalizer import finalize_session, finalize_in_background, reap_in_background
 from .timelapse_frame_pump import FramePump
-
-
-def _to_local_naive(dt: datetime) -> datetime:
-    """Convert a tz-aware datetime to naive local time.
-
-    astral returns tz-aware UTC; the rest of the writer compares against
-    datetime.now(), which is naive LOCAL. Stripping tzinfo without converting
-    (the old bug) shifted the window by the host's UTC offset — hours wrong off
-    the prime meridian. astimezone() with no argument converts to the system's
-    local zone first, so the naive result lines up with datetime.now().
-    """
-    return dt.astimezone().replace(tzinfo=None)
+from .timelapse_window import (
+    WindowCache, fixed_window, sun_window,
+    to_local_naive as _to_local_naive,  # re-exported for existing callers
+)
 
 
 class TimelapseWriter:
@@ -69,7 +61,13 @@ class TimelapseWriter:
         self._frame_size: Optional[Tuple[int, int]] = None  # (width, height)
         self._frame_count: int = 0
         self._session_path: Optional[str] = None
+        # Immutable status snapshot, republished under the lock on every state
+        # change so get_status() never has to take the lock — see
+        # _publish_status_locked(). Tuple of
+        # (process, frame_count, session_path, session_start).
+        self._status_snapshot: tuple = (None, 0, None, None)
         self._config: dict = {}
+        self._window_cache = WindowCache()
         self._last_in_window: Optional[bool] = None   # for transition logging
         self._last_enabled: bool = False               # for configure change logging
         self._stderr_thread: Optional[threading.Thread] = None
@@ -221,9 +219,18 @@ class TimelapseWriter:
 
                 if self._process is not None and self._process.poll() is None:
                     try:
+                        # The write stays UNDER the lock on purpose. It blocks
+                        # until libx264 drains the frame, but releasing the
+                        # lock around it would let stop()/rollover detach and
+                        # finalize this very process mid-write (closing the
+                        # stdin we are writing to) and let the frame-count
+                        # bookkeeping below land on the next session. The GUI
+                        # no longer waits on this lock: get_status() is
+                        # snapshot-based and add_frame()'s acquire is bounded.
                         self._process.stdin.write(frame_bytes)
                         self._process.stdin.flush()
                         self._frame_count += 1
+                        self._publish_status_locked()
                         # Session is proving healthy — clear crash-loop state.
                         if self._restart_failures and self._frame_count >= self._HEALTHY_FRAME_THRESHOLD:
                             self._restart_failures = 0
@@ -272,6 +279,7 @@ class TimelapseWriter:
         self._process = None
         self._session_date = None
         self._session_start = None
+        self._publish_status_locked()
         return spec
 
     def _handle_unexpected_exit(self, now: datetime):
@@ -282,6 +290,7 @@ class TimelapseWriter:
         """
         exit_code = self._process.poll()
         self._process = None
+        self._publish_status_locked()
         self._apply_exit_guard(now, exit_code=exit_code)
 
     def _handle_broken_pipe(self, now: datetime):
@@ -290,11 +299,12 @@ class TimelapseWriter:
         Caller holds ``self._lock``. Detach the (possibly zombie) process — the
         old path leaked it — and run the cheap crash-loop guard under the lock,
         but hand the blocking kill()/wait() to a background reaper: doing it
-        under the lock would stall get_status() (the UI's 5s status poll) for up
-        to the reap timeout.
+        under the lock would hold it for up to the reap timeout, which is long
+        enough to blow through add_frame()'s bounded acquire and drop frames.
         """
         proc = self._process
         self._process = None
+        self._publish_status_locked()
         if proc is not None:
             reap_in_background(proc)
         self._apply_exit_guard(now, exit_code='broken-pipe')
@@ -376,20 +386,39 @@ class TimelapseWriter:
             with self._lock:
                 self._shutting_down = False
 
+    def _publish_status_locked(self):
+        """Republish the immutable snapshot that get_status() reads.
+
+        Caller holds ``self._lock``. A single reference assignment is atomic
+        under CPython, so a reader binds all four fields together or not at
+        all and never needs the lock — the same pattern as
+        ``web_output.latest_image_snapshot``. This is what keeps the GUI out of
+        the lock: the pump worker holds it across a blocking multi-MB ffmpeg
+        write (0.4-1.5s on a native-resolution frame) while the GUI polls
+        status every 200ms during capture.
+        """
+        self._status_snapshot = (
+            self._process, self._frame_count, self._session_path, self._session_start,
+        )
+
     def get_status(self) -> dict:
-        """Return current timelapse status for UI display."""
-        with self._lock:
-            proc = self._process
-            recording = proc is not None and proc.poll() is None
-            elapsed = 0
-            if self._session_start and recording:
-                elapsed = int((datetime.now() - self._session_start).total_seconds())
-            return {
-                'recording': recording,
-                'frame_count': self._frame_count,
-                'session_path': self._session_path,
-                'elapsed_seconds': elapsed,
-            }
+        """Return current timelapse status for UI display.
+
+        Deliberately lock-free — see _publish_status_locked(). ``poll()`` is
+        non-blocking and safe off-thread; the process in the snapshot is only
+        ever the live session's, cleared before any finalize touches it.
+        """
+        proc, frame_count, session_path, session_start = self._status_snapshot
+        recording = proc is not None and proc.poll() is None
+        elapsed = 0
+        if session_start and recording:
+            elapsed = int((datetime.now() - session_start).total_seconds())
+        return {
+            'recording': recording,
+            'frame_count': frame_count,
+            'session_path': session_path,
+            'elapsed_seconds': elapsed,
+        }
 
     # ------------------------------------------------------------------ #
     #  Session management                                                  #
@@ -438,6 +467,7 @@ class TimelapseWriter:
             self._session_start = now
             self._session_path = output_path
             self._frame_count = 0
+            self._publish_status_locked()
 
             from .posthog_service import capture_event
             _res_labels = {0: 'native', 1920: '1920p', 1440: '1440p', 1280: '1280p', 720: '720p'}
@@ -478,9 +508,11 @@ class TimelapseWriter:
         except FileNotFoundError:
             app_logger.error("Timelapse: ffmpeg executable not found")
             self._process = None
+            self._publish_status_locked()
         except Exception as e:
             app_logger.error(f"Timelapse: failed to start ffmpeg: {e}")
             self._process = None
+            self._publish_status_locked()
 
     def _ffmpeg_available_cached(self, now: datetime) -> bool:
         """Cache is_ffmpeg_available() for _FFMPEG_PROBE_COOLDOWN seconds.
@@ -545,101 +577,18 @@ class TimelapseWriter:
             return False
 
     def _get_window_for_day(self, day: date) -> Tuple[datetime, datetime]:
+        """Today's recording window, memoized — see timelapse_window.WindowCache.
+
+        Only reached from _is_in_window(), which runs under ``self._lock``, so
+        the cache needs no synchronisation of its own.
         """
-        Return (window_start, window_end) for the given day.
-
-        For overnight windows (e.g. 18:00 → 06:00) the window_end
-        is on the following day.  The current time is tested against
-        windows anchored on both today and yesterday so sessions
-        started yesterday are still considered active.
-        """
-        mode = self._config.get('window_mode', 'sun')
-
-        if mode == 'always':
-            # Full day: midnight to next midnight
-            start = datetime.combine(day, datetime.min.time())
-            end = datetime.combine(day + timedelta(days=1), datetime.min.time())
-            return start, end
-
-        if mode == 'fixed':
-            return self._fixed_window(day)
-
-        # Default: sun-based
-        return self._sun_window(day)
+        return self._window_cache.window_for_day(self._config, day)
 
     def _fixed_window(self, day: date) -> Tuple[datetime, datetime]:
-        """Parse fixed HH:MM start/end into datetimes, handling midnight crossing."""
-        def parse_time(s: str, fallback: str) -> datetime:
-            try:
-                h, m = map(int, s.split(':'))
-            except Exception:
-                h, m = map(int, fallback.split(':'))
-            return datetime.combine(day, datetime.strptime(f"{h}:{m}", "%H:%M").time())
-
-        start = parse_time(self._config.get('fixed_start', '18:00'), '18:00')
-        end = parse_time(self._config.get('fixed_end', '06:00'), '06:00')
-
-        # If end is earlier than start, it crosses midnight → add a day
-        if end <= start:
-            end = end + timedelta(days=1)
-
-        return start, end
+        return fixed_window(self._config, day)
 
     def _sun_window(self, day: date) -> Tuple[datetime, datetime]:
-        """Calculate sunset→sunrise window using the astral library."""
-        try:
-            from astral import LocationInfo
-            from astral.sun import sun, time_at_elevation, SunDirection
-
-            lat = self._config.get('sun_latitude')
-            lon = self._config.get('sun_longitude')
-            if lat is None or lon is None:
-                raise ValueError("No coordinates configured for sun mode")
-
-            loc = LocationInfo(latitude=float(lat), longitude=float(lon))
-            sun_mode = self._config.get('sun_mode', 'astronomical')
-            tomorrow = day + timedelta(days=1)
-
-            if sun_mode == 'sunset_sunrise':
-                s_today = sun(loc.observer, date=day)
-                s_tomorrow = sun(loc.observer, date=tomorrow)
-                window_start = _to_local_naive(s_today['sunset'])
-                window_end = _to_local_naive(s_tomorrow['sunrise'])
-
-            elif sun_mode == 'civil':
-                s_today = sun(loc.observer, date=day)
-                s_tomorrow = sun(loc.observer, date=tomorrow)
-                window_start = _to_local_naive(s_today['dusk'])
-                window_end = _to_local_naive(s_tomorrow['dawn'])
-
-            elif sun_mode == 'nautical':
-                window_start = _to_local_naive(time_at_elevation(
-                    loc.observer, -12, date=day,
-                    direction=SunDirection.SETTING
-                ))
-                window_end = _to_local_naive(time_at_elevation(
-                    loc.observer, -12, date=tomorrow,
-                    direction=SunDirection.RISING
-                ))
-
-            else:  # astronomical
-                window_start = _to_local_naive(time_at_elevation(
-                    loc.observer, -18, date=day,
-                    direction=SunDirection.SETTING
-                ))
-                window_end = _to_local_naive(time_at_elevation(
-                    loc.observer, -18, date=tomorrow,
-                    direction=SunDirection.RISING
-                ))
-
-            return window_start, window_end
-
-        except ImportError:
-            app_logger.warning("Timelapse: astral not available, falling back to fixed window")
-            return self._fixed_window(day)
-        except Exception as e:
-            app_logger.warning(f"Timelapse: sun window error ({e}), falling back to fixed window")
-            return self._fixed_window(day)
+        return sun_window(self._config, day)
 
     # ------------------------------------------------------------------ #
     #  ffmpeg helpers                                                      #

@@ -308,6 +308,10 @@ DEFAULT_CONFIG = {
         "playback_fps": 24,            # Output video playback frame rate
         "video_crf": 23,               # H.264 CRF quality (0-51, lower=better, 23=default)
         "video_preset": "fast",        # ffmpeg preset (ultrafast/fast/medium/slow)
+        # Longest output side in px; 0 = native. Encoding a 2628x2628 sensor at
+        # native resolution makes every piped frame ~20MB and puts libx264
+        # seconds behind the capture — 1920 is the panel's default option too.
+        "output_max_dim": 1920,        # 0 (native) | 1920 | 1440 | 1280 | 720
         "include_overlays": False,     # False = clean frame, True = frame with overlays
         "output_dir": "",              # "" = AppData/PFRSentinel/timelapse/
         "max_videos_to_keep": 30,      # Auto-delete oldest beyond this many days

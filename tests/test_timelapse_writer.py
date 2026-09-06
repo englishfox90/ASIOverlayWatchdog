@@ -282,40 +282,8 @@ class _HealthyProcess:
         self.killed = True
 
 
-# --------------------------------------------------------------------------- #
-#  T1 — sun window uses local wall-clock, not UTC-with-tzinfo-stripped         #
-# --------------------------------------------------------------------------- #
-
-def test_sun_window_converts_utc_to_local_naive(monkeypatch):
-    """astral returns tz-aware UTC; the window must be naive LOCAL wall-clock,
-    not UTC with tzinfo merely stripped (which shifted the window by the host's
-    UTC offset)."""
-    from datetime import datetime, date, timezone, timedelta
-    import astral.sun as astral_sun
-
-    plus5 = timezone(timedelta(hours=5))
-    fake_sunset = datetime(2026, 1, 1, 18, 0, tzinfo=plus5)   # 13:00 UTC
-    fake_sunrise = datetime(2026, 1, 2, 6, 0, tzinfo=plus5)   # 01:00 UTC
-
-    def fake_sun(observer, date=None):
-        # s_today supplies 'sunset'; s_tomorrow supplies 'sunrise'.
-        return {'sunset': fake_sunset, 'sunrise': fake_sunrise}
-    monkeypatch.setattr(astral_sun, 'sun', fake_sun)
-
-    writer = TimelapseWriter()
-    writer.configure({
-        'enabled': True, 'window_mode': 'sun', 'sun_mode': 'sunset_sunrise',
-        'sun_latitude': 51.5, 'sun_longitude': 0.0,
-    })
-
-    ws, we = writer._sun_window(date(2026, 1, 1))
-
-    assert ws == fake_sunset.astimezone().replace(tzinfo=None)
-    assert we == fake_sunrise.astimezone().replace(tzinfo=None)
-    # On any host whose local offset isn't +5h, the buggy .replace(tzinfo=None)
-    # (→ 18:00 naive) differs from the correct local instant.
-    if datetime.now().astimezone().utcoffset() != timedelta(hours=5):
-        assert ws != fake_sunset.replace(tzinfo=None)
+# T1 (sun-window local wall-clock) now lives in tests/test_timelapse_window.py,
+# alongside the module that owns the schedule maths.
 
 
 # --------------------------------------------------------------------------- #
@@ -675,3 +643,100 @@ def test_orphan_removed_for_short_stub(monkeypatch, temp_dir):
     writer.flush()
     assert not os.path.exists(created)
     assert writer._restart_failures == 1
+
+
+# --------------------------------------------------------------------------- #
+#  get_status() — lock-free snapshot                                           #
+# --------------------------------------------------------------------------- #
+
+def test_get_status_does_not_block_on_a_held_lock(monkeypatch, temp_dir):
+    """GUI-thread safety: the pump worker holds self._lock across the blocking
+    ffmpeg write (0.4-1.5s for a native-resolution frame). get_status() is
+    polled every 200ms during capture, so it must read the published snapshot
+    instead of contending for that lock."""
+    import threading
+    from datetime import datetime
+    writer, popen_calls, procs = _wire_writer(
+        monkeypatch, temp_dir, _HealthyProcess, datetime(2026, 1, 1, 22, 0, 0))
+
+    writer.add_frame(_frame())
+    writer.flush()
+    assert len(procs) == 1
+
+    holder_in = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with writer._lock:
+            holder_in.set()
+            release.wait(5.0)
+
+    t = threading.Thread(target=hold_lock)
+    t.start()
+    try:
+        assert holder_in.wait(2.0)
+        t0 = time.perf_counter()
+        status = writer.get_status()
+        elapsed = time.perf_counter() - t0
+    finally:
+        release.set()
+        t.join(timeout=2)
+
+    assert elapsed < 0.05, elapsed
+    assert status['recording'] is True
+    assert status['frame_count'] == 1
+
+
+def test_status_snapshot_tracks_session_lifecycle(monkeypatch, temp_dir):
+    """The snapshot must carry the same state the locked read used to: live
+    after start, counting frames, elapsed from the session start, and not
+    recording once the session is stopped."""
+    from datetime import datetime, timedelta
+    writer, popen_calls, procs = _wire_writer(
+        monkeypatch, temp_dir, _HealthyProcess, datetime(2026, 1, 1, 22, 0, 0))
+    img = _frame()
+
+    assert writer.get_status() == {
+        'recording': False, 'frame_count': 0,
+        'session_path': None, 'elapsed_seconds': 0,
+    }
+
+    for _ in range(3):
+        writer.add_frame(img)
+        writer.flush()
+
+    status = writer.get_status()
+    assert status['recording'] is True
+    assert status['frame_count'] == 3
+    assert status['session_path'] == popen_calls[0]
+    assert status['elapsed_seconds'] == 0        # clock hasn't moved yet
+
+    _Clock._now = _Clock._now + timedelta(seconds=90)
+    assert writer.get_status()['elapsed_seconds'] == 90
+
+    writer.stop()
+    stopped = writer.get_status()
+    assert stopped['recording'] is False
+    assert stopped['elapsed_seconds'] == 0
+    assert stopped['frame_count'] == 3           # last session's count is retained
+
+
+# --------------------------------------------------------------------------- #
+#  Default output resolution                                                   #
+# --------------------------------------------------------------------------- #
+
+def test_default_output_max_dim_downscales_to_1920():
+    """Without a default, a 2628x2628 sensor encoded at native resolution —
+    ~20MB per piped frame. The shipped default must cap the longest side, and
+    must be one of the panel dropdown's values."""
+    from services.config_defaults import DEFAULT_CONFIG
+
+    max_dim = DEFAULT_CONFIG['timelapse']['output_max_dim']
+    assert max_dim == 1920
+    assert max_dim in {0, 1920, 1440, 1280, 720}   # ui/panels/timelapse_panel _res_map
+
+    vf = _vf(TimelapseWriter(), (2628, 2628), max_dim)
+    assert vf == (
+        'scale=1920:1920:force_original_aspect_ratio=decrease,'
+        'crop=trunc(iw/2)*2:trunc(ih/2)*2'
+    )
